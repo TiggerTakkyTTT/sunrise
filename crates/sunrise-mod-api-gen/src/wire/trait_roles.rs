@@ -13,6 +13,7 @@ use std::{
 struct Roles {
     imports: Vec<&'static str>,
     exports: Vec<&'static str>,
+    held: Vec<&'static str>,
 }
 thread_local! {
     static CURRENT: Cell<Option<&'static Roles>> = const { Cell::new(None) };
@@ -20,28 +21,42 @@ thread_local! {
 // Method descriptors already retain static owner names. Intern each distinct
 // source surface once for the generation process; fixture roots can select
 // different surfaces concurrently without contaminating one another.
-type Key = (Vec<String>, Vec<String>);
+type Key = (Vec<String>, Vec<String>, Vec<String>);
 static SURFACES: OnceLock<Mutex<BTreeMap<Key, &'static Roles>>> = OnceLock::new();
 
+/// The roles of one source surface, as discovered from its role files.
+pub(super) struct Declared {
+    pub imports: Vec<String>,
+    /// Every export, `.held` ones and the capability handlers included.
+    pub exports: Vec<String>,
+    /// The exports the game also hands a mod objects of.
+    pub held: Vec<String>,
+    /// What cargo must watch: the role files and their folder.
+    pub paths: Vec<PathBuf>,
+}
+
+fn current(pick: fn(&Roles) -> &[&'static str]) -> &'static [&'static str] {
+    CURRENT.with(|current| current.get().map_or(&[][..], pick))
+}
 pub(super) fn imports() -> &'static [&'static str] {
-    CURRENT.with(|current| {
-        current
-            .get()
-            .map_or(super::IMPORTS, |roles| roles.imports.as_slice())
-    })
+    current(|roles| &roles.imports)
 }
 pub(super) fn exports() -> &'static [&'static str] {
-    CURRENT.with(|current| {
-        current
-            .get()
-            .map_or(super::EXPORTS, |roles| roles.exports.as_slice())
-    })
+    current(|roles| &roles.exports)
 }
-pub(super) fn select(imports: Vec<String>, exports: Vec<String>) {
+pub(super) fn held() -> &'static [&'static str] {
+    current(|roles| &roles.held)
+}
+pub(super) fn select(declared: &Declared) {
     let mut surfaces = SURFACES.get_or_init(Mutex::default).lock().unwrap();
+    let key = (
+        declared.imports.clone(),
+        declared.exports.clone(),
+        declared.held.clone(),
+    );
     let roles = *surfaces
-        .entry((imports, exports))
-        .or_insert_with_key(|(imports, exports)| {
+        .entry(key)
+        .or_insert_with_key(|(imports, exports, held)| {
             let intern = |names: &[String]| {
                 names
                     .iter()
@@ -51,23 +66,27 @@ pub(super) fn select(imports: Vec<String>, exports: Vec<String>) {
             Box::leak(Box::new(Roles {
                 imports: intern(imports),
                 exports: intern(exports),
+                held: intern(held),
             }))
         });
     CURRENT.with(|current| current.set(Some(roles)));
 }
 
-pub(super) fn declared(root: &Path) -> Result<(Vec<String>, Vec<String>, Vec<PathBuf>), String> {
+/// Read the role files in file-name order, which is the order of the call table (and so of the
+/// call ids): `<Trait>.import`, `<Trait>.export`, or `<Trait>.held` for an export the game also
+/// hands a mod objects of.
+pub(super) fn declared(root: &Path) -> Result<Declared, String> {
     let directory = root.join("crates/sunrise-mod-vocab/src/wire/traits");
-    let mut imports: Vec<_> = super::IMPORTS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
-    let mut exports: Vec<_> = super::EXPORTS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect();
+    let mut imports = Vec::new();
+    let mut exports = Vec::new();
+    let mut held = Vec::new();
     if !directory.exists() {
-        return Ok((imports, exports, Vec::new()));
+        return Ok(Declared {
+            imports,
+            exports,
+            held,
+            paths: Vec::new(),
+        });
     }
     let mut paths = std::fs::read_dir(&directory)
         .map_err(|error| format!("{}: {error}", directory.display()))?
@@ -78,16 +97,21 @@ pub(super) fn declared(root: &Path) -> Result<(Vec<String>, Vec<String>, Vec<Pat
         })
         .collect::<Result<Vec<_>, _>>()?;
     paths.sort();
-    let mut seen: HashSet<_> = imports.iter().chain(&exports).cloned().collect();
+    let mut seen = HashSet::new();
     for path in &paths {
         let role = path.extension().and_then(|value| value.to_str());
         let target = match role {
             Some("import") => &mut imports,
             Some("export") => &mut exports,
+            Some("held") => {
+                let name = path.file_stem().and_then(|value| value.to_str());
+                held.extend(name.map(str::to_owned));
+                &mut exports
+            }
             Some("md") => continue,
             _ => {
                 return Err(format!(
-                    "{}: expected a .import or .export trait role",
+                    "{}: expected a .import, .export or .held trait role",
                     path.display()
                 ));
             }
@@ -108,5 +132,10 @@ pub(super) fn declared(root: &Path) -> Result<(Vec<String>, Vec<String>, Vec<Pat
     }
     // Cargo must rerun when a new independent trait file is added or removed.
     paths.push(directory);
-    Ok((imports, exports, paths))
+    Ok(Declared {
+        imports,
+        exports,
+        held,
+        paths,
+    })
 }

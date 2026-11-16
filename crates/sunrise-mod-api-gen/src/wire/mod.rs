@@ -19,68 +19,6 @@ use std::path::Path;
 use syn::{FnArg, Item, Pat, ReturnType, TraitItem};
 use ty::{Ty, Types};
 
-/// Traits a mod calls: their methods are the world's imports.
-pub(super) const IMPORTS: &[&str] = &[
-    "Host",
-    "ServerHost",
-    "ClientHost",
-    "Backend",
-    "BackendMut",
-    "ClientBackendMut",
-    "DrawContext",
-    "BlockEntityDrawContext",
-    "WorldDrawContext",
-    "CameraDrawContext",
-    "LevelHost",
-    "LevelRandomHost",
-    "LevelTicksHost",
-    "LevelWriteHost",
-    "ConfigFiles",
-    "Commands",
-    "Levels",
-    "Messages",
-    "Players",
-    "RuntimeLevels",
-    "ClientSession",
-    "RenderAssets",
-    "InstanceGroups",
-    "Tags",
-    "Registrar",
-    "CapabilityProviders",
-    "TicketValidation",
-    "DataLoadContext",
-    "LoopContext",
-    "WorldgenHost",
-    "ChunkDiskHost",
-    "GenerationContext",
-    "PieceContext",
-    "StructureRandom",
-    "AttachmentStore",
-    "AttachmentDeclarations",
-    "ServerReloadListeners",
-    "GameTests",
-    "ClientReloadListeners",
-    "PackFinders",
-    "ColorResolvers",
-    "BlockTintSources",
-    "CauldronInteractions",
-    "SectionGeometryRenderers",
-    "SectionGeometryContext",
-    "ParticleProviders",
-    "EnchantmentDamageEffects",
-    "PoiTypeExtensions",
-    "VillagerProfessions",
-    "LoadConditions",
-    "CauldronFluidContents",
-    "BlockAndTintGetter",
-    "GroundLevel",
-    "BlockMetadata",
-    "ServerReloadResources",
-    "CriterionContext",
-    "UnspawnedMobEdits",
-    "PendingChildrenEdits",
-];
-
 /// Imported traits a call never hands over, each reached through another's method instead.
 pub(super) const REACHED: &[(&str, &str, &str)] = &[
     ("ConfigFiles", "", ""),
@@ -138,46 +76,14 @@ pub(super) const FILE_ROOTS: &[(u8, &str, &str)] = &[
     (2, "ServerHost", "world_data_files"),
 ];
 
-/// Traits a mod implements: their methods are the world's exports. The handler traits the
-/// capability keys name join them (`exports`).
-const EXPORTS: &[&str] = &[
-    "Hooks",
-    "ReloadApply",
-    "BlockEntityTransform",
-    "StructureType",
-    "StructurePiece",
-    "BlockPart",
-    "BlockEntityPart",
-    "ItemPart",
-    "MenuPart",
-    "FluidPart",
-    "EntityPart",
-    "ServerReloadListener",
-    "LoadCondition",
-    "GameTestFunction",
-    "ClientReloadListener",
-    "BiomeColorResolver",
-    "BlockTintSource",
-    "Interaction",
-    "SectionGeometry",
-    "ParticleProvider",
-    "EnchantmentDamageEffect",
-    "CommandArgumentType",
-    "EntitySelectorType",
-    "GroundStateProvider",
-    "PlaceProvider",
-    "TooltipAppender",
-    "CriterionTest",
-];
-
-/// Every exported trait: [`EXPORTS`], then the handler traits `mod_api`'s capability keys name
-/// (`ResourceHandler<ItemResource>`), each instance of a generic one its own export. Set once,
-/// by `surface`.
+/// Every exported trait: the `.export` and `.held` role files, then the handler traits `mod_api`'s
+/// capability keys name (`ResourceHandler<ItemResource>`), each instance of a generic one its own
+/// export. Set once, by `surface`.
 pub(super) fn exports() -> &'static [&'static str] {
     trait_roles::exports()
 }
 
-/// All imported traits, including discovered per-item declarations.
+/// Every imported trait: the `.import` role files.
 pub(super) fn imports() -> &'static [&'static str] {
     trait_roles::imports()
 }
@@ -186,7 +92,7 @@ pub(super) fn imports() -> &'static [&'static str] {
 /// another mod's provider): the mod calls one through the `held-<interface>` imports, by the
 /// index the game keeps it under.
 pub(super) fn held(owner: &str) -> bool {
-    owner == "PlaceProvider" || (exports().contains(&owner) && !EXPORTS.contains(&owner))
+    owner == "PlaceProvider" || trait_roles::held().contains(&owner)
 }
 
 /// The contexts of the load phase: the catalog's registration and data-load contexts and a
@@ -363,16 +269,21 @@ pub(super) fn surface_reading<'a>(
 ) -> Result<Surface<'a>, String> {
     let mut types = Types::new(Index::new(root, included))?;
     let api = types.index.module("mod_api", &[])?;
-    let (imported, mut exported, paths) = trait_roles::declared(root)?;
-    types.index.read.borrow_mut().extend(paths);
+    let mut declared = trait_roles::declared(root)?;
+    types
+        .index
+        .read
+        .borrow_mut()
+        .extend(std::mem::take(&mut declared.paths));
     for shape in key_shapes(&mut types.index)? {
         for owner in [shape.handler.clone(), shape.provider()] {
-            if !exported.contains(&owner) {
-                exported.push(owner);
+            if !declared.exports.contains(&owner) {
+                declared.held.push(owner.clone());
+                declared.exports.push(owner);
             }
         }
     }
-    trait_roles::select(imported, exported);
+    trait_roles::select(&declared);
     let mut methods = Vec::new();
     let mut unbound = Vec::new();
     let mut excused = Vec::new();
