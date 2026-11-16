@@ -2471,3 +2471,22 @@ fn shared_memory_and_atomics_are_refused_and_an_ordinary_member_links() {
         .is_none()
     );
 }
+
+// The frame tries its sources in an order that follows the role files' names, so a call that
+// lent two sources serving one trait is refused in debug builds instead of picking by name.
+#[test]
+#[cfg(debug_assertions)]
+fn a_frame_lending_two_sources_for_one_trait_is_refused_in_debug() {
+    let read = mod_api::testing::FakeHost::new();
+    let mut server = mod_api::testing::FakeHost::new();
+    let mut frame = Frame::default();
+    // SAFETY: both hosts outlive the frame's use below.
+    unsafe {
+        frame.set_host(&read);
+        assert!(frame.host().is_ok());
+        frame.set_server_host_mut(&mut server);
+        let overlap =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.host().is_ok()));
+        assert!(overlap.is_err());
+    }
+}

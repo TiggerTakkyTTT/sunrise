@@ -154,9 +154,23 @@ fn frame(surface: &mut super::Surface<'_>) -> Result<String, String> {
                     choices.push(format!("self.{source}{filter}.map(|(p,_)| unsafe {{ (&{s}*p).{}() as &{m}dyn {path} }})", method.name));
                 }
             }
+            // The sources are tried in an order that comes from file names, so it must never
+            // decide: a call lends at most one of the sources that serve this trait.
+            let overlap = if choices.len() > 1 {
+                format!(
+                    "debug_assert!([{}].into_iter().filter(|set| *set).count() <= 1, \"overlapping frame sources for {name}\");",
+                    choices
+                        .iter()
+                        .map(|choice| format!("{choice}.is_some()"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            };
             let expr = choices.join(".or_else(|| ");
             let expr = format!("{expr}{}", ")".repeat(choices.len().saturating_sub(1)));
-            writeln!(methods, "pub unsafe fn {name}{suffix}(&self) -> Result<&'static {m}dyn {path}, ServeError> {{ {expr}.ok_or(ServeError::Missing(\"{name}\")) }}", suffix=if mutable {"_mut"} else {""}, m=if mutable {"mut "} else {""}).unwrap();
+            writeln!(methods, "pub unsafe fn {name}{suffix}(&self) -> Result<&'static {m}dyn {path}, ServeError> {{ {overlap}{expr}.ok_or(ServeError::Missing(\"{name}\")) }}", suffix=if mutable {"_mut"} else {""}, m=if mutable {"mut "} else {""}).unwrap();
         }
     }
     Ok(format!(
