@@ -26,6 +26,8 @@ pub trait RandomSource {
     /// `Mth.randomBetweenInclusive(random, min, max)`: an `i32` in `min..=max`, drawn as
     /// `next_int_bound(max - min + 1) + min`. For `max < min` it returns `min` without drawing,
     /// where vanilla throws. The arithmetic wraps rather than panics.
+    ///
+    /// Computed in the mod: drawn through `next_int_bound`, never asked of the game by itself.
     fn next_int_between_inclusive(&mut self, min: i32, max: i32) -> i32 {
         self.next_int_bound(max.wrapping_sub(min).wrapping_add(1))
             .wrapping_add(min)
@@ -33,6 +35,8 @@ pub trait RandomSource {
     /// `nextInt(origin, bound)`: an `i32` in `origin..bound`, drawn as
     /// `next_int_bound(bound - origin) + origin`. For `bound <= origin` it returns `origin`
     /// without drawing, where vanilla throws. The arithmetic wraps rather than panics.
+    ///
+    /// Computed in the mod: drawn through `next_int_bound`, never asked of the game by itself.
     fn next_int_range(&mut self, origin: i32, bound: i32) -> i32 {
         if origin >= bound {
             return origin;
@@ -75,65 +79,27 @@ impl From<(u64, Option<f64>)> for LegacyRandomSource {
     }
 }
 
-impl From<LegacyRandom> for LegacyRandomSource {
-    fn from(random: LegacyRandom) -> Self {
-        Self(random)
-    }
-}
-
-impl From<LegacyRandomSource> for LegacyRandom {
-    fn from(source: LegacyRandomSource) -> Self {
-        source.0
-    }
-}
-
 impl RandomSource for LegacyRandomSource {
     fn next_int(&mut self) -> i32 {
-        RandomSource::next_int(&mut self.0)
+        EngineRandom::next_int(&mut self.0)
     }
     fn next_int_bound(&mut self, bound: i32) -> i32 {
-        RandomSource::next_int_bound(&mut self.0, bound)
+        EngineRandom::next_int_bound(&mut self.0, bound).unwrap_or(0)
     }
     fn next_long(&mut self) -> i64 {
-        RandomSource::next_long(&mut self.0)
+        EngineRandom::next_long(&mut self.0)
     }
     fn next_boolean(&mut self) -> bool {
-        RandomSource::next_boolean(&mut self.0)
+        EngineRandom::next_boolean(&mut self.0)
     }
     fn next_float(&mut self) -> f32 {
-        RandomSource::next_float(&mut self.0)
+        EngineRandom::next_float(&mut self.0)
     }
     fn next_double(&mut self) -> f64 {
-        RandomSource::next_double(&mut self.0)
+        EngineRandom::next_double(&mut self.0)
     }
     fn next_gaussian(&mut self) -> f64 {
-        RandomSource::next_gaussian(&mut self.0)
-    }
-}
-
-/// The engine's own generator, lent to a mod as it is: each draw is the engine's, so the game's
-/// order is kept.
-impl RandomSource for LegacyRandom {
-    fn next_int(&mut self) -> i32 {
-        EngineRandom::next_int(self)
-    }
-    fn next_int_bound(&mut self, bound: i32) -> i32 {
-        EngineRandom::next_int_bound(self, bound).unwrap_or(0)
-    }
-    fn next_long(&mut self) -> i64 {
-        EngineRandom::next_long(self)
-    }
-    fn next_boolean(&mut self) -> bool {
-        EngineRandom::next_boolean(self)
-    }
-    fn next_float(&mut self) -> f32 {
-        EngineRandom::next_float(self)
-    }
-    fn next_double(&mut self) -> f64 {
-        EngineRandom::next_double(self)
-    }
-    fn next_gaussian(&mut self) -> f64 {
-        EngineRandom::next_gaussian(self)
+        EngineRandom::next_gaussian(&mut self.0)
     }
 }
 
@@ -177,10 +143,6 @@ mod tests {
             random.next_gaussian(),
             EngineRandom::next_gaussian(&mut engine)
         );
-        let mut borrowed = LegacyRandom::new(9);
-        let lent: &mut dyn RandomSource = &mut borrowed;
-        let mut expected = LegacyRandom::new(9);
-        assert_eq!(lent.next_long(), EngineRandom::next_long(&mut expected));
     }
 
     #[test]

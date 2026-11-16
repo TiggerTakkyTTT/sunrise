@@ -4951,6 +4951,7 @@ mod item_fall_on_tests {
     };
 
     use mod_api::RandomSource as _;
+    use sunrise_core::random::RandomSource as _;
 
     struct LoanPart(std::sync::Arc<()>);
     #[mod_api::sunrise_part]

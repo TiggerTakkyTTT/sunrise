@@ -13,6 +13,20 @@ pub(in crate::game) mod block_edit;
 #[path = "api_values/block_state.rs"]
 pub(in crate::game) mod block_state;
 
+/// The engine's generator as the API's owned source: the same state and cached gaussian, so it
+/// draws on as the engine's would.
+pub(crate) fn random_to_api(
+    random: &sunrise_core::random::LegacyRandom,
+) -> mod_api::LegacyRandomSource {
+    <(u64, Option<f64>)>::from(random).into()
+}
+/// The API's owned source as the engine's generator, state and cached gaussian kept.
+pub(crate) fn random_to_engine(
+    source: &mod_api::LegacyRandomSource,
+) -> sunrise_core::random::LegacyRandom {
+    <(u64, Option<f64>)>::from(source).into()
+}
+
 pub(crate) fn block_jump_factor(
     context: &sunrise_world::native_load_context::LoopContext,
     state: sunrise_world::registry::BlockStateId,

@@ -35,11 +35,11 @@ impl Game<'_> {
     ) -> Option<mod_api::LegacyRandomSource> {
         self.native_level_world(level)?;
         if level.dimension() == self.dim.key() {
-            Some((*self.world.random).clone().into())
+            Some(crate::game::api_values::random_to_api(&self.world.random))
         } else {
             self.levels
                 .parked_world_of(level.dimension_id())
-                .map(|world| (*world.random).clone().into())
+                .map(|world| crate::game::api_values::random_to_api(&world.random))
         }
     }
     /// Replace the random of the server level `level` names with `random`,
@@ -60,6 +60,8 @@ impl Game<'_> {
                 .parked_world_mut_of(level.dimension_id())
                 .map(|world| &mut world.random)
         };
-        target.map(|target| **target = random.into()).is_some()
+        target
+            .map(|target| **target = crate::game::api_values::random_to_engine(&random))
+            .is_some()
     }
 }

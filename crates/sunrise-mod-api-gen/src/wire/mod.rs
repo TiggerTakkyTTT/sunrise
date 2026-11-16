@@ -318,6 +318,15 @@ const NOT_ON_WASM: &str = "Not on wasm: ";
 
 /// Whether `attrs`' doc has a [`NOT_ON_WASM`] line with a reason.
 fn not_on_wasm(attrs: &[syn::Attribute]) -> bool {
+    doc_marked(attrs, NOT_ON_WASM)
+}
+
+/// A provided method the mod computes from the trait's other methods (`Computed in the mod: `):
+/// it gets no call of its own, and its default body runs wherever the trait object lives.
+const IN_THE_MOD: &str = "Computed in the mod: ";
+
+/// Whether a doc line starts with `prefix` and gives a reason after it.
+fn doc_marked(attrs: &[syn::Attribute], prefix: &str) -> bool {
     attrs.iter().any(|attr| match &attr.meta {
         syn::Meta::NameValue(doc) if doc.path.is_ident("doc") => match &doc.value {
             syn::Expr::Lit(syn::ExprLit {
@@ -326,7 +335,7 @@ fn not_on_wasm(attrs: &[syn::Attribute]) -> bool {
             }) => line
                 .value()
                 .trim()
-                .strip_prefix(NOT_ON_WASM)
+                .strip_prefix(prefix)
                 .is_some_and(|why| why.len() > 1),
             _ => false,
         },
@@ -427,6 +436,16 @@ pub(super) fn surface_reading<'a>(
             let name = function.sig.ident.to_string();
             let subscription = SUBSCRIBED.iter().any(|(o, n)| o == owner && *n == name);
             if hidden(&function.attrs) && !subscription {
+                continue;
+            }
+            if doc_marked(&function.attrs, IN_THE_MOD) {
+                if function.default.is_none() {
+                    unbound.push(Unbound {
+                        owner,
+                        name,
+                        why: "is computed in the mod but has no default body".into(),
+                    });
+                }
                 continue;
             }
             if not_on_wasm(&function.attrs) {
