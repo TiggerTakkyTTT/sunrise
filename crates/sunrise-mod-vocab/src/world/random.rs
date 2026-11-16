@@ -28,6 +28,7 @@ pub trait RandomSource {
     /// where vanilla throws. The arithmetic wraps rather than panics.
     ///
     /// Computed in the mod: drawn through `next_int_bound`, never asked of the game by itself.
+    #[sunrise_mod_api_macros::computed_in_mod]
     fn next_int_between_inclusive(&mut self, min: i32, max: i32) -> i32 {
         self.next_int_bound(max.wrapping_sub(min).wrapping_add(1))
             .wrapping_add(min)
@@ -37,6 +38,7 @@ pub trait RandomSource {
     /// without drawing, where vanilla throws. The arithmetic wraps rather than panics.
     ///
     /// Computed in the mod: drawn through `next_int_bound`, never asked of the game by itself.
+    #[sunrise_mod_api_macros::computed_in_mod]
     fn next_int_range(&mut self, origin: i32, bound: i32) -> i32 {
         if origin >= bound {
             return origin;

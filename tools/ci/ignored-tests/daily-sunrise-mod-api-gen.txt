@@ -53,6 +53,7 @@ sunrise-mod-api-gen wire::host::tests::host_generation_asks_cargo_to_watch_the_v
 sunrise-mod-api-gen wire::prepared_tests::only_can_equip_changes_when_prepared_marker_is_removed lib daily slow
 sunrise-mod-api-gen wire::prepared_tests::prepared_fingerprint_covers_marker_entries_and_argument_layouts lib daily slow
 sunrise-mod-api-gen wire::tests::a_worldgen_part_method_crosses_and_waits_for_its_group_as_a_worker_call lib daily slow
+sunrise-mod-api-gen wire::tests::only_the_primitive_draws_of_a_random_cross lib daily slow
 sunrise-mod-api-gen wire::tests::coverage_page_is_well_formed lib daily slow
 sunrise-mod-api-gen wire::tests::enchantment_damage_registrar_and_callback_cross_to_wire lib daily slow
 sunrise-mod-api-gen wire::tests::layout_includes_private_borrowed_shapes lib daily slow

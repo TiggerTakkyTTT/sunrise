@@ -411,6 +411,31 @@ pub fn sunrise_loop(attribute: TokenStream, input: TokenStream) -> TokenStream {
     input
 }
 
+/// Marks a provided trait method that a mod computes from the trait's other methods: the wasm
+/// boundary gives it no call of its own, so its default body runs wherever the trait object lives
+/// and only the methods it calls cross. A method without a default body is refused.
+#[proc_macro_attribute]
+pub fn computed_in_mod(attribute: TokenStream, input: TokenStream) -> TokenStream {
+    let method = parse_macro_input!(input as syn::TraitItemFn);
+    if !attribute.is_empty() {
+        return syn::Error::new_spanned(
+            proc_macro2::TokenStream::from(attribute),
+            "write #[computed_in_mod] with no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if method.default.is_none() {
+        return syn::Error::new_spanned(
+            &method.sig,
+            "#[computed_in_mod] needs a default body: the mod computes this method itself",
+        )
+        .to_compile_error()
+        .into();
+    }
+    quote!(#method).into()
+}
+
 /// Derive subscriptions for internal test fixtures that construct their own mods.
 #[doc(hidden)]
 #[proc_macro_attribute]
