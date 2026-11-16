@@ -42,7 +42,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
                 Class::HangingMoss => {
                     let above_state = self.above_state(pos);
-                    if !(b.multiface_can_attach(above_state, Direction::Up)
+                    if !(self.multiface_can_attach_at(above(pos), Direction::Up)
                         || b.is_block(above_state, block))
                     {
                         self.destroy_block(pos, true, 512);
@@ -1352,13 +1352,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let ccw_face = b.table.bool(state, self.direction_prop(ccw));
                 let cw_test = rel(test, cw);
                 let ccw_test = rel(test, ccw);
-                if cw_face && b.multiface_can_attach(self.state(cw_test), cw) {
+                if cw_face && self.multiface_can_attach_at(cw_test, cw) {
                     self.set_block(
                         test,
                         b.table.set_bool(default, self.direction_prop(cw), true),
                         2,
                     );
-                } else if ccw_face && b.multiface_can_attach(self.state(ccw_test), ccw) {
+                } else if ccw_face && self.multiface_can_attach_at(ccw_test, ccw) {
                     self.set_block(
                         test,
                         b.table.set_bool(default, self.direction_prop(ccw), true),
@@ -1368,7 +1368,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     let opposite = direction.opposite();
                     if cw_face
                         && self.is_empty_block(cw_test)
-                        && b.multiface_can_attach(self.rel_state(pos, cw), opposite)
+                        && self.multiface_can_attach_at(rel(pos, cw), opposite)
                     {
                         self.set_block(
                             cw_test,
@@ -1378,7 +1378,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         );
                     } else if ccw_face
                         && self.is_empty_block(ccw_test)
-                        && b.multiface_can_attach(self.rel_state(pos, ccw), opposite)
+                        && self.multiface_can_attach_at(rel(pos, ccw), opposite)
                     {
                         self.set_block(
                             ccw_test,
@@ -1387,12 +1387,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                             2,
                         );
                     } else if self.random().next_float() < 0.05
-                        && b.multiface_can_attach(self.state(above(test)), Direction::Up)
+                        && self.multiface_can_attach_at(above(test), Direction::Up)
                     {
                         self.set_block(test, b.table.set_bool(default, p.up, true), 2);
                     }
                 }
-            } else if b.multiface_can_attach(edge, direction) {
+            } else if self.multiface_can_attach_at(test, direction) {
                 self.set_block(
                     pos,
                     b.table
@@ -1403,7 +1403,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             return;
         }
         if direction == Direction::Up && pos.y < self.level.max_y() - 1 {
-            if b.multiface_can_attach(self.state(above_pos), Direction::Up) {
+            if self.multiface_can_attach_at(above_pos, Direction::Up) {
                 self.set_block(pos, b.table.set_bool(state, p.up, true), 2);
                 return;
             }
@@ -1414,7 +1414,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 let mut above_state = state;
                 for d in HORIZONTAL {
                     if self.random().next_boolean()
-                        || !b.multiface_can_attach(self.state(rel(above_pos, d)), d)
+                        || !self.multiface_can_attach_at(rel(above_pos, d), d)
                     {
                         above_state = b.table.set_bool(above_state, self.direction_prop(d), false);
                     }

@@ -242,6 +242,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     pub fn sturdy(&self, pos: BlockPos, direction: Direction) -> bool {
         self.signals().sturdy(pos, direction)
     }
+    pub(crate) fn collision_face_full_at(&self, pos: BlockPos, direction: Direction) -> bool {
+        self.signals().collision_face_full_at(pos, direction)
+    }
+    pub(crate) fn multiface_can_attach_at(&self, pos: BlockPos, direction: Direction) -> bool {
+        self.signals().multiface_can_attach_at(pos, direction)
+    }
     pub fn is_redstone_conductor(&self, state: BlockStateId, _pos: BlockPos) -> bool {
         self.signals().is_redstone_conductor(state, _pos)
     }
@@ -381,6 +387,25 @@ impl<L: super::signal_access::SignalAccess + ?Sized> Signals<'_, L> {
     ) -> Option<bool> {
         let shape = self.level.published_collision_shape(pos, state)?;
         Some(support.is_supporting(&shape, direction).unwrap_or(false))
+    }
+    /// `Block.isFaceFull(state.getCollisionShape(level, pos), direction)` of the cell at `pos`:
+    /// a block entity's published shape stands over the declared one.
+    pub(crate) fn collision_face_full_at(&self, pos: BlockPos, direction: Direction) -> bool {
+        let state = self.state(pos);
+        match self.level.published_collision_shape(pos, state) {
+            Some(shape) => super::data::analyse_shape(&shape)
+                .is_ok_and(|info| info.full_faces & (1 << direction as u8) != 0),
+            None => self.b.collision_face_full(state, direction),
+        }
+    }
+    /// `MultifaceBlock.canAttachTo(level, direction, pos, state)` for the cell at `pos`.
+    pub(crate) fn multiface_can_attach_at(&self, pos: BlockPos, direction: Direction) -> bool {
+        let state = self.state(pos);
+        let face = direction.opposite();
+        match self.published_support(pos, state, face, SupportType::Full) {
+            Some(sturdy) => sturdy || self.collision_face_full_at(pos, face),
+            None => self.b.multiface_can_attach(state, direction),
+        }
     }
     pub fn sturdy(&self, pos: BlockPos, direction: Direction) -> bool {
         let state = self.state(pos);

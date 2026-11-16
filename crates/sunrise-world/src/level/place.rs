@@ -581,7 +581,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     .is_some_and(|tag| b.in_set(above_state, tag));
                 let direction = from_y_rot(f64::from(ctx.yaw));
                 let mut attached_to_middle =
-                    !b.collision_face_full(above_state, Direction::Down) || ctx.sneaking;
+                    !self.collision_face_full_at(above_pos, Direction::Down) || ctx.sneaking;
                 if below_hanging && !ctx.sneaking {
                     if b.instance_of(above_state, Class::WallHangingSign) {
                         if axis_of(b.facing(above_state)) == axis_of(direction) {
@@ -1389,7 +1389,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if b.is_block(old, block) && self.multiface_has_face(old, direction) {
             return None;
         }
-        if !b.multiface_can_attach(self.rel_state(pos, direction), direction) {
+        if !self.multiface_can_attach_at(rel(pos, direction), direction) {
             return None;
         }
         let state = if b.is_block(old, block) {
@@ -1410,7 +1410,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if direction == Direction::Down {
             return false;
         }
-        if b.multiface_can_attach(self.rel_state(pos, direction), direction) {
+        if self.multiface_can_attach_at(rel(pos, direction), direction) {
             return true;
         }
         if direction == Direction::Up {

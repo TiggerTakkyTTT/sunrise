@@ -575,7 +575,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
             Class::HangingMoss => {
                 let above_state = self.above_state(pos);
-                if !(b.multiface_can_attach(above_state, Direction::Up)
+                if !(self.multiface_can_attach_at(above(pos), Direction::Up)
                     || b.is_block(above_state, block))
                 {
                     self.schedule_tick(pos, block, 1);
@@ -645,7 +645,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 {
                     air
                 } else if self.multiface_has_face(state, dir)
-                    && !b.multiface_can_attach(nstate, dir)
+                    && !self.multiface_can_attach_at(rel(pos, dir), dir)
                 {
                     let removed = table.set_bool(state, self.direction_prop(dir), false);
                     if Direction::ALL
@@ -1349,7 +1349,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             Direction::West,
         ] {
             let key = self.direction_prop(direction);
-            let supported = b.multiface_can_attach(self.rel_state(pos, direction), direction);
+            let supported = self.multiface_can_attach_at(rel(pos, direction), direction);
             let mut side = if supported {
                 if create_sides {
                     "low"

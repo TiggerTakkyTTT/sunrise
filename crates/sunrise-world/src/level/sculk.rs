@@ -408,7 +408,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let mut state = b.default_of(b.named.sculk_vein);
         let mut any = false;
         for &face in faces {
-            if b.multiface_can_attach(self.state(rel(pos, face)), face) {
+            if self.multiface_can_attach_at(rel(pos, face), face) {
                 state = self.vein_with_face(state, face, true);
                 any = true;
             }
@@ -471,8 +471,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if self.vein_has_face(old, face) {
             return false;
         }
-        self.b
-            .multiface_can_attach(self.state(rel(pos, face)), face)
+        self.multiface_can_attach_at(rel(pos, face), face)
     }
     /// `MultifaceBlock.getStateForPlacement` for the sculk vein.
     fn sculk_state_for_placement(

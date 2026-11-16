@@ -3279,6 +3279,45 @@ fn a_published_shape_decides_support_over_the_declared_one() {
 
 #[test]
 #[ignore = "daily"]
+fn a_published_face_decides_whether_lichen_attaches() {
+    let mut w = world!();
+    let pos = BlockPos::new(0, 1, 0);
+    let lichen_pos = BlockPos::new(0, 2, 0);
+    let lichen = w.id(
+        "glow_lichen",
+        &[
+            ("down", "true"),
+            ("up", "false"),
+            ("north", "false"),
+            ("south", "false"),
+            ("east", "false"),
+            ("west", "false"),
+        ],
+    );
+    w.put(lichen_pos, lichen);
+    // A full block holds lichen on its top face; one that publishes an empty shape does not.
+    w.put(pos, w.id("stone", &[]));
+    let sim = w.b().sim(&mut w.level, &mut w.ticks);
+    assert!(sim.multiface_can_attach_at(pos, Direction::Down));
+    assert!(sim.can_survive(lichen, lichen_pos));
+    w.level.published.insert(pos, VoxelShape::empty());
+    let sim = w.b().sim(&mut w.level, &mut w.ticks);
+    assert!(!sim.multiface_can_attach_at(pos, Direction::Down));
+    assert!(!sim.can_survive(lichen, lichen_pos));
+    // A slab that publishes a full cube holds it.
+    w.level.published.clear();
+    w.put(pos, w.id("stone_slab", &[("type", "bottom")]));
+    let sim = w.b().sim(&mut w.level, &mut w.ticks);
+    assert!(!sim.multiface_can_attach_at(pos, Direction::Down));
+    w.level.published.insert(pos, VoxelShape::block());
+    let sim = w.b().sim(&mut w.level, &mut w.ticks);
+    assert!(sim.multiface_can_attach_at(pos, Direction::Down));
+    assert!(sim.collision_face_full_at(pos, Direction::Up));
+    assert!(sim.can_survive(lichen, lichen_pos));
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_published_shape_decides_whether_snow_stands() {
     let mut w = world!();
     let pos = BlockPos::new(0, 1, 0);

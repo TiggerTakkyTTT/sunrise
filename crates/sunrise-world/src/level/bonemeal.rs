@@ -1112,7 +1112,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             || (b.is_block(existing, b.named.water) && b.fluid(existing).is_source());
         replaceable
             && !(b.is_block(existing, block) && self.multiface_has_face(existing, face))
-            && b.multiface_can_attach(self.state(rel(at, face)), face)
+            && self.multiface_can_attach_at(rel(at, face), face)
     }
     /// `MultifaceSpreader.getSpreadFromFaceTowardDirection`.
     fn lichen_spread_target(
