@@ -4,7 +4,7 @@
 //! reads, and resolve each through `Host::player`, so a guest's turn names its
 //! player once and a player whose handle cannot resolve is left out.
 use super::Game;
-use mod_api::{ChunkRef, LevelRef, PlayerRef};
+use mod_api::{ChunkRef, EntityRef, LevelRef, PlayerRef};
 
 impl Game<'_> {
     /// `ServerLevel.players`: the online players of an open server level, each once.
@@ -13,6 +13,21 @@ impl Game<'_> {
         Some(
             self.level_player_uuids(level.dimension_id())
                 .filter_map(|uuid| self.player(uuid))
+                .collect(),
+        )
+    }
+
+    /// `ChunkMap.TrackedEntity.seenBy`: the players of the level in place whose tracker holds
+    /// the entity, other than the entity itself.
+    pub(super) fn entity_trackers(&self, entity: EntityRef) -> Option<Vec<PlayerRef>> {
+        self.native_entity_target(entity)?;
+        let id = entity.id() as i32;
+        Some(
+            self.lan
+                .iter()
+                .flat_map(|h| h.hub.guests.iter().map(move |g| (&h.hub, g)))
+                .filter(|(hub, g)| hub.here(g) && g.entity_id != id && g.tracker.is_tracking(id))
+                .filter_map(|(_, g)| self.player(g.uuid))
                 .collect(),
         )
     }

@@ -38,6 +38,8 @@ struct Double {
     levels: HashMap<LevelRef, Vec<PlayerRef>>,
     positions: HashMap<u32, [f64; 3]>,
     watchers: Vec<PlayerRef>,
+    /// Entity id to the players it is sent to.
+    trackers: HashMap<u32, Vec<PlayerRef>>,
     /// Players whose send is refused, as one who left after the list was read.
     refused: Vec<PlayerRef>,
     sent: Vec<(u32, Vec<u8>)>,
@@ -66,7 +68,7 @@ impl crate::prelude::ServicesServerHost for Double {
         &self.everyone
     }
 }
-crate::impl_server_host_areas!(Double, except(services));
+crate::impl_server_host_areas!(Double, except(services, payloads));
 impl Backend for Double {}
 impl crate::prelude::LevelsBackend for Double {
     fn level_online_players(&self, level: LevelRef) -> Option<Vec<PlayerRef>> {
@@ -77,6 +79,9 @@ impl crate::prelude::LevelsBackend for Double {
     }
 }
 impl crate::prelude::EntitiesBackend for Double {
+    fn entity_trackers(&self, entity: EntityRef) -> Option<Vec<PlayerRef>> {
+        self.trackers.get(&entity.id()).cloned()
+    }
     fn entity_position(&self, entity: EntityRef) -> Option<[f64; 3]> {
         self.positions.get(&entity.id()).copied()
     }
@@ -98,6 +103,27 @@ impl crate::prelude::PayloadsBackendMut for Double {
     }
 }
 crate::impl_backend_mut_areas!(Double, except(payloads));
+impl crate::prelude::PayloadsServerHost for Double {
+    fn players_send_payload(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> u32 {
+        players
+            .iter()
+            .filter(|player| {
+                crate::prelude::PayloadsBackendMut::player_send_payload(
+                    self,
+                    **player,
+                    id,
+                    bytes.clone(),
+                )
+                .is_ok()
+            })
+            .count() as u32
+    }
+}
 
 fn setup() -> (Double, ToClient<Counter>, ToClient<Counter>) {
     let mut registrar = PartRegistrar::new("test");
@@ -141,6 +167,7 @@ fn setup() -> (Double, ToClient<Counter>, ToClient<Counter>) {
             (4, [1.0, 64.0, 0.0]),
         ]),
         watchers: vec![b, d],
+        trackers: HashMap::from([(2, vec![a, c]), (9, vec![a, b, c])]),
         refused: Vec::new(),
         sent: Vec::new(),
     };
@@ -229,5 +256,43 @@ fn a_stale_token_is_refused_before_anything_is_sent() {
         refused
     );
     assert_eq!(stale.send_tracking_chunk(&mut host, chunk, &value), refused);
+    let entity = EntityRef::new(WorldEpoch::new(1), 9);
+    assert_eq!(
+        stale.send_tracking_entity(&mut host, entity, true, &value),
+        refused
+    );
+    assert!(host.sent.is_empty());
+}
+
+#[test]
+fn tracking_an_entity_reaches_its_trackers_and_itself_once_when_asked() {
+    let (mut host, down, _) = setup();
+    let value = Counter { counter: VarInt(1) };
+    let entity = |id| EntityRef::new(WorldEpoch::new(1), id);
+    // A zombie (entity 9) seen by players 1, 2 and 3.
+    assert_eq!(
+        down.send_tracking_entity(&mut host, entity(9), false, &value),
+        Ok(3)
+    );
+    assert_eq!(recipients(&host), [1, 2, 3]);
+    host.sent.clear();
+    // Not a player: and_self adds no one.
+    assert_eq!(
+        down.send_tracking_entity(&mut host, entity(9), true, &value),
+        Ok(3)
+    );
+    host.sent.clear();
+    // Player 2 is tracked by 1 and 3 and is itself added, once, last.
+    assert_eq!(
+        down.send_tracking_entity(&mut host, entity(2), true, &value),
+        Ok(3)
+    );
+    assert_eq!(recipients(&host), [1, 3, 2]);
+    host.sent.clear();
+    // A stale entity has no trackers.
+    assert_eq!(
+        down.send_tracking_entity(&mut host, entity(77), false, &value),
+        Ok(0)
+    );
     assert!(host.sent.is_empty());
 }

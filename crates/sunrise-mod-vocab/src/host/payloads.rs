@@ -19,6 +19,25 @@ pub trait PayloadsBackendMut {
     ) -> Result<PayloadAccepted, PayloadSendError>;
 }
 
+/// The group send, a method of the server host: no one player is its receiver.
+#[sunrise_mod_api_macros::host_area]
+pub trait PayloadsServerHost {
+    /// Side: server.
+    /// Queue the same application bytes on each of `players`' connections: one crossing and one
+    /// buffer for the whole group, where `player_send_payload` repeats both per player. Each
+    /// send follows `player_send_payload`'s rules; a player whose send is refused (offline or
+    /// stale, no channel, wrong phase, backpressure, framing) is skipped and not counted. Returns
+    /// how many sends were accepted, which is 0 for an empty list; a player listed twice is sent
+    /// to twice. Publication waits for root commit; abort publishes nothing.
+    #[access(WorldOnly)]
+    fn players_send_payload(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> u32;
+}
+
 /// Client connection sends, available during configuration as well as play.
 #[sunrise_mod_api_macros::host_area]
 pub trait PayloadsClientHost {

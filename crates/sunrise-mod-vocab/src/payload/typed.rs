@@ -8,8 +8,8 @@ use super::{
 };
 use crate::wire::{Reader, Wire, WireError, Writer};
 use crate::{
-    ChunkRef, ClientHost, LevelRef, PAYLOAD_DECODE_BUDGET, PayloadCodec, PlayerRef, ServerHost,
-    decode_payload, encode_payload, payload_schema,
+    ChunkRef, ClientHost, EntityRef, LevelRef, PAYLOAD_DECODE_BUDGET, PayloadCodec, PlayerRef,
+    ServerHost, decode_payload, encode_payload, payload_schema,
 };
 use std::{marker::PhantomData, sync::Arc};
 
@@ -221,7 +221,7 @@ impl<T: PayloadCodec> ToClient<T> {
     ) -> Result<u32, PayloadSendError> {
         let body = self.encode(host, value)?;
         let players = host.players().server_players();
-        Ok(self.deliver(host, players, &body))
+        Ok(self.deliver(host, players, body))
     }
 
     /// Send `value` to the players in `level` (`level_online_players`), like NeoForge's
@@ -237,7 +237,7 @@ impl<T: PayloadCodec> ToClient<T> {
     ) -> Result<u32, PayloadSendError> {
         let body = self.encode(host, value)?;
         let players = level.online_players(host).unwrap_or_default();
-        Ok(self.deliver(host, players, &body))
+        Ok(self.deliver(host, players, body))
     }
 
     /// Send `value` to the players in `level`, other than `except`, whose squared distance from
@@ -268,7 +268,7 @@ impl<T: PayloadCodec> ToClient<T> {
                 })
             })
             .collect();
-        Ok(self.deliver(host, near, &body))
+        Ok(self.deliver(host, near, body))
     }
 
     /// Send `value` to the players watching `chunk` (`chunk_watchers`), like NeoForge's
@@ -285,7 +285,34 @@ impl<T: PayloadCodec> ToClient<T> {
     ) -> Result<u32, PayloadSendError> {
         let body = self.encode(host, value)?;
         let watchers = chunk.watchers(host).unwrap_or_default();
-        Ok(self.deliver(host, watchers, &body))
+        Ok(self.deliver(host, watchers, body))
+    }
+
+    /// Send `value` to the players tracking `entity` (`entity_trackers`), like NeoForge's
+    /// `PacketDistributor.sendToPlayersTrackingEntity`; with `and_self`, also to the entity
+    /// itself when it is a player (`sendToPlayersTrackingEntityAndSelf`). Returns how many sends
+    /// were accepted; a stale entity has no trackers, so it is `Ok(0)` unless `and_self` names
+    /// a player.
+    ///
+    /// Encoding and per-player refusals follow [`send_to_all`](Self::send_to_all).
+    pub fn send_tracking_entity(
+        &self,
+        host: &mut dyn ServerHost,
+        entity: EntityRef,
+        and_self: bool,
+        value: &T,
+    ) -> Result<u32, PayloadSendError> {
+        let body = self.encode(host, value)?;
+        let mut players = entity.trackers(host).unwrap_or_default();
+        if and_self {
+            let own = host
+                .players()
+                .server_players()
+                .into_iter()
+                .find(|player| player.entity() == entity);
+            players.extend(own.filter(|player| !players.contains(player)));
+        }
+        Ok(self.deliver(host, players, body))
     }
 
     /// The up-front half of every group send: the token's claims and the host's check, then the
@@ -297,22 +324,15 @@ impl<T: PayloadCodec> ToClient<T> {
         self.token.body(value)
     }
 
-    /// Send the encoded `body` to each player, counting the accepted sends. A refused send
-    /// (including a player no longer online) is skipped quietly.
+    /// Send the encoded `body` to `players` in one host call, which counts the accepted sends.
+    /// A refused send (including a player no longer online) is skipped quietly.
     fn deliver(
         &self,
         host: &mut dyn ServerHost,
         players: Vec<PlayerRef>,
-        body: &PayloadBytes,
+        body: PayloadBytes,
     ) -> u32 {
-        players
-            .into_iter()
-            .filter(|player| {
-                player
-                    .send_payload(host, &self.token.id, body.clone())
-                    .is_ok()
-            })
-            .count() as u32
+        host.players_send_payload(&players, &self.token.id, body)
     }
 }
 

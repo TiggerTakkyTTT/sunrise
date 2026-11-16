@@ -152,6 +152,13 @@ pub trait EntitiesBackend {
     #[access(WorldOnly)]
     fn entity_position(&self, entity: EntityRef) -> Option<[f64; 3]>;
     /// Side: server.
+    /// The players this entity is sent to (`ChunkMap.TrackedEntity.seenBy`), in the order the
+    /// server keeps its players: those in the entity's level whose client has the entity from
+    /// its tracking pass. A player is not among its own trackers. Fake players track nothing.
+    /// None on a client, and for a stale handle or an entity that is not in the level in place.
+    #[access(WorldOnly)]
+    fn entity_trackers(&self, entity: EntityRef) -> Option<Vec<PlayerRef>>;
+    /// Side: server.
     /// The block the entity's position is in (`Entity.blockPosition`). API
     /// 373.
     #[access(WorldOnly)]

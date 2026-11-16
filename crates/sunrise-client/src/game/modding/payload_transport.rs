@@ -38,6 +38,22 @@ impl Game<'_> {
             .clone();
         self.queue_current_payload(Endpoint::server(sender), id, bytes)
     }
+    /// `player_send_payload` to each of `players`; a refused send is skipped. The caller crossed
+    /// the body once; each connection's queue owns its own copy.
+    pub(super) fn players_send_payload(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> u32 {
+        players
+            .iter()
+            .filter(|player| {
+                self.player_send_payload(**player, id, bytes.clone())
+                    .is_ok()
+            })
+            .count() as u32
+    }
     pub(super) fn send_payload_to_server(
         &mut self,
         id: &PayloadId,
