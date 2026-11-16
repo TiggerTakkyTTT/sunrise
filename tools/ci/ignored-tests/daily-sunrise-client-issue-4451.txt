@@ -1917,6 +1917,7 @@ sunrise-client game::native_server::fake_action_tests::mob_target_setters_refuse
 sunrise-client game::native_server::fake_action_tests::scoped_fake_use_hooks_see_the_setup_and_fail_is_not_consumed lib daily resources
 sunrise-client game::native_server::fake_action_tests::scoped_fake_use_restores_the_persistent_menu_owner lib daily resources
 sunrise-client game::native_server::fake_action_tests::scoped_fake_use_returns_items_and_restores_persistent_state lib daily resources
+sunrise-client game::native_server::fake_action_tests::scoped_fake_use_returns_an_unrepresentable_stack_to_the_world lib daily resources
 sunrise-client game::native_server::fake_action_tests::scoped_fake_use_uses_viewpoint_secondary_use_and_restores_on_refusal lib daily resources
 sunrise-client game::native_server::fake_action_tests::the_servers_own_player_state_comes_back_after_a_fake_use lib daily resources
 sunrise-client game::native_server::player_rule_tests::a_mods_veto_refuses_the_respawn_write lib daily resources

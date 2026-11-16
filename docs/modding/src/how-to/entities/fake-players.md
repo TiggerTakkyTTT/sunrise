@@ -64,7 +64,10 @@ semantic sneak without changing that standing eye height. No second player is cr
 
 The `ScopedActionResult` contains `outcome` (the same `ActionOutcome`), `held` (the nonempty main-hand remainder)
 and `other` (other nonempty inventory stacks, then offhand, carried stack and armor). These stacks are returned
-to the caller, not kept by the fake. The fake's persistent body, inventory, game mode, look, secondary-use state
+to the caller, not kept by the fake. `unrepresentable` counts the stacks the action produced that the API can't
+represent, such as a saved item this game build doesn't have: they are never destroyed or replaced, but go back
+into the world where the fake stood, as item entities with the default pickup delay, and appear in neither
+`held` nor `other`. The fake's persistent body, inventory, game mode, look, secondary-use state
 and action timers are restored even on refusal; world changes and the usual interaction/Parts hooks remain.
 The ordinary fake safety rules apply: no screens, sleep, rides, dimension travel, online participation,
 statistics, advancement credit or network connection. Neither action method can run inside another player turn

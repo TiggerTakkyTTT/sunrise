@@ -615,7 +615,7 @@ impl Game<'_> {
         let menus = host.menus.insert(conn, Default::default());
         let outcome = self.perform_fake_action(gi, conn, action);
         let host = self.lan.as_mut().expect("guest turns retain the host");
-        let (held, other) = host.hub.guests.update(gi, |guest| {
+        let (held, other, position) = host.hub.guests.update(gi, |guest| {
             let held = guest
                 .inventory
                 .get_mut(guest.selected)
@@ -629,8 +629,9 @@ impl Game<'_> {
                 .filter_map(Option::take)
                 .filter(|s| s.count > 0)
                 .collect();
+            let position = guest.position;
             state.swap(guest);
-            (held, other)
+            (held, other, position)
         });
         host.menus.remove(&conn);
         if let Some(menus) = menus {
@@ -640,16 +641,22 @@ impl Game<'_> {
         if let Some(play) = play {
             host.play.insert(conn, play);
         }
-        outcome.map(|outcome| {
-            ScopedActionResult::new(
-                outcome,
-                held.try_into_api()
-                    .expect("action results use load-resolved item keys"),
-                other
-                    .try_into_api()
-                    .expect("action results use load-resolved item keys"),
-            )
-        })
+        // A stack the API can't represent (a saved item this build doesn't have, #1364) is never
+        // destroyed or replaced: it goes back into the world where the actor stood, with
+        // vanilla's default pickup delay so a repeating action doesn't take it again next tick.
+        let mut unrepresentable = 0;
+        let mut represent = |stack: sunrise_items::items::ItemStack| match stack.try_into_api() {
+            Ok(stack) => Some(stack),
+            Err(_) => {
+                unrepresentable += 1;
+                // ItemEntity.setDefaultPickUpDelay.
+                self.spawn_item_own(stack, position, 10);
+                None
+            }
+        };
+        let held = held.and_then(&mut represent);
+        let other = other.into_iter().filter_map(&mut represent).collect();
+        outcome.map(|outcome| ScopedActionResult::new(outcome, held, other, unrepresentable))
     }
 
     fn fake_action_actor(
@@ -4783,6 +4790,49 @@ pub(super) mod fake_action_tests {
                     .is_on_cooldown("minecraft:bucket")
             );
             assert_eq!(game.lan.as_ref().unwrap().hub.guests.len(), 2);
+        });
+    }
+
+    /// An armor stand holding a saved item this build doesn't have hands it to a scoped action:
+    /// the stack can't cross, so it goes back into the world where the fake stood, unchanged,
+    /// with the default pickup delay, and the result counts it instead of panicking.
+    #[test]
+    #[ignore = "daily"]
+    fn scoped_fake_use_returns_an_unrepresentable_stack_to_the_world() {
+        use mod_api::PlayerActionSetup;
+        super::super::native_entity_refs::tests::with_game(|game| {
+            let (player, _, _) = fake(game, None, 0);
+            let mut stand = sunrise_client::entities::ArmorStand::new(
+                5001,
+                sunrise_core::geometry::Vec3::new(2.0, 64.0, 0.5),
+                0.0,
+            );
+            stand.equipment[0] = Some(ItemStack::new("test:missing", 1));
+            game.armor_stands.push(stand);
+            let target = game.entity(5001).unwrap();
+            let setup = PlayerActionSetup::new(
+                None,
+                [0.5, 64.0 + f64::from(1.62_f32), 0.5],
+                90.0,
+                0.0,
+                false,
+            );
+            let action = PlayerAction::InteractOn {
+                hand: Hand::Main,
+                target,
+                location: [0.0, 1.5, 0.0],
+            };
+            let dropped = game.dropped.len();
+            let result = player.perform_action_scoped(game, action, setup).unwrap();
+            assert_eq!(result.outcome, ActionOutcome::Consumed);
+            assert_eq!((result.held, result.other.len()), (None, 0));
+            assert_eq!(result.unrepresentable, 1);
+            assert_eq!(game.armor_stands.last().unwrap().equipment[0], None);
+            assert_eq!(game.dropped.len(), dropped + 1);
+            let item = game.dropped.last().unwrap();
+            assert_eq!(item.stack, ItemStack::new("test:missing", 1));
+            assert_eq!(item.pickup_delay, 10);
+            assert_eq!((item.position.x, item.position.z), (0.5, 0.5));
         });
     }
 

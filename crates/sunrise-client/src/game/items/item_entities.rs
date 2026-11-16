@@ -695,7 +695,7 @@ impl Game<'_> {
 
     /// `new ItemEntity(level, x, y, z, stack)`: the item leaves with its own
     /// random's motion, which this returns.
-    pub(super) fn spawn_item_own(
+    pub(in crate::game) fn spawn_item_own(
         &mut self,
         stack: ItemStack,
         position: [f64; 3],
