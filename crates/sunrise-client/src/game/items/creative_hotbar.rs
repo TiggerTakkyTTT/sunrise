@@ -79,7 +79,7 @@ impl Game<'_> {
             return;
         }
         rows[index] = self.inventory[..hotbar::SIZE].to_vec();
-        if let Err(e) = hotbar::save(&path, &rows) {
+        if let Err(e) = hotbar::save(&path, &rows, self.items()) {
             // saveHotbar sets the message inside its try, so a failed save says nothing.
             log::warn!("the creative hotbar was not saved: {e}");
             return;
