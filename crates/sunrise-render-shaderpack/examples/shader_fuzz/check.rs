@@ -322,7 +322,7 @@ fn names_program(note: &str, program: &str, stage_files: &[String]) -> bool {
         let stem = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
         note.strip_prefix(path)
             .or_else(|| note.strip_prefix(filename))
-            .is_some_and(|rest| valid_location(rest))
+            .is_some_and(valid_location)
             || note
                 .strip_prefix(stem)
                 .is_some_and(|rest| rest.starts_with(": "))
@@ -464,7 +464,7 @@ fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
     shape(&message)
 }
 
-/// The loader-processed stage files' preprocessed sizes, including rejected tessellation stages;
+/// The stage files' preprocessed sizes, including stages from disabled and rejected programs;
 /// failures state the measured size and limit.
 pub fn oversized(stage_sizes: &BTreeMap<String, usize>, limit: usize) -> Vec<Failure> {
     stage_sizes
@@ -492,7 +492,7 @@ fn oversized_loads(
 }
 
 /// The case in `dir` checked: no panic, every program valid, every refusal named, the same
-/// output twice, and every loader-processed stage within the size limit. Time and memory bounds
+/// output twice, and every active-folder stage within the size limit. Time and memory bounds
 /// are the worker's.
 pub fn check(dir: &Path, request: &Request) -> Outcome {
     let once = || catch_unwind(AssertUnwindSafe(|| load(dir, request))).map_err(panic_text);

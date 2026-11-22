@@ -815,9 +815,9 @@ pub fn load_post(
     load_post_inner(pack, folder, properties, macros, inputs, false).0
 }
 
-/// Loads a post-processing pack and returns the preprocessed byte size of each stage the loader
-/// read. Tessellation stages are included when the loader rejects their program. This audit mode
-/// is for tools; the ordinary game loader does not collect sizes or preprocess extra stages.
+/// Loads a post-processing pack and returns the preprocessed byte size of every stage in its
+/// active shader folder, including stages belonging to disabled or skipped programs. This audit
+/// mode is for tools; the ordinary game loader does not collect sizes or preprocess extra stages.
 pub fn load_post_with_sizes(
     pack: &Pack,
     folder: &str,
@@ -1242,6 +1242,26 @@ fn load_post_inner(
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
     );
+    if audit_sizes {
+        let unprocessed: Vec<String> = loader
+            .pack
+            .list(folder)
+            .into_iter()
+            .filter(|file| {
+                file.rsplit_once('.').is_some_and(|(_, extension)| {
+                    ["vsh", "fsh", "gsh", "csh", "tcs", "tes"].contains(&extension)
+                })
+            })
+            .map(|file| match folder {
+                "" => file,
+                folder => format!("{folder}/{file}"),
+            })
+            .filter(|file| !loader.stage_sizes.borrow().contains_key(file))
+            .collect();
+        for file in unprocessed {
+            let _ = loader.preprocess(&file);
+        }
+    }
     let stage_sizes = std::mem::take(&mut *loader.stage_sizes.borrow_mut());
     drop(loader);
     (post, stage_sizes)
@@ -2074,16 +2094,20 @@ mod tests {
                 ("shaders/composite.fsh", "#version 430\nout vec4 color; void main() { color = vec4(1.0); }"),
                 ("shaders/composite.tcs", "#version 430\n// tessellation control"),
                 ("shaders/composite.tes", "#version 430\n// tessellation evaluation"),
+                ("shaders/composite1.vsh", vertex),
+                ("shaders/composite1.fsh", "#version 430\nvoid main() {}"),
                 ("shaders/final.vsh", vertex),
                 ("shaders/final.fsh", "#version 430\n#include \"lib/common.glsl\"\nvoid main() { gl_FragColor = FZ_AUDIT; }"),
                 ("shaders/lib/common.glsl", "#define FZ_AUDIT vec4(1.0, 0.0, 0.0, 1.0)\n"),
             ]),
         )
         .unwrap();
+        let properties =
+            Properties::parse("program.composite1.enabled = false", &Macros::standard());
         let (post, sizes) = load_post_with_sizes(
             &pack,
             "",
-            &Properties::default(),
+            &properties,
             &Macros::standard(),
             &GameInputs::default(),
         );
@@ -2092,8 +2116,22 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("composite: uses a tessellation stage"))
         );
-        assert!(sizes.contains_key("composite.tcs"), "{sizes:?}");
-        assert!(sizes.contains_key("composite.tes"), "{sizes:?}");
+        for file in [
+            "composite.vsh",
+            "composite.fsh",
+            "composite.tcs",
+            "composite.tes",
+            "composite1.vsh",
+            "composite1.fsh",
+        ] {
+            assert!(sizes.contains_key(file), "missing {file}: {sizes:?}");
+        }
+        assert!(
+            !post
+                .programs
+                .iter()
+                .any(|program| program.name == "composite1")
+        );
         let raw_size = pack.read("final.fsh").unwrap().len();
         assert!(
             sizes["final.fsh"] > 50 && sizes["final.fsh"] < raw_size,

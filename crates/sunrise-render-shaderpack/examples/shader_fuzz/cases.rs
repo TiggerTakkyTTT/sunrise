@@ -129,7 +129,9 @@ pub fn compute_only(name: &str) -> bool {
 pub fn active_folder(dim: usize, files: &BTreeMap<String, Vec<u8>>) -> String {
     let (id, legacy_id) = DIMENSIONS[dim];
     if let Some(text) = files.get("dimension.properties") {
-        let properties = Properties::parse(&String::from_utf8_lossy(text), &Macros::default());
+        let text = String::from_utf8_lossy(text);
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let properties = Properties::parse(text, &Macros::default());
         let mut fallback = "";
         for entry in &properties.entries {
             let Some(folder) = entry.key.strip_prefix("dimension.") else {
@@ -1521,6 +1523,22 @@ mod tests {
             ("composite.csh".into(), b"compute".to_vec()),
         ]);
         assert_eq!(programs_in_files("", &files), ["composite"]);
+    }
+
+    #[test]
+    fn dimension_mapping_ignores_a_utf8_bom_like_the_loader() {
+        let files = BTreeMap::from([
+            (
+                "dimension.properties".into(),
+                "\u{feff}dimension.custom = minecraft:overworld\n"
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            ("custom/final.vsh".into(), b"vertex".to_vec()),
+            ("custom/final.fsh".into(), b"fragment".to_vec()),
+        ]);
+        assert_eq!(active_folder(0, &files), "custom");
+        assert_eq!(programs_in_files("custom", &files), ["final"]);
     }
 
     #[test]

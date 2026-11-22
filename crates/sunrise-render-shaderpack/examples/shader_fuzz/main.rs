@@ -9,7 +9,7 @@
 //!
 //! Every case keeps these invariants: no panic; done within `--time-limit`; within
 //! `--memory-limit` (the worker's allocator refuses past it, which aborts it); every
-//! loader-processed stage within `--size-limit` once preprocessed; every program that loads
+//! active-folder stage file within `--size-limit` once preprocessed; every program that loads
 //! validates in naga; every refusal diagnostic names an actual program or stage; a program the
 //! unmutated case loaded is loaded or has a named refusal; the same case loads the same twice.
 //! Cases run in worker processes (this binary, `worker`), so a hang or an abort costs one case.
@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use cases::{Case, Source};
 use check::{Failure, Outcome, Request};
 use shrink::{Budget, Evaluate, Files, Found};
-use sunrise_shaders::Macros;
+use sunrise_shaders::{Macros, Properties};
 
 /// The system allocator, counting: past `LIMIT` bytes in use an allocation fails, and the
 /// process aborts with Rust's "memory allocation of N bytes failed".
@@ -494,6 +494,20 @@ fn program_enabled(files: &Files, folder: &str, program: &str) -> bool {
     sunrise_shaders::program_enabled_from_sources(properties, folder, program, &sources, &macros)
 }
 
+fn image_settings(files: &Files) -> Vec<(String, String)> {
+    let text = files
+        .get("shaders.properties")
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let properties = Properties::parse(&text, &Macros::default());
+    properties
+        .entries
+        .iter()
+        .filter(|entry| entry.key.starts_with("image."))
+        .map(|entry| (entry.key.clone(), entry.value.clone()))
+        .collect()
+}
+
 /// Expected refusals are based on this candidate's active folder, loader-recognized stage files,
 /// and effective enabled state. Comments and unrelated properties do not suppress checks.
 fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
@@ -502,6 +516,10 @@ fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
     let active = cases::programs_in_files(&folder, files);
     let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
     paths.retain(|path| case.files.get(path) != files.get(path));
+    let options_changed = paths
+        .iter()
+        .any(|path| matches!(path.rsplit('/').next().unwrap_or(path), "options.glsl"));
+    let image_settings_changed = image_settings(&case.files) != image_settings(files);
     active
         .into_iter()
         .filter(|name| {
@@ -518,6 +536,8 @@ fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
             }
             folder != previous_folder
                 || enabled_transition
+                || options_changed
+                || image_settings_changed
                 || paths
                     .iter()
                     .any(|path| reaches(case, files, &folder, name, path))
@@ -1129,6 +1149,26 @@ mod tests {
 
         files.insert("extra.vsh".into(), b"vertex".to_vec());
         files.insert("extra.fsh".into(), b"fragment".to_vec());
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
+    fn property_only_changes_expect_programs_the_loader_rechecks() {
+        let corpus = cases::corpus(None);
+        let mut case = smoke(&corpus)
+            .into_iter()
+            .find(|case| case.programs.iter().any(|name| name == "final"))
+            .unwrap();
+        case.files.insert("shaders.properties".into(), Vec::new());
+        let base = Outcome {
+            loaded: vec!["final".into()],
+            ..Default::default()
+        };
+        let mut files = case.files.clone();
+        files.insert(
+            "shaders.properties".into(),
+            b"image.fz_test = none RGBA RGBA8 BYTE false false 8 8\n".to_vec(),
+        );
         assert_eq!(expect(&case, &base, &files), ["final"]);
     }
 
