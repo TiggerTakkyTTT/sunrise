@@ -13,8 +13,16 @@ const SOURCES: [&str; 8] = ["vsh", "fsh", "gsh", "csh", "tcs", "tes", "glsl", "i
 
 /// The switch options that are on by default.
 pub fn switches_on(pack: &Pack) -> BTreeSet<String> {
+    switches_on_texts(&option_texts(pack))
+}
+
+pub(crate) fn switches_on_from_sources(files: &BTreeMap<String, String>) -> BTreeSet<String> {
+    switches_on_texts(&option_texts_from_sources(files))
+}
+
+fn switches_on_texts(texts: &[String]) -> BTreeSet<String> {
     let (mut on, mut off, mut tested) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
-    for text in option_texts(pack) {
+    for text in texts {
         for line in text.lines() {
             let line = line.trim();
             let (commented, rest) = match line.strip_prefix("//") {
@@ -48,8 +56,12 @@ pub fn switches_on(pack: &Pack) -> BTreeSet<String> {
 /// The value options and their defaults: `#define NAME VALUE // [A B C]`, a value and the list
 /// of the values it may take (8.1).
 pub fn value_options(pack: &Pack) -> BTreeMap<String, String> {
+    value_options_texts(&option_texts(pack))
+}
+
+fn value_options_texts(texts: &[String]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for text in option_texts(pack) {
+    for text in texts {
         for line in text.lines() {
             let Some(rest) = line.trim().strip_prefix('#') else {
                 continue;
@@ -76,11 +88,22 @@ pub fn value_options(pack: &Pack) -> BTreeMap<String, String> {
 /// `macros` with the pack's options at their defaults: the switches that are on, and the
 /// value options. `shaders.properties` and the program switches test them (3.3, 8.1).
 pub fn with_options(pack: &Pack, macros: &crate::Macros) -> crate::Macros {
+    with_options_texts(&option_texts(pack), macros)
+}
+
+pub(crate) fn with_options_from_sources(
+    files: &BTreeMap<String, String>,
+    macros: &crate::Macros,
+) -> crate::Macros {
+    with_options_texts(&option_texts_from_sources(files), macros)
+}
+
+fn with_options_texts(texts: &[String], macros: &crate::Macros) -> crate::Macros {
     let mut out = macros.clone();
-    for name in switches_on(pack) {
+    for name in switches_on_texts(texts) {
         out.define(name, "");
     }
-    for (name, value) in value_options(pack) {
+    for (name, value) in value_options_texts(texts) {
         out.define(name, value);
     }
     out
@@ -365,13 +388,18 @@ pub fn chosen_text(chosen: &BTreeMap<String, String>) -> String {
 
 /// The texts of the pack's sources and of the files they include.
 fn option_texts(pack: &Pack) -> Vec<String> {
-    let files = pack.all_files();
-    let source = |path: &str| SOURCES.contains(&path.rsplit_once('.').map_or("", |(_, e)| e));
-    let texts: Vec<(&String, String)> = files
-        .iter()
-        .filter(|p| source(p))
-        .filter_map(|p| Some((p, pack.read_text(p)?)))
+    let files: BTreeMap<String, String> = pack
+        .all_files()
+        .into_iter()
+        .filter_map(|path| Some((path.clone(), pack.read_text(&path)?)))
         .collect();
+    option_texts_from_sources(&files)
+}
+
+/// The option source files and the files they include, all decoded as text already.
+fn option_texts_from_sources(files: &BTreeMap<String, String>) -> Vec<String> {
+    let source = |path: &str| SOURCES.contains(&path.rsplit_once('.').map_or("", |(_, e)| e));
+    let texts: Vec<(&String, &String)> = files.iter().filter(|(path, _)| source(path)).collect();
     // Files of other names count when a source includes them (`#include "shaders.settings"`).
     let included: BTreeSet<&str> = texts
         .iter()
@@ -380,12 +408,17 @@ fn option_texts(pack: &Pack) -> Vec<String> {
         .map(|r| r.trim().trim_matches(|c| c == '"' || c == '<' || c == '>'))
         .map(|r| r.rsplit('/').next().unwrap_or(r))
         .collect();
-    let extra: Vec<(&String, String)> = files
+    let extra: Vec<(&String, &String)> = files
         .iter()
-        .filter(|p| !source(p) && included.contains(p.rsplit('/').next().unwrap_or(p)))
-        .filter_map(|p| Some((p, pack.read_text(p)?)))
+        .filter(|(path, _)| {
+            !source(path) && included.contains(path.rsplit('/').next().unwrap_or(path))
+        })
         .collect();
-    texts.into_iter().chain(extra).map(|(_, t)| t).collect()
+    texts
+        .into_iter()
+        .chain(extra)
+        .map(|(_, text)| text.strip_prefix('\u{feff}').unwrap_or(text).to_owned())
+        .collect()
 }
 
 #[cfg(test)]

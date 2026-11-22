@@ -10,7 +10,8 @@
 //! - A program that fails to translate is reported and treated as missing (2.5).
 //! - Terrain draws with the first program of its fallback chain that loads (2.3).
 
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{self, Config};
 use crate::custom::Custom;
@@ -237,6 +238,52 @@ const GROUPS: [(Group, &str); 6] = [
     (Group::Composite, "composite"),
     (Group::Final, "final"),
 ];
+
+/// Whether the post and gbuffers loader has a path that can consider `name`.
+///
+/// Shader fuzzing uses this to avoid treating arbitrary stage pairs as programs Sunrise should
+/// load. Keep the gbuffers names tied to the fallback chains below.
+pub fn post_program_supported(name: &str) -> bool {
+    let numbered = |base: &str| {
+        name.strip_prefix(base)
+            .and_then(|suffix| suffix.parse::<u8>().ok())
+            .is_some_and(|number| {
+                (1..=99).contains(&number) && number.to_string() == name[base.len()..]
+            })
+    };
+    GROUPS.iter().any(|(group, base)| {
+        if *group == Group::Final {
+            name == *base
+        } else {
+            name == *base || numbered(base)
+        }
+    }) || name == "shadowcomp"
+        || numbered("shadowcomp")
+        || [
+            WATER.as_slice(),
+            TERRAIN.as_slice(),
+            TERRAIN_SOLID.as_slice(),
+            TERRAIN_CUTOUT.as_slice(),
+            LINES.as_slice(),
+            SKY.as_slice(),
+            SKY_TEXTURED.as_slice(),
+            ENTITIES.as_slice(),
+            BLOCK.as_slice(),
+            CLOUDS.as_slice(),
+            HAND.as_slice(),
+            HAND_WATER.as_slice(),
+            WEATHER.as_slice(),
+            ENTITIES_TRANSLUCENT.as_slice(),
+            BEACON_BEAM.as_slice(),
+            PARTICLES.as_slice(),
+            &["gbuffers_damagedblock"],
+            &["gbuffers_block_translucent"],
+            &["gbuffers_particles_translucent"],
+            &["shadow", "shadow_water", "shadow_entities", "shadow_block"],
+        ]
+        .iter()
+        .any(|chain| chain.contains(&name))
+}
 
 /// The stars' blend: added to the sky, their own alpha replacing the buffer's, as vanilla draws
 /// them (`RenderPipelines.STARS`, `BlendFunction.OVERLAY`). Iris 1.11.7 drew them so with a probe
@@ -765,6 +812,30 @@ pub fn load_post(
     macros: &Macros,
     inputs: &GameInputs,
 ) -> Post {
+    load_post_inner(pack, folder, properties, macros, inputs, false).0
+}
+
+/// Loads a post-processing pack and returns the preprocessed byte size of each stage the loader
+/// read. Tessellation stages are included when the loader rejects their program. This audit mode
+/// is for tools; the ordinary game loader does not collect sizes or preprocess extra stages.
+pub fn load_post_with_sizes(
+    pack: &Pack,
+    folder: &str,
+    properties: &Properties,
+    macros: &Macros,
+    inputs: &GameInputs,
+) -> (Post, BTreeMap<String, usize>) {
+    load_post_inner(pack, folder, properties, macros, inputs, true)
+}
+
+fn load_post_inner(
+    pack: &Pack,
+    folder: &str,
+    properties: &Properties,
+    macros: &Macros,
+    inputs: &GameInputs,
+    audit_sizes: bool,
+) -> (Post, BTreeMap<String, usize>) {
     let mut post = Post {
         folder: folder.to_owned(),
         programs: Vec::new(),
@@ -861,6 +932,8 @@ pub fn load_post(
         switches: crate::switches_on(pack),
         options,
         geometry: None,
+        audit_sizes,
+        stage_sizes: RefCell::new(BTreeMap::new()),
         post: &mut post,
     };
     for (group, base) in GROUPS {
@@ -1169,7 +1242,9 @@ pub fn load_post(
         inputs.entities.as_ref(),
         [&inputs.terrain_geometry, &inputs.entity_geometry].map(Option::as_ref),
     );
-    post
+    let stage_sizes = std::mem::take(&mut *loader.stage_sizes.borrow_mut());
+    drop(loader);
+    (post, stage_sizes)
 }
 
 /// Whether the shadow pass runs (2.5) and, when it does, its programs: `shadow_solid` and
@@ -1347,6 +1422,8 @@ struct Loader<'a> {
     options: Macros,
     /// The game's geometry read vertex by vertex, while loading shadow programs.
     geometry: Option<crate::GeometryInputs>,
+    audit_sizes: bool,
+    stage_sizes: RefCell<BTreeMap<String, usize>>,
     post: &'a mut Post,
 }
 
@@ -1427,6 +1504,14 @@ impl Loader<'_> {
         }
         let tessellated = self.pack.exists(&path("tcs")) || self.pack.exists(&path("tes"));
         if tessellated {
+            if self.audit_sizes {
+                for ext in ["tcs", "tes"] {
+                    let stage = path(ext);
+                    if self.pack.exists(&stage) {
+                        let _ = self.preprocess(&stage);
+                    }
+                }
+            }
             self.post.notes.push(format!(
                 "{name}: uses a tessellation stage (unsupported); skipped"
             ));
@@ -1551,6 +1636,14 @@ impl Loader<'_> {
     /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
     fn preprocess(&self, path: &str) -> Preprocessed {
         let mut pp = preprocess(self.pack, path, self.macros);
+        if self.audit_sizes {
+            let size = pp.code.len();
+            self.stage_sizes
+                .borrow_mut()
+                .entry(path.to_owned())
+                .and_modify(|seen| *seen = (*seen).max(size))
+                .or_insert(size);
+        }
         if self.post.images.is_empty() || !pp.code.contains("image") {
             return pp;
         }
@@ -1783,6 +1876,25 @@ fn enabled(
     eval_condition(&condition, macros).ok() != Some(0)
 }
 
+/// Whether the real loader would consider `name` enabled using this candidate's source options.
+/// The fuzzer uses this when recomputing expected programs after mutations; its in-memory files
+/// are decoded the same way `Pack::read_text` decodes the loader's inputs.
+pub fn program_enabled_from_sources(
+    properties_text: &str,
+    folder: &str,
+    name: &str,
+    files: &BTreeMap<String, String>,
+    macros: &Macros,
+) -> bool {
+    let options = crate::options::with_options_from_sources(files, macros);
+    let properties_text = properties_text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(properties_text);
+    let properties = Properties::parse(properties_text, &options);
+    let switches = crate::options::switches_on_from_sources(files);
+    enabled(&properties, folder, name, &options, &switches)
+}
+
 /// `blend.<program>`: `Some(None)` for `off`, `Some(factors)`, or `None` when absent or not
 /// four known factors.
 fn blend(properties: &Properties, program: &str) -> Option<Option<Blend>> {
@@ -1871,6 +1983,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fuzzer_program_support_matches_loader_dispatch_names() {
+        for name in [
+            "setup",
+            "setup99",
+            "composite1",
+            "final",
+            "shadowcomp",
+            "shadowcomp4",
+            "gbuffers_terrain",
+            "gbuffers_particles_translucent",
+            "shadow_entities",
+        ] {
+            assert!(post_program_supported(name), "{name}");
+        }
+        for name in ["extra", "composite0", "composite100", "composite01"] {
+            assert!(!post_program_supported(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn fuzzer_program_enable_uses_the_candidate_pack_options() {
+        let mut files = BTreeMap::from([(
+            "options.glsl".to_owned(),
+            "#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_owned(),
+        )]);
+        let properties = "program.final.enabled = !DISABLE_FINAL\n";
+        let mut macros = Macros::standard();
+        macros.define_renderer(4);
+        assert!(!program_enabled_from_sources(
+            properties, "", "final", &files, &macros
+        ));
+
+        files.insert(
+            "options.glsl".to_owned(),
+            "//#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_owned(),
+        );
+        assert!(program_enabled_from_sources(
+            properties, "", "final", &files, &macros
+        ));
+    }
+
+    #[test]
     fn unsupported_defaults_are_notes_without_skipping_render_or_compute() {
         let pack = Pack::from_zip_bytes(
             "original-default-control",
@@ -1907,6 +2061,43 @@ mod tests {
             !post.notes.iter().any(|n| n.contains("skipped")),
             "{:?}",
             post.notes
+        );
+    }
+
+    #[test]
+    fn size_audit_uses_loader_preprocessing_and_includes_tessellation_stages() {
+        let vertex = "#version 430\nvoid main() { gl_Position = vec4(0.0); }";
+        let pack = Pack::from_zip_bytes(
+            "size-audit",
+            crate::pack::tests::zip(&[
+                ("shaders/composite.vsh", vertex),
+                ("shaders/composite.fsh", "#version 430\nout vec4 color; void main() { color = vec4(1.0); }"),
+                ("shaders/composite.tcs", "#version 430\n// tessellation control"),
+                ("shaders/composite.tes", "#version 430\n// tessellation evaluation"),
+                ("shaders/final.vsh", vertex),
+                ("shaders/final.fsh", "#version 430\n#include \"lib/common.glsl\"\nvoid main() { gl_FragColor = FZ_AUDIT; }"),
+                ("shaders/lib/common.glsl", "#define FZ_AUDIT vec4(1.0, 0.0, 0.0, 1.0)\n"),
+            ]),
+        )
+        .unwrap();
+        let (post, sizes) = load_post_with_sizes(
+            &pack,
+            "",
+            &Properties::default(),
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+        assert!(
+            post.notes
+                .iter()
+                .any(|note| note.contains("composite: uses a tessellation stage"))
+        );
+        assert!(sizes.contains_key("composite.tcs"), "{sizes:?}");
+        assert!(sizes.contains_key("composite.tes"), "{sizes:?}");
+        let raw_size = pack.read("final.fsh").unwrap().len();
+        assert!(
+            sizes["final.fsh"] > 50 && sizes["final.fsh"] < raw_size,
+            "{sizes:?}"
         );
     }
 

@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use sunrise_shaders::Pack;
+use sunrise_shaders::{Macros, Pack, Properties};
 
 /// SplitMix64, as `crates/sunrise-core/examples/jmath_fuzz.rs` draws its inputs.
 pub struct Stream(pub u64);
@@ -70,6 +70,8 @@ impl Source {
                 .iter()
                 .filter_map(|f| f.strip_suffix(".fsh"))
                 .filter(|n| has(&format!("{n}.vsh")))
+                .filter(|n| sunrise_shaders::post_program_supported(n))
+                .filter(|n| !setup_program(n) || has(&format!("{n}.csh")))
                 .map(str::to_owned)
                 .collect();
             programs.extend(
@@ -77,7 +79,10 @@ impl Source {
                     .iter()
                     .filter_map(|f| f.strip_suffix(".csh"))
                     .map(compute_owner)
-                    .filter(|n| compute_only(n) && !has(&format!("{n}.fsh")))
+                    .filter(|n| {
+                        compute_only(n) && !(has(&format!("{n}.vsh")) && has(&format!("{n}.fsh")))
+                    })
+                    .filter(|n| sunrise_shaders::post_program_supported(n))
                     .map(str::to_owned),
             );
             programs.sort();
@@ -100,9 +105,13 @@ fn compute_owner(stem: &str) -> &str {
     }
 }
 
+pub fn compute_stage_owner(stem: &str) -> &str {
+    compute_owner(stem)
+}
+
 /// A program that may be compute shaders alone: `setup`, and the composite-style passes
 /// with their numbers (spec 2.2).
-fn compute_only(name: &str) -> bool {
+pub fn compute_only(name: &str) -> bool {
     let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
     [
         "setup",
@@ -113,6 +122,111 @@ fn compute_only(name: &str) -> bool {
         "shadowcomp",
     ]
     .contains(&base)
+}
+
+/// The dimension folder selected by the files in a candidate pack, using the same mapping
+/// rules as `dimension_folder_named`.
+pub fn active_folder(dim: usize, files: &BTreeMap<String, Vec<u8>>) -> String {
+    let (id, legacy_id) = DIMENSIONS[dim];
+    if let Some(text) = files.get("dimension.properties") {
+        let properties = Properties::parse(&String::from_utf8_lossy(text), &Macros::default());
+        let mut fallback = "";
+        for entry in &properties.entries {
+            let Some(folder) = entry.key.strip_prefix("dimension.") else {
+                continue;
+            };
+            let Some(path) = normalize(folder).filter(|path| !path.is_empty()) else {
+                continue;
+            };
+            for name in entry.value.split_whitespace() {
+                if name == "*" {
+                    fallback = folder;
+                } else if name == id
+                    || (!name.contains(':') && id.strip_prefix("minecraft:") == Some(name))
+                {
+                    return path;
+                }
+            }
+        }
+        return normalize(fallback).unwrap_or_default();
+    }
+    let folder = format!("world{legacy_id}");
+    let prefix = format!("{folder}/");
+    if files.keys().any(|path| {
+        path.strip_prefix(&prefix)
+            .is_some_and(|relative| !relative.is_empty() && !relative.contains('/'))
+    }) {
+        folder
+    } else {
+        String::new()
+    }
+}
+
+/// The active programs that this exact candidate's stage files describe.
+pub fn programs_in_files(folder: &str, files: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    let prefix = if folder.is_empty() {
+        String::new()
+    } else {
+        format!("{folder}/")
+    };
+    let listed: Vec<&str> = files
+        .keys()
+        .filter_map(|path| path.strip_prefix(&prefix))
+        .filter(|path| !path.contains('/'))
+        .collect();
+    let has = |name: &str| files.contains_key(&in_folder(folder, name));
+    let mut programs: Vec<String> = listed
+        .iter()
+        .filter_map(|path| path.strip_suffix(".fsh"))
+        .filter(|name| has(&format!("{name}.vsh")))
+        .filter(|name| sunrise_shaders::post_program_supported(name))
+        .filter(|name| !setup_program(name) || has(&format!("{name}.csh")))
+        .map(str::to_owned)
+        .collect();
+    programs.extend(
+        listed
+            .iter()
+            .filter_map(|path| path.strip_suffix(".csh"))
+            .map(compute_owner)
+            .filter(|name| {
+                compute_only(name) && !(has(&format!("{name}.vsh")) && has(&format!("{name}.fsh")))
+            })
+            .filter(|name| sunrise_shaders::post_program_supported(name))
+            .map(str::to_owned),
+    );
+    programs.sort();
+    programs.dedup();
+    programs
+}
+
+fn setup_program(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix("setup") else {
+        return false;
+    };
+    suffix.is_empty()
+        || suffix
+            .parse::<u8>()
+            .is_ok_and(|number| (1..=99).contains(&number) && number.to_string() == suffix)
+}
+
+pub fn owns_in(folder: &str, program: &str, path: &str) -> bool {
+    let Some(rest) = path
+        .strip_prefix(&in_folder(folder, ""))
+        .filter(|_| !folder.is_empty())
+        .or((folder.is_empty()).then_some(path))
+    else {
+        return false;
+    };
+    let Some((stem, ext)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    let compute = ext == "csh"
+        && (stem == program
+            || stem
+                .strip_prefix(program)
+                .and_then(|s| s.strip_prefix('_'))
+                .is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_lowercase()));
+    (stem == program && ["vsh", "fsh", "gsh", "tcs", "tes"].contains(&ext)) || compute
 }
 
 pub fn in_folder(folder: &str, name: &str) -> String {
@@ -225,23 +339,7 @@ impl Case {
     /// The case's own stage files of `program`: what a step may edit and still leave every other
     /// program as it was.
     pub fn owns(&self, program: &str, path: &str) -> bool {
-        let Some(rest) = path
-            .strip_prefix(&in_folder(&self.folder, ""))
-            .filter(|_| !self.folder.is_empty())
-            .or((self.folder.is_empty()).then_some(path))
-        else {
-            return false;
-        };
-        let Some((stem, ext)) = rest.rsplit_once('.') else {
-            return false;
-        };
-        let compute = ext == "csh"
-            && (stem == program
-                || stem
-                    .strip_prefix(program)
-                    .and_then(|s| s.strip_prefix('_'))
-                    .is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_lowercase()));
-        (stem == program && ["vsh", "fsh", "gsh", "tcs", "tes"].contains(&ext)) || compute
+        owns_in(&self.folder, program, path)
     }
 }
 
@@ -257,7 +355,7 @@ fn is_source(path: &str) -> bool {
 }
 
 /// The include targets of `text` in file `from`, as the preprocessor resolves them.
-fn includes(from: &str, text: &str) -> Vec<String> {
+pub fn includes(from: &str, text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|l| {
             let rest = l.trim_start().strip_prefix('#')?.trim_start();
@@ -1380,6 +1478,49 @@ mod tests {
         for name in ["final", "gbuffers_terrain", "shadow", "composite_ab"] {
             assert!(!compute_only(name), "{name}");
         }
+    }
+
+    #[test]
+    fn candidate_programs_follow_its_selected_dimension_folder() {
+        let mut files: BTreeMap<String, Vec<u8>> = [
+            (
+                "dimension.properties",
+                "dimension.custom = minecraft:overworld\n",
+            ),
+            ("custom/composite.vsh", "vertex"),
+            ("custom/composite.fsh", "fragment"),
+            ("world0/final.vsh", "vertex"),
+            ("world0/final.fsh", "fragment"),
+        ]
+        .map(|(path, text)| (path.to_owned(), text.as_bytes().to_vec()))
+        .into();
+        assert_eq!(active_folder(0, &files), "custom");
+        assert_eq!(programs_in_files("custom", &files), ["composite"]);
+
+        files.insert(
+            "dimension.properties".into(),
+            b"dimension.world0 = minecraft:overworld\n".to_vec(),
+        );
+        assert_eq!(active_folder(0, &files), "world0");
+        assert_eq!(programs_in_files("world0", &files), ["final"]);
+
+        files.remove("dimension.properties");
+        assert_eq!(active_folder(0, &files), "world0");
+        files.remove("world0/final.vsh");
+        files.remove("world0/final.fsh");
+        assert_eq!(active_folder(0, &files), "");
+
+        files.insert("setup.vsh".into(), b"vertex".to_vec());
+        files.insert("setup.fsh".into(), b"fragment".to_vec());
+        assert!(programs_in_files("", &files).is_empty());
+        files.insert("setup.csh".into(), b"compute".to_vec());
+        assert_eq!(programs_in_files("", &files), ["setup"]);
+
+        let files = BTreeMap::from([
+            ("composite.fsh".into(), b"fragment".to_vec()),
+            ("composite.csh".into(), b"compute".to_vec()),
+        ]);
+        assert_eq!(programs_in_files("", &files), ["composite"]);
     }
 
     #[test]

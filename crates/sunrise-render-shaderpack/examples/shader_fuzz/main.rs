@@ -8,21 +8,22 @@
 //!                 [--size-limit MIB] [--shrink-seconds N] [--work-dir DIR]
 //!
 //! Every case keeps these invariants: no panic; done within `--time-limit`; within
-//! `--memory-limit` (the worker's allocator refuses past it, which aborts it); every stage file
-//! within `--size-limit` once preprocessed; every program that loads validates in naga; every
-//! note names its subject, and a program the unmutated case loaded is loaded or named; the same
-//! case loads the same twice. Cases run in worker processes (this binary, `worker`), so a hang
-//! or an abort costs one case. A failure is grouped by invariant, first failing step and
-//! detail; each group's smallest case is shrunk while the same failure stays, written as a pack
-//! folder under `<work-dir>/groups/`, and listed in `<work-dir>/report.json` with the seed that
-//! replays it. Exits 1 when any case fails.
+//! `--memory-limit` (the worker's allocator refuses past it, which aborts it); every
+//! loader-processed stage within `--size-limit` once preprocessed; every program that loads
+//! validates in naga; every refusal diagnostic names an actual program or stage; a program the
+//! unmutated case loaded is loaded or has a named refusal; the same case loads the same twice.
+//! Cases run in worker processes (this binary, `worker`), so a hang or an abort costs one case.
+//! A failure is grouped by invariant, first failing step and detail; each group's smallest case
+//! is shrunk while the same failure stays, written as a pack folder under `<work-dir>/groups/`,
+//! and listed in `<work-dir>/report.json` with the seed that replays it. Exits 1 when any case
+//! fails.
 
 mod cases;
 mod check;
 mod shrink;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,6 +35,7 @@ use std::time::{Duration, Instant};
 use cases::{Case, Source};
 use check::{Failure, Outcome, Request};
 use shrink::{Budget, Evaluate, Files, Found};
+use sunrise_shaders::Macros;
 
 /// The system allocator, counting: past `LIMIT` bytes in use an allocation fails, and the
 /// process aborts with Rust's "memory allocation of N bytes failed".
@@ -451,27 +453,75 @@ impl Evaluate for Worker {
     }
 }
 
-/// The programs that must load or be named in `case` with `files`: those the unmutated case
-/// loaded whose own stage files are the only ones changed. A `program.` key in the properties
-/// can turn a program off without a note, by design: then none.
-fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
-    let properties = case
-        .files
-        .get("shaders.properties")
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .unwrap_or_default();
-    if properties.contains("program.") {
-        return Vec::new();
-    }
-    let touched: Vec<&String> = case
-        .files
+fn reaches(case: &Case, files: &Files, folder: &str, program: &str, target: &str) -> bool {
+    let mut pending: Vec<String> = files
         .keys()
-        .filter(|p| files.get(*p) != case.files.get(*p))
-        .collect();
-    base.loaded
-        .iter()
-        .filter(|name| touched.iter().all(|t| case.owns(name, t)))
+        .filter(|path| cases::owns_in(folder, program, path))
         .cloned()
+        .collect();
+    let mut seen = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if path == target {
+            return true;
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        for source in [files.get(&path), case.files.get(&path)]
+            .into_iter()
+            .flatten()
+        {
+            pending.extend(cases::includes(&path, &String::from_utf8_lossy(source)));
+        }
+    }
+    false
+}
+
+fn program_enabled(files: &Files, folder: &str, program: &str) -> bool {
+    let sources: BTreeMap<String, String> = files
+        .iter()
+        .map(|(path, bytes)| {
+            let text = String::from_utf8_lossy(bytes);
+            (
+                path.clone(),
+                text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
+            )
+        })
+        .collect();
+    let properties = sources.get("shaders.properties").map_or("", String::as_str);
+    let mut macros = Macros::standard();
+    macros.define_renderer(4);
+    sunrise_shaders::program_enabled_from_sources(properties, folder, program, &sources, &macros)
+}
+
+/// Expected refusals are based on this candidate's active folder, loader-recognized stage files,
+/// and effective enabled state. Comments and unrelated properties do not suppress checks.
+fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
+    let previous_folder = cases::active_folder(case.dim, &case.files);
+    let folder = cases::active_folder(case.dim, files);
+    let active = cases::programs_in_files(&folder, files);
+    let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
+    paths.retain(|path| case.files.get(path) != files.get(path));
+    active
+        .into_iter()
+        .filter(|name| {
+            let enabled_before = program_enabled(&case.files, &previous_folder, name);
+            let enabled_after = program_enabled(files, &folder, name);
+            let enabled_transition = !enabled_before && enabled_after;
+            let newly_active =
+                folder != previous_folder || !case.programs.contains(name) || enabled_transition;
+            if !newly_active && !base.loaded.contains(name) {
+                return false;
+            }
+            if !enabled_after {
+                return false;
+            }
+            folder != previous_folder
+                || enabled_transition
+                || paths
+                    .iter()
+                    .any(|path| reaches(case, files, &folder, name, path))
+        })
         .collect()
 }
 
@@ -516,7 +566,10 @@ impl Run<'_> {
         let request = self.request(case, expect(case, &base, &files));
         let outcome = ev.eval(&files, &request);
         for failure in outcome.failures {
-            let step = shrink::first_step(ev, case, &request, &failure.signature());
+            let step =
+                shrink::first_step_with(ev, case, &failure.signature(), |candidate, files| {
+                    self.request(candidate, expect(candidate, &base, files))
+                });
             self.found.lock().unwrap().push(Found {
                 case: case.clone(),
                 request: request.clone(),
@@ -700,12 +753,21 @@ fn main() {
                         evals: 4000,
                         until: Instant::now() + o.shrink,
                     };
-                    let shrunk = shrink::shrink(
+                    let baseline_request = Request {
+                        expect: Vec::new(),
+                        ..first.request.clone()
+                    };
+                    let base = ev.eval(&first.case.files, &baseline_request);
+                    let template = first.request.clone();
+                    let shrunk = shrink::shrink_with(
                         &mut ev,
                         &first.case,
-                        &first.request,
                         &first.failure.signature(),
                         budget,
+                        |candidate, files| Request {
+                            expect: expect(candidate, &base, files),
+                            ..template.clone()
+                        },
                     );
                     let group = format!("{:02}-{}", i + 1, first.failure.invariant);
                     let base = o.work.join("groups");
@@ -934,7 +996,18 @@ mod tests {
             until: Instant::now() + Duration::from_secs(60),
         };
         let signature = first.failure.signature();
-        shrink::shrink(ev, &first.case, &first.request, &signature, budget)
+        let baseline_request = Request {
+            expect: Vec::new(),
+            ..first.request.clone()
+        };
+        let base = ev.eval(&first.case.files, &baseline_request);
+        let template = first.request.clone();
+        shrink::shrink_with(ev, &first.case, &signature, budget, |candidate, files| {
+            Request {
+                expect: expect(candidate, &base, files),
+                ..template.clone()
+            }
+        })
     }
 
     #[test]
@@ -1013,7 +1086,7 @@ mod tests {
             loaded: vec!["composite".into(), "final".into()],
             ..Default::default()
         };
-        let mut case = smoke(&corpus)
+        let case = smoke(&corpus)
             .into_iter()
             .find(|c| c.programs.len() == 7)
             .unwrap();
@@ -1021,12 +1094,121 @@ mod tests {
         files.insert("final.fsh".into(), b"x".to_vec());
         assert_eq!(expect(&case, &base, &files), ["final"]);
         files.insert("lib/common.glsl".into(), b"x".to_vec());
-        assert_eq!(expect(&case, &base, &files), Vec::<String>::new());
-        case.files.insert(
+        assert_eq!(expect(&case, &base, &files), ["composite", "final"]);
+
+        files.insert(
             "shaders.properties".into(),
             b"program.final.enabled=false".to_vec(),
         );
-        let files = case.files.clone();
+        files.insert("final.fsh".into(), b"changed again".to_vec());
+        assert_eq!(expect(&case, &base, &files), ["composite"]);
+    }
+
+    #[test]
+    fn comments_and_unrelated_properties_do_not_hide_changed_programs() {
+        let corpus = cases::corpus(None);
+        let mut case = smoke(&corpus)
+            .into_iter()
+            .find(|c| c.programs.len() == 7)
+            .unwrap();
+        case.files.insert(
+            "shaders.properties".into(),
+            b"# baseline comment\n".to_vec(),
+        );
+        let base = Outcome {
+            loaded: vec!["composite".into(), "final".into()],
+            ..Default::default()
+        };
+        let mut files = case.files.clone();
+        files.insert(
+            "shaders.properties".into(),
+            b"# program.final.enabled=false is only a comment\nclouds=off\n".to_vec(),
+        );
+        files.insert("final.fsh".into(), b"changed".to_vec());
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+
+        files.insert("extra.vsh".into(), b"vertex".to_vec());
+        files.insert("extra.fsh".into(), b"fragment".to_vec());
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
+    fn candidate_option_macros_control_expected_programs() {
+        let corpus = cases::corpus(None);
+        let case = smoke(&corpus)
+            .into_iter()
+            .find(|case| case.programs.iter().any(|name| name == "final"))
+            .unwrap();
+        let base = Outcome {
+            loaded: vec!["final".into()],
+            ..Default::default()
+        };
+        let mut files = case.files.clone();
+        files.insert(
+            "options.glsl".into(),
+            b"#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_vec(),
+        );
+        files.insert(
+            "shaders.properties".into(),
+            b"program.final.enabled = !DISABLE_FINAL\n".to_vec(),
+        );
+        files.insert("final.fsh".into(), b"changed".to_vec());
+        assert_eq!(expect(&case, &base, &files), Vec::<String>::new());
+
+        files.insert(
+            "options.glsl".into(),
+            b"//#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_vec(),
+        );
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
+    fn enabling_a_baseline_disabled_program_expects_its_refusal() {
+        let corpus = cases::corpus(None);
+        let mut case = smoke(&corpus)
+            .into_iter()
+            .find(|case| case.programs.iter().any(|name| name == "final"))
+            .unwrap();
+        case.files.insert(
+            "options.glsl".into(),
+            b"#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_vec(),
+        );
+        case.files.insert(
+            "shaders.properties".into(),
+            b"program.final.enabled = !DISABLE_FINAL\n".to_vec(),
+        );
+        let base = Outcome::default();
+        let mut files = case.files.clone();
+        files.insert(
+            "options.glsl".into(),
+            b"//#define DISABLE_FINAL // [true false]\n#ifdef DISABLE_FINAL\n#endif\n".to_vec(),
+        );
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
+    fn shrinking_away_a_dimension_folder_drops_its_expectation() {
+        let case = Case {
+            seed: 0,
+            pack: "dimension".into(),
+            dim: 0,
+            flat: true,
+            programs: vec!["final".into()],
+            folder: "world0".into(),
+            files: [
+                ("world0/final.vsh".into(), b"vertex".to_vec()),
+                ("world0/final.fsh".into(), b"fragment".to_vec()),
+                ("shaders.properties".into(), Vec::new()),
+            ]
+            .into(),
+            steps: Vec::new(),
+        };
+        let base = Outcome {
+            loaded: vec!["final".into()],
+            ..Default::default()
+        };
+        let files = [("shaders.properties".into(), Vec::new())].into();
+        assert_eq!(cases::active_folder(case.dim, &files), "");
         assert_eq!(expect(&case, &base, &files), Vec::<String>::new());
     }
 

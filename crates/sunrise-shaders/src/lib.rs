@@ -56,7 +56,8 @@ pub use post::{
 };
 pub use post::{
     Post, PostProgram, STARS_BLEND, ShadowCulling, SkySwitches, TRANSLUCENT_BLEND,
-    dimension_folder, dimension_folder_named, load_post,
+    dimension_folder, dimension_folder_named, load_post, load_post_with_sizes,
+    post_program_supported, program_enabled_from_sources,
 };
 pub use preprocess::{Diagnostic, Origin, Preprocessed, preprocess};
 pub use properties::{Entry, Note, Properties};
