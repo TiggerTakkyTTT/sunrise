@@ -544,11 +544,35 @@ pub enum ShadowCulling {
     Reversed,
 }
 
+/// A program or compute stage the loader found but could not load.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoaderRefusal {
+    /// A named render program was rejected.
+    Program(String),
+    /// A compute shader file was rejected.
+    ComputeStage(String),
+}
+
+/// The identity of an enabled compute stage dispatched by the loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComputeStageAttempt {
+    /// The render program that dispatched the compute stages (`composite`).
+    pub owner: String,
+    /// The compute stage's logical name (`composite_a`).
+    pub name: String,
+    /// The stage path in the pack (`world0/composite_a.csh`).
+    pub path: String,
+}
+
 #[derive(Clone)]
 pub struct Post {
     /// The folder the programs came from: `""` for `shaders` itself, else `world0`...
     pub folder: String,
     pub programs: Vec<PostProgram>,
+    /// Typed records for loader rejections; `notes` retains its human-readable messages.
+    pub loader_refusals: Vec<LoaderRefusal>,
+    /// Enabled compute stages the loader attempted to dispatch, whether or not they translated.
+    pub compute_stage_attempts: Vec<ComputeStageAttempt>,
     /// The flips of the virtual `deferred_pre` and `composite_pre` (6.1.6).
     pub deferred_pre: Vec<(u32, bool)>,
     pub composite_pre: Vec<(u32, bool)>,
@@ -839,6 +863,8 @@ fn load_post_inner(
     let mut post = Post {
         folder: folder.to_owned(),
         programs: Vec::new(),
+        loader_refusals: Vec::new(),
+        compute_stage_attempts: Vec::new(),
         deferred_pre: flips(properties, "deferred_pre"),
         composite_pre: flips(properties, "composite_pre"),
         terrain: None,
@@ -1532,6 +1558,9 @@ impl Loader<'_> {
                     }
                 }
             }
+            self.post
+                .loader_refusals
+                .push(LoaderRefusal::Program(name.clone()));
             self.post.notes.push(format!(
                 "{name}: uses a tessellation stage (unsupported); skipped"
             ));
@@ -1539,6 +1568,9 @@ impl Loader<'_> {
         }
         if self.pack.exists(&path("gsh")) {
             let Some(inputs) = self.geometry.clone() else {
+                self.post
+                    .loader_refusals
+                    .push(LoaderRefusal::Program(name.clone()));
                 self.post.notes.push(format!(
                     "{name}: uses a geometry stage (supported for the shadow pass's terrain and entities only); skipped"
                 ));
@@ -1548,30 +1580,37 @@ impl Loader<'_> {
         }
         let vertex = self.preprocess(&vsh);
         let fragment = self.preprocess(&fsh);
-        let notes = &mut self.post.notes;
         let problems: Vec<String> = [&vertex, &fragment]
             .iter()
             .flat_map(|pp| diagnostics(pp))
             .collect();
         if !problems.is_empty() {
-            notes.extend(problems);
-            notes.push(format!("{name}: skipped"));
+            self.post
+                .loader_refusals
+                .push(LoaderRefusal::Program(name.clone()));
+            self.post.notes.extend(problems);
+            self.post.notes.push(format!("{name}: skipped"));
             return None;
         }
-        notes.extend([&vertex, &fragment].iter().flat_map(|pp| warnings(pp)));
+        self.post
+            .notes
+            .extend([&vertex, &fragment].iter().flat_map(|pp| warnings(pp)));
         let program = match translate(&vertex, &fragment) {
             Ok(p) => p,
             Err(errors) => {
-                notes.extend(
+                self.post
+                    .loader_refusals
+                    .push(LoaderRefusal::Program(name.clone()));
+                self.post.notes.extend(
                     errors
                         .iter()
                         .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
                 );
-                notes.push(format!("{name}: skipped"));
+                self.post.notes.push(format!("{name}: skipped"));
                 return None;
             }
         };
-        notes.extend(
+        self.post.notes.extend(
             program
                 .notes
                 .iter()
@@ -1656,6 +1695,47 @@ impl Loader<'_> {
     /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
     fn preprocess(&self, path: &str) -> Preprocessed {
         let mut pp = preprocess(self.pack, path, self.macros);
+        if !self.post.images.is_empty() && pp.code.contains("image") {
+            let source: Vec<&str> = pp.code.split('\n').collect();
+            let lines: Vec<String> = source
+                .iter()
+                .enumerate()
+                .map(|(n, &line)| {
+                    // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
+                    let qualified = line.contains("layout")
+                        || source[..n]
+                            .iter()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .is_some_and(|l| {
+                                l.trim_start().starts_with("layout") && !l.contains(';')
+                            });
+                    let words: Vec<&str> = line
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .collect();
+                    let image = self
+                        .post
+                        .images
+                        .iter()
+                        .find(|i| words.contains(&i.name.as_str()));
+                    match image {
+                        Some(i)
+                            if words.contains(&"uniform")
+                                && !qualified
+                                && words.iter().any(|w| {
+                                    ["image1D", "image2D", "image3D"]
+                                        .iter()
+                                        .any(|d| w.ends_with(d))
+                                }) =>
+                        {
+                            format!("layout({}) {line}", i.qualifier)
+                        }
+                        _ => line.to_owned(),
+                    }
+                })
+                .collect();
+            pp.code = lines.join("\n");
+        }
         if self.audit_sizes {
             let size = pp.code.len();
             self.stage_sizes
@@ -1664,46 +1744,6 @@ impl Loader<'_> {
                 .and_modify(|seen| *seen = (*seen).max(size))
                 .or_insert(size);
         }
-        if self.post.images.is_empty() || !pp.code.contains("image") {
-            return pp;
-        }
-        let source: Vec<&str> = pp.code.split('\n').collect();
-        let lines: Vec<String> = source
-            .iter()
-            .enumerate()
-            .map(|(n, &line)| {
-                // A qualifier on the line before (`layout(r32ui)` then `uniform uimage3D v;`).
-                let qualified = line.contains("layout")
-                    || source[..n]
-                        .iter()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .is_some_and(|l| l.trim_start().starts_with("layout") && !l.contains(';'));
-                let words: Vec<&str> = line
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .collect();
-                let image = self
-                    .post
-                    .images
-                    .iter()
-                    .find(|i| words.contains(&i.name.as_str()));
-                match image {
-                    Some(i)
-                        if words.contains(&"uniform")
-                            && !qualified
-                            && words.iter().any(|w| {
-                                ["image1D", "image2D", "image3D"]
-                                    .iter()
-                                    .any(|d| w.ends_with(d))
-                            }) =>
-                    {
-                        format!("layout({}) {line}", i.qualifier)
-                    }
-                    _ => line.to_owned(),
-                }
-            })
-            .collect();
-        pp.code = lines.join("\n");
         pp
     }
 
@@ -1718,11 +1758,13 @@ impl Loader<'_> {
         inputs: &crate::GeometryInputs,
     ) -> Option<PostProgram> {
         let stages = [vsh, gsh, fsh].map(|p| self.preprocess(p));
-        let notes = &mut self.post.notes;
         let problems: Vec<String> = stages.iter().flat_map(diagnostics).collect();
         if !problems.is_empty() {
-            notes.extend(problems);
-            notes.push(format!("{name}: skipped"));
+            self.post
+                .loader_refusals
+                .push(LoaderRefusal::Program(name.clone()));
+            self.post.notes.extend(problems);
+            self.post.notes.push(format!("{name}: skipped"));
             return None;
         }
         let [vertex, geometry, fragment] = &stages;
@@ -1730,16 +1772,19 @@ impl Loader<'_> {
             match crate::translate_geometry(vertex, geometry, fragment, inputs) {
                 Ok(p) => p,
                 Err(errors) => {
-                    notes.extend(
+                    self.post
+                        .loader_refusals
+                        .push(LoaderRefusal::Program(name.clone()));
+                    self.post.notes.extend(
                         errors
                             .iter()
                             .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
                     );
-                    notes.push(format!("{name}: skipped"));
+                    self.post.notes.push(format!("{name}: skipped"));
                     return None;
                 }
             };
-        notes.extend(
+        self.post.notes.extend(
             program
                 .notes
                 .iter()
@@ -1783,6 +1828,7 @@ impl Loader<'_> {
 
     /// The compute programs of composite-style program `name` that are on and translate.
     fn compute(&mut self, name: &str) -> Vec<(String, ComputeProgram)> {
+        let owner = name.to_owned();
         let mut out = Vec::new();
         let names =
             std::iter::once(name.to_owned()).chain(('a'..='z').map(|c| format!("{name}_{c}")));
@@ -1802,17 +1848,24 @@ impl Loader<'_> {
             {
                 continue;
             }
+            self.post.compute_stage_attempts.push(ComputeStageAttempt {
+                owner: owner.clone(),
+                name: name.clone(),
+                path: path.clone(),
+            });
             let pp = self.preprocess(&path);
             let problems = diagnostics(&pp);
-            let notes = &mut self.post.notes;
             if !problems.is_empty() {
-                notes.extend(problems);
-                notes.push(format!("{name}: skipped"));
+                self.post
+                    .loader_refusals
+                    .push(LoaderRefusal::ComputeStage(path.clone()));
+                self.post.notes.extend(problems);
+                self.post.notes.push(format!("{name}: skipped"));
                 continue;
             }
             match translate_compute(&pp) {
                 Ok(program) => {
-                    notes.extend(
+                    self.post.notes.extend(
                         program
                             .notes
                             .iter()
@@ -1821,12 +1874,15 @@ impl Loader<'_> {
                     out.push((name, program));
                 }
                 Err(errors) => {
-                    notes.extend(
+                    self.post
+                        .loader_refusals
+                        .push(LoaderRefusal::ComputeStage(path.clone()));
+                    self.post.notes.extend(
                         errors
                             .iter()
                             .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
                     );
-                    notes.push(format!("{name}: skipped"));
+                    self.post.notes.push(format!("{name}: skipped"));
                 }
             }
         }
@@ -1906,11 +1962,8 @@ pub fn program_enabled_from_sources(
     files: &BTreeMap<String, String>,
     macros: &Macros,
 ) -> bool {
-    let options = crate::options::with_options_from_sources(files, macros);
-    let properties_text = properties_text
-        .strip_prefix('\u{feff}')
-        .unwrap_or(properties_text);
-    let properties = Properties::parse(properties_text, &options);
+    let options = crate::options::options_from_sources(files, macros);
+    let properties = crate::options::properties_with_macros(properties_text, &options);
     let switches = crate::options::switches_on_from_sources(files);
     enabled(&properties, folder, name, &options, &switches)
 }
@@ -2136,6 +2189,110 @@ mod tests {
         assert!(
             sizes["final.fsh"] > 50 && sizes["final.fsh"] < raw_size,
             "{sizes:?}"
+        );
+    }
+
+    #[test]
+    fn size_audit_counts_image_qualifiers_added_at_the_limit() {
+        let source = "#version 430\nlayout(local_size_x = 1) in;\n\
+                      writeonly uniform uimage3D voxels;\nvoid main() {}\n";
+        let pack = Pack::from_zip_bytes(
+            "image-size-audit",
+            crate::pack::tests::zip(&[("shaders/composite99.csh", source)]),
+        )
+        .unwrap();
+        let path = "composite99.csh";
+        let limit = crate::preprocess::preprocess(&pack, path, &Macros::standard())
+            .code
+            .len();
+        let properties = Properties::parse(
+            "image.voxels = none RED_INTEGER R32UI UNSIGNED_INT false false 4 4 4\n\
+             program.composite99.enabled = false\n",
+            &Macros::standard(),
+        );
+        let (_, sizes) = load_post_with_sizes(
+            &pack,
+            "",
+            &properties,
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+
+        assert_eq!(
+            sizes[path],
+            limit + "layout(r32ui) ".len(),
+            "the added qualifier pushes the stage across its pre-rewrite size limit"
+        );
+        assert!(sizes[path] > limit, "{sizes:?}");
+    }
+
+    #[test]
+    fn loader_records_typed_program_and_compute_stage_outcomes() {
+        let vertex = "#version 430\nvoid main() { gl_Position = vec4(0.0); }";
+        let fragment = "#version 430\nout vec4 color; void main() { color = vec4(1.0); }";
+        let pack = Pack::from_zip_bytes(
+            "typed-loader-outcomes",
+            crate::pack::tests::zip(&[
+                ("shaders/composite.vsh", vertex),
+                ("shaders/composite.fsh", fragment),
+                (
+                    "shaders/composite.tcs",
+                    "#version 430\n// unsupported tessellation",
+                ),
+                ("shaders/composite1.vsh", vertex),
+                ("shaders/composite1.fsh", fragment),
+                (
+                    "shaders/composite1_a.csh",
+                    "#version 430\n#include \\\"missing.glsl\\\"\n\
+                     layout(local_size_x = 1) in; void main() {}",
+                ),
+                (
+                    "shaders/composite1_b.csh",
+                    "#version 430\nlayout(local_size_x = 1) in; void main() {}",
+                ),
+            ]),
+        )
+        .unwrap();
+        let post = load_post(
+            &pack,
+            "",
+            &Properties::default(),
+            &Macros::standard(),
+            &GameInputs::default(),
+        );
+
+        assert!(
+            post.loader_refusals
+                .contains(&LoaderRefusal::Program("composite".to_owned()))
+        );
+        assert!(
+            post.loader_refusals
+                .contains(&LoaderRefusal::ComputeStage("composite1_a.csh".to_owned()))
+        );
+        assert_eq!(
+            post.compute_stage_attempts,
+            [
+                ComputeStageAttempt {
+                    owner: "composite1".to_owned(),
+                    name: "composite1_a".to_owned(),
+                    path: "composite1_a.csh".to_owned(),
+                },
+                ComputeStageAttempt {
+                    owner: "composite1".to_owned(),
+                    name: "composite1_b".to_owned(),
+                    path: "composite1_b.csh".to_owned(),
+                },
+            ]
+        );
+        assert!(
+            post.notes.iter().any(|note| {
+                note == "composite: uses a tessellation stage (unsupported); skipped"
+            })
+        );
+        assert!(
+            post.notes
+                .iter()
+                .any(|note| note == "composite1_a: skipped")
         );
     }
 

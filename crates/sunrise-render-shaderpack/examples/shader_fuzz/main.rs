@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use cases::{Case, Source};
 use check::{Failure, Outcome, Request};
 use shrink::{Budget, Evaluate, Files, Found};
-use sunrise_shaders::{Macros, Properties};
+use sunrise_shaders::Macros;
 
 /// The system allocator, counting: past `LIMIT` bytes in use an allocation fails, and the
 /// process aborts with Rust's "memory allocation of N bytes failed".
@@ -269,7 +269,8 @@ impl Evaluate for InProcess {
 
 fn request_json(dir: &Path, r: &Request) -> String {
     serde_json::json!({
-        "dir": dir, "dim": r.dim, "flat": r.flat, "expect": r.expect, "size_limit": r.size_limit,
+        "dir": dir, "dim": r.dim, "flat": r.flat, "expect": r.expect,
+        "expect_compute": r.expect_compute, "size_limit": r.size_limit,
     })
     .to_string()
 }
@@ -280,8 +281,13 @@ fn outcome_json(o: &Outcome) -> String {
         .iter()
         .map(|f| [&f.invariant, &f.detail])
         .collect();
-    serde_json::json!({"failures": failures, "loaded": o.loaded, "shadow_pass": o.shadow_pass})
-        .to_string()
+    serde_json::json!({
+        "failures": failures,
+        "loaded": o.loaded,
+        "compute_loaded": o.compute_loaded,
+        "shadow_pass": o.shadow_pass
+    })
+    .to_string()
 }
 
 fn parse_outcome(line: &str) -> Option<Outcome> {
@@ -303,6 +309,7 @@ fn parse_outcome(line: &str) -> Option<Outcome> {
             })
             .collect(),
         loaded: strings(&v["loaded"]),
+        compute_loaded: strings(&v["compute_loaded"]),
         shadow_pass: v["shadow_pass"].as_bool()?,
     })
 }
@@ -332,6 +339,12 @@ fn worker(memory_mib: usize) {
             dim: v["dim"].as_u64().unwrap_or(0) as usize,
             flat: v["flat"].as_bool().unwrap_or(true),
             expect: v["expect"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect(),
+            expect_compute: v["expect_compute"]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -478,7 +491,15 @@ fn reaches(case: &Case, files: &Files, folder: &str, program: &str, target: &str
 }
 
 fn program_enabled(files: &Files, folder: &str, program: &str) -> bool {
-    let sources: BTreeMap<String, String> = files
+    let sources = source_texts(files);
+    let properties = sources.get("shaders.properties").map_or("", String::as_str);
+    let mut macros = Macros::standard();
+    macros.define_renderer(4);
+    sunrise_shaders::program_enabled_from_sources(properties, folder, program, &sources, &macros)
+}
+
+fn source_texts(files: &Files) -> BTreeMap<String, String> {
+    files
         .iter()
         .map(|(path, bytes)| {
             let text = String::from_utf8_lossy(bytes);
@@ -487,19 +508,25 @@ fn program_enabled(files: &Files, folder: &str, program: &str) -> bool {
                 text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
             )
         })
-        .collect();
-    let properties = sources.get("shaders.properties").map_or("", String::as_str);
-    let mut macros = Macros::standard();
-    macros.define_renderer(4);
-    sunrise_shaders::program_enabled_from_sources(properties, folder, program, &sources, &macros)
+        .collect()
 }
 
-fn image_settings(files: &Files) -> Vec<(String, String)> {
-    let text = files
-        .get("shaders.properties")
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        .unwrap_or_default();
-    let properties = Properties::parse(&text, &Macros::default());
+fn effective_properties(files: &Files) -> sunrise_shaders::Properties {
+    let sources = source_texts(files);
+    let text = sources.get("shaders.properties").map_or("", String::as_str);
+    let mut macros = Macros::standard();
+    macros.define_renderer(4);
+    sunrise_shaders::properties_from_sources(text, &sources, &macros)
+}
+
+fn effective_option_macros(files: &Files) -> Macros {
+    let sources = source_texts(files);
+    let mut macros = Macros::standard();
+    macros.define_renderer(4);
+    sunrise_shaders::options_from_sources(&sources, &macros)
+}
+
+fn image_settings(properties: &sunrise_shaders::Properties) -> Vec<(String, String)> {
     properties
         .entries
         .iter()
@@ -516,12 +543,18 @@ fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
     let active = cases::programs_in_files(&folder, files);
     let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
     paths.retain(|path| case.files.get(path) != files.get(path));
-    let options_changed = paths
-        .iter()
-        .any(|path| matches!(path.rsplit('/').next().unwrap_or(path), "options.glsl"));
-    let image_settings_changed = image_settings(&case.files) != image_settings(files);
+    let options_changed = effective_option_macros(&case.files) != effective_option_macros(files);
+    let previous_properties = effective_properties(&case.files);
+    let candidate_properties = effective_properties(files);
+    let image_settings_changed =
+        image_settings(&previous_properties) != image_settings(&candidate_properties);
     active
         .into_iter()
+        .filter(|name| {
+            !cases::setup_program(name)
+                && files.contains_key(&cases::in_folder(&folder, &format!("{name}.vsh")))
+                && files.contains_key(&cases::in_folder(&folder, &format!("{name}.fsh")))
+        })
         .filter(|name| {
             let enabled_before = program_enabled(&case.files, &previous_folder, name);
             let enabled_after = program_enabled(files, &folder, name);
@@ -545,6 +578,33 @@ fn expect(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
         .collect()
 }
 
+/// Candidate compute stages selected by source files, loader enable expressions and the same
+/// option macros as the real loader. Stage names remain distinct even when one owner has siblings.
+fn expect_compute(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
+    let previous_folder = cases::active_folder(case.dim, &case.files);
+    let folder = cases::active_folder(case.dim, files);
+    let previous = cases::compute_stages_in_files(&previous_folder, &case.files);
+    let active = cases::compute_stages_in_files(&folder, files);
+    let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
+    paths.retain(|path| case.files.get(path) != files.get(path));
+    let options_changed = effective_option_macros(&case.files) != effective_option_macros(files);
+    active
+        .into_iter()
+        .filter(|stage| {
+            let owner = cases::compute_stage_owner(stage);
+            let newly_active = folder != previous_folder || !previous.contains(stage);
+            if !newly_active && !base.compute_loaded.contains(stage) {
+                return false;
+            }
+            folder != previous_folder
+                || options_changed
+                || paths
+                    .iter()
+                    .any(|path| reaches(case, files, &folder, owner, path))
+        })
+        .collect()
+}
+
 type BaseKey = (String, usize, bool, Vec<String>);
 
 /// What every worker thread shares.
@@ -559,11 +619,12 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
-    fn request(&self, case: &Case, expect: Vec<String>) -> Request {
+    fn request(&self, case: &Case, expect: Vec<String>, expect_compute: Vec<String>) -> Request {
         Request {
             dim: case.dim,
             flat: case.flat,
             expect,
+            expect_compute,
             size_limit: self.o.size_limit,
         }
     }
@@ -578,17 +639,25 @@ impl Run<'_> {
         );
         let cached = self.bases.lock().unwrap().get(&key).cloned();
         let base = cached.unwrap_or_else(|| {
-            let base = ev.eval(&case.files, &self.request(case, Vec::new()));
+            let base = ev.eval(&case.files, &self.request(case, Vec::new(), Vec::new()));
             self.bases.lock().unwrap().insert(key, base.clone());
             base
         });
         let files = case.materialize();
-        let request = self.request(case, expect(case, &base, &files));
+        let request = self.request(
+            case,
+            expect(case, &base, &files),
+            expect_compute(case, &base, &files),
+        );
         let outcome = ev.eval(&files, &request);
         for failure in outcome.failures {
             let step =
                 shrink::first_step_with(ev, case, &failure.signature(), |candidate, files| {
-                    self.request(candidate, expect(candidate, &base, files))
+                    self.request(
+                        candidate,
+                        expect(candidate, &base, files),
+                        expect_compute(candidate, &base, files),
+                    )
                 });
             self.found.lock().unwrap().push(Found {
                 case: case.clone(),
@@ -937,6 +1006,7 @@ mod tests {
                 dim: 0,
                 flat: true,
                 expect: together.programs.clone(),
+                expect_compute: Vec::new(),
                 size_limit: 16 << 20,
             },
         );
@@ -1173,6 +1243,31 @@ mod tests {
     }
 
     #[test]
+    fn option_and_renderer_macros_recheck_effective_image_settings() {
+        let corpus = cases::corpus(None);
+        let case = smoke(&corpus)
+            .into_iter()
+            .find(|case| case.programs.iter().any(|name| name == "final"))
+            .unwrap();
+        let base = Outcome {
+            loaded: vec!["final".into()],
+            ..Default::default()
+        };
+        let mut files = case.files.clone();
+        files.insert(
+            "pack-settings.glsl".into(),
+            b"#define USE_CUSTOM_IMAGE // [true false]\n#ifdef USE_CUSTOM_IMAGE\n#endif\n".to_vec(),
+        );
+        files.insert(
+            "shaders.properties".into(),
+            b"#if MC_MIPMAP_LEVEL == 4 && defined(USE_CUSTOM_IMAGE)\nimage.fz_test = none RGBA RGBA8 BYTE false false 8 8\n#endif\n"
+                .to_vec(),
+        );
+        assert_eq!(image_settings(&effective_properties(&files)).len(), 1);
+        assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
     fn candidate_option_macros_control_expected_programs() {
         let corpus = cases::corpus(None);
         let case = smoke(&corpus)
@@ -1257,6 +1352,7 @@ mod tests {
         let outcome = Outcome {
             failures: vec![Failure::new("naga", "composite: x")],
             loaded: vec!["composite".into()],
+            compute_loaded: Vec::new(),
             shadow_pass: true,
         };
         assert_eq!(parse_outcome(&outcome_json(&outcome)), Some(outcome));

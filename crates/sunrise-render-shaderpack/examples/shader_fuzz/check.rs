@@ -20,6 +20,8 @@ pub struct Request {
     /// Programs that must load or have a correctly named refusal diagnostic: the unmutated
     /// case loaded them and this candidate's active files still include them.
     pub expect: Vec<String>,
+    /// Enabled compute-stage names the loader should dispatch for this candidate.
+    pub expect_compute: Vec<String>,
     /// Bytes a stage file may grow to through `#include` and macros.
     pub size_limit: usize,
 }
@@ -49,6 +51,8 @@ pub struct Outcome {
     pub failures: Vec<Failure>,
     /// The programs that loaded, in the order `observe` lists them.
     pub loaded: Vec<String>,
+    /// The compute stages that loaded, by exact stage name rather than owner program.
+    pub compute_loaded: Vec<String>,
     pub shadow_pass: bool,
 }
 
@@ -56,11 +60,18 @@ pub struct Outcome {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Observed {
     pub loaded: Vec<String>,
+    pub compute_loaded: Vec<String>,
     pub folder: String,
     pub stage_files: Vec<String>,
     pub notes: Vec<String>,
     /// Loader notes that actually say a program was skipped; property/custom diagnostics are not refusals.
     pub refusals: Vec<String>,
+    /// Loader-typed rejections; prose alone never excuses a missing program or stage.
+    pub loader_refusals: Vec<sunrise_shaders::LoaderRefusal>,
+    /// Exact enabled compute stages the loader attempted, including rejected stages.
+    pub compute_stage_attempts: Vec<sunrise_shaders::ComputeStageAttempt>,
+    /// Diagnostics whose subjects could not be tied to the loaded pack's source or properties.
+    pub ungrounded_diagnostics: Vec<String>,
     pub shadow_pass: bool,
     pub custom: sunrise_shaders::Custom,
     pub stage_sizes: BTreeMap<String, usize>,
@@ -78,7 +89,8 @@ pub fn load(dir: &Path, request: &Request) -> Observed {
     let mut macros = Macros::standard();
     macros.define_renderer(4);
     let (properties, feature_notes) = sunrise_shaders::read_properties(&pack, &mut macros);
-    let mut notes = feature_notes;
+    let property_text = pack.read_text("shaders.properties").unwrap_or_default();
+    let mut notes = feature_notes.clone();
     notes.extend(
         properties
             .notes
@@ -94,6 +106,58 @@ pub fn load(dir: &Path, request: &Request) -> Observed {
         &macros,
         &inputs(request.flat),
     );
+    let property_keys: BTreeMap<&str, &str> = properties
+        .entries
+        .iter()
+        .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+        .collect();
+    let all_paths = pack.all_files();
+    let source_texts: BTreeMap<String, String> = all_paths
+        .iter()
+        .filter(|path| *path == "shaders.properties" || shader_text_source(path))
+        .filter_map(|path| Some((path.clone(), pack.read_text(path)?)))
+        .collect();
+    let mut ungrounded_diagnostics = Vec::new();
+    for note in &feature_notes {
+        if !feature_note_has_subject(note, &properties) {
+            ungrounded_diagnostics.push(note.clone());
+        }
+    }
+    for note in &properties.notes {
+        let rendered = format!("shaders.properties:{}: {}", note.line, note.message);
+        if !source_location_has_subject(note.line, &property_text) {
+            ungrounded_diagnostics.push(rendered);
+        }
+    }
+    let loaded_programs: Vec<String> = programs(&post)
+        .into_iter()
+        .map(|(_, program)| program.name.clone())
+        .collect();
+    let shadow_gap = post.shadow.is_none();
+    for note in &post.notes {
+        if !post_note_has_subject(
+            note,
+            &property_keys,
+            &source_texts,
+            &post.loader_refusals,
+            &loaded_programs,
+            post.terrain_undrawn,
+            post.water_undrawn,
+            shadow_gap,
+        ) {
+            ungrounded_diagnostics.push(note.clone());
+        }
+    }
+    for note in &post.config.notes {
+        if !located_note_has_subject(note, &source_texts) {
+            ungrounded_diagnostics.push(note.clone());
+        }
+    }
+    for note in &post.custom.notes {
+        if !custom_note_has_subject(note, &property_keys) {
+            ungrounded_diagnostics.push(note.clone());
+        }
+    }
     let refusals = post
         .notes
         .iter()
@@ -121,7 +185,120 @@ pub fn load(dir: &Path, request: &Request) -> Observed {
     notes.extend(post.notes.iter().cloned());
     notes.extend(post.config.notes.iter().cloned());
     notes.extend(post.custom.notes.iter().cloned());
-    observe(&post, notes, refusals, stage_files, stage_sizes)
+    let mut observed = observe(&post, notes, refusals, stage_files, stage_sizes);
+    observed.loader_refusals = post.loader_refusals.clone();
+    observed.compute_stage_attempts = post.compute_stage_attempts.clone();
+    observed.ungrounded_diagnostics = ungrounded_diagnostics;
+    observed
+}
+
+fn shader_text_source(path: &str) -> bool {
+    [
+        ".vsh", ".fsh", ".gsh", ".csh", ".tcs", ".tes", ".glsl", ".inc",
+    ]
+    .iter()
+    .any(|extension| path.ends_with(extension))
+}
+
+fn source_location_has_subject(line: u32, text: &str) -> bool {
+    line > 0 && line as usize <= text.lines().count().max(1)
+}
+
+fn located_note_has_subject(note: &str, source_texts: &BTreeMap<String, String>) -> bool {
+    source_texts.iter().any(|(path, text)| {
+        let Some(rest) = note.strip_prefix(&format!("{path}:")) else {
+            return false;
+        };
+        let Some((line, suffix)) = rest.split_once(": ") else {
+            return false;
+        };
+        line.parse::<u32>()
+            .ok()
+            .is_some_and(|line| !suffix.is_empty() && source_location_has_subject(line, text))
+    })
+}
+
+fn feature_note_has_subject(note: &str, properties: &sunrise_shaders::Properties) -> bool {
+    let Some(feature) = note.strip_prefix("the pack requires `").and_then(|rest| {
+        rest.split_once("`, which is not supported yet")
+            .map(|(f, _)| f)
+    }) else {
+        return false;
+    };
+    properties
+        .get("iris.features.required")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|required| required == feature)
+}
+
+fn first_quoted(note: &str) -> Option<&str> {
+    note.split_once('`')?
+        .1
+        .split_once('`')
+        .map(|(subject, _)| subject)
+}
+
+fn post_note_has_subject(
+    note: &str,
+    property_keys: &BTreeMap<&str, &str>,
+    source_texts: &BTreeMap<String, String>,
+    loader_refusals: &[sunrise_shaders::LoaderRefusal],
+    loaded_programs: &[String],
+    terrain_undrawn: bool,
+    water_undrawn: bool,
+    shadow_gap: bool,
+) -> bool {
+    if located_note_has_subject(note, source_texts) {
+        return true;
+    }
+    if loaded_programs.iter().any(|name| {
+        note.strip_prefix(name)
+            .is_some_and(|rest| rest.starts_with(": "))
+    }) {
+        return true;
+    }
+    if (note == "no program for terrain; nothing draws it" && terrain_undrawn)
+        || (note == "no program for translucent terrain; nothing draws it" && water_undrawn)
+        || (note == "shadow: no program; the shadow map stays clear" && shadow_gap)
+    {
+        return true;
+    }
+    if let Some(name) = note.split_once(": ").map(|(name, _)| name)
+        && loader_refusals.iter().any(|refusal| match refusal {
+            sunrise_shaders::LoaderRefusal::Program(program) => program == name,
+            sunrise_shaders::LoaderRefusal::ComputeStage(path) => {
+                path.rsplit('/')
+                    .next()
+                    .and_then(|file| file.strip_suffix(".csh"))
+                    == Some(name)
+            }
+        })
+    {
+        return true;
+    }
+    first_quoted(note).is_some_and(|subject| {
+        property_keys.contains_key(subject)
+            || property_keys.values().any(|value| value.contains(subject))
+    })
+}
+
+fn custom_note_has_subject(note: &str, property_keys: &BTreeMap<&str, &str>) -> bool {
+    if let Some((key, _)) = note.split_once(": ")
+        && (key.starts_with("uniform.") || key.starts_with("variable."))
+    {
+        return property_keys.contains_key(key);
+    }
+    let Some(subject) = first_quoted(note) else {
+        return false;
+    };
+    property_keys.iter().any(|(key, value)| {
+        (key.starts_with("uniform.") || key.starts_with("variable."))
+            && (key.ends_with(subject)
+                || value
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .any(|token| token == subject))
+    })
 }
 
 /// The game's inputs with a terrain atlas of 1024 x 1024 pixels in 16-pixel sprites: the
@@ -277,6 +454,9 @@ pub fn observe(
                 .push((format!("{label} interface"), hash(&program.interface)));
         }
         for (name, c) in &p.compute {
+            if !seen.compute_loaded.contains(name) {
+                seen.compute_loaded.push(name.clone());
+            }
             modules.push((format!("{label} compute {name}"), &c.module));
             let groups = (&c.interface, c.work_groups, c.work_groups_render);
             seen.pieces
@@ -382,6 +562,12 @@ pub fn judge(
         match result {
             Err(panic) => failures.push(Failure::new("panic", format!("{label} load: {panic}"))),
             Ok(observed) => {
+                for note in &observed.ungrounded_diagnostics {
+                    failures.push(Failure::new(
+                        "diagnostic subject",
+                        format!("unmatched note: {}", shape(note)),
+                    ));
+                }
                 for (what, error) in &observed.invalid {
                     failures.push(Failure::new("naga", format!("{what}: {}", shape(error))));
                 }
@@ -397,16 +583,45 @@ pub fn judge(
                 }
                 for name in &request.expect {
                     let gone = !observed.loaded.contains(name);
-                    let explained = observed
-                        .refusals
-                        .iter()
-                        .any(|note| names_program(note, name, &observed.stage_files));
+                    let explained = observed.loader_refusals.iter().any(|refusal| {
+                        matches!(refusal, sunrise_shaders::LoaderRefusal::Program(refused) if refused == name)
+                    });
                     // The shadow pass may be off now: its programs then don't load, by design.
                     let shadow = name.starts_with("shadow") && !observed.shadow_pass;
                     if gone && !explained && !shadow {
                         failures.push(Failure::new(
                             "refusal",
                             format!("{name}: not loaded, no note"),
+                        ));
+                    }
+                }
+                for stage in &request.expect_compute {
+                    if observed.compute_loaded.contains(stage) {
+                        continue;
+                    }
+                    let owner = crate::cases::compute_stage_owner(stage);
+                    let stage_path = if observed.folder.is_empty() {
+                        format!("{stage}.csh")
+                    } else {
+                        format!("{}/{stage}.csh", observed.folder)
+                    };
+                    let stage_refused = observed.loader_refusals.iter().any(|refusal| {
+                        matches!(refusal, sunrise_shaders::LoaderRefusal::ComputeStage(path)
+                            if path == &stage_path)
+                    });
+                    let attempted = observed
+                        .compute_stage_attempts
+                        .iter()
+                        .any(|attempt| attempt.name == *stage && attempt.path == stage_path);
+                    let parent_refused = !attempted
+                        && !observed.loaded.iter().any(|loaded| loaded == owner)
+                        && observed.loader_refusals.iter().any(|refusal| {
+                            matches!(refusal, sunrise_shaders::LoaderRefusal::Program(refused) if refused == owner)
+                        });
+                    if !stage_refused && !parent_refused {
+                        failures.push(Failure::new(
+                            "refusal",
+                            format!("{stage}: compute stage not loaded, no note"),
                         ));
                     }
                 }
@@ -422,6 +637,10 @@ pub fn judge(
             .map(|(a, _)| a.0.clone())
             .or_else(|| (first.pieces.len() != second.pieces.len()).then(|| "program list".into()))
             .or_else(|| (first.loaded != second.loaded).then(|| "loaded programs".into()))
+            .or_else(|| {
+                (first.compute_loaded != second.compute_loaded)
+                    .then(|| "loaded compute stages".into())
+            })
             .or_else(|| (first.folder != second.folder).then(|| "dimension folder".into()))
             .or_else(|| {
                 (first.stage_files != second.stage_files).then(|| "active stage files".into())
@@ -443,6 +662,10 @@ pub fn judge(
             .as_ref()
             .ok()
             .map_or_else(Vec::new, |o| o.loaded.clone()),
+        compute_loaded: first
+            .as_ref()
+            .ok()
+            .map_or_else(Vec::new, |o| o.compute_loaded.clone()),
         shadow_pass: first.as_ref().ok().is_some_and(|o| o.shadow_pass),
     }
 }
@@ -515,6 +738,7 @@ mod tests {
             dim: 0,
             flat: true,
             expect: expect.iter().map(|s| (*s).to_owned()).collect(),
+            expect_compute: Vec::new(),
             size_limit: 1 << 24,
         }
     }
@@ -522,6 +746,7 @@ mod tests {
     fn seen(loaded: &[&str], notes: &[&str]) -> Observed {
         Observed {
             loaded: loaded.iter().map(|s| (*s).to_owned()).collect(),
+            compute_loaded: Vec::new(),
             folder: String::new(),
             stage_files: [
                 "composite.vsh",
@@ -539,6 +764,19 @@ mod tests {
                 .filter(|note| note.ends_with("skipped"))
                 .map(|s| (*s).to_owned())
                 .collect(),
+            loader_refusals: notes
+                .iter()
+                .filter_map(|note| note.strip_suffix(": skipped"))
+                .map(|name| {
+                    if name.contains('_') {
+                        sunrise_shaders::LoaderRefusal::ComputeStage(format!("{name}.csh"))
+                    } else {
+                        sunrise_shaders::LoaderRefusal::Program(name.to_owned())
+                    }
+                })
+                .collect(),
+            compute_stage_attempts: Vec::new(),
+            ungrounded_diagnostics: Vec::new(),
             shadow_pass: false,
             custom: Default::default(),
             stage_sizes: BTreeMap::new(),
@@ -643,6 +881,60 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_are_tied_to_real_property_and_source_subjects() {
+        let properties = sunrise_shaders::Properties::parse(
+            "iris.features.required = MISSING_FEATURE\nimage.bad = not-an-image\nuniform.float.fzA = unknown_name + 1\n",
+            &Macros::standard(),
+        );
+        let property_keys: BTreeMap<&str, &str> = properties
+            .entries
+            .iter()
+            .map(|entry| (entry.key.as_str(), entry.value.as_str()))
+            .collect();
+        let sources = BTreeMap::from([("composite.fsh".to_owned(), "void main() {}\n".to_owned())]);
+        assert!(feature_note_has_subject(
+            "the pack requires `MISSING_FEATURE`, which is not supported yet",
+            &properties
+        ));
+        assert!(located_note_has_subject(
+            "composite.fsh:1: bad token",
+            &sources
+        ));
+        assert!(post_note_has_subject(
+            "`image.bad`: not an image",
+            &property_keys,
+            &sources,
+            &[],
+            &[],
+            false,
+            false,
+            false
+        ));
+        assert!(custom_note_has_subject(
+            "`unknown_name` is unknown; it reads 0",
+            &property_keys
+        ));
+        assert!(!located_note_has_subject(
+            "missing.fsh:1: bad token",
+            &sources
+        ));
+        assert!(!post_note_has_subject(
+            "`image.typo`: not an image",
+            &property_keys,
+            &sources,
+            &[],
+            &[],
+            false,
+            false,
+            false
+        ));
+        assert!(!custom_note_has_subject(
+            "`not_in_pack` is unknown; it reads 0",
+            &property_keys
+        ));
+    }
+
+    #[test]
     fn a_named_skip_explains_the_expected_program() {
         let out = judge(
             Ok(seen(&[], &["composite: skipped"])),
@@ -650,6 +942,24 @@ mod tests {
             &request(&["composite"]),
         );
         assert!(out.failures.is_empty(), "{:?}", out.failures);
+    }
+
+    #[test]
+    fn a_compute_sibling_refusal_does_not_explain_another_stage() {
+        let mut observed = seen(&["composite"], &[]);
+        observed.loader_refusals = vec![sunrise_shaders::LoaderRefusal::ComputeStage(
+            "composite1_b.csh".to_owned(),
+        )];
+        let mut request = request(&[]);
+        request.expect_compute = vec!["composite1_a".to_owned()];
+        let out = judge(Ok(observed.clone()), Ok(observed), &request);
+        assert_eq!(
+            out.failures,
+            [Failure::new(
+                "refusal",
+                "composite1_a: compute stage not loaded, no note"
+            )]
+        );
     }
 
     #[test]

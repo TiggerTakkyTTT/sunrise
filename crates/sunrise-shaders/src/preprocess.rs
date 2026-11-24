@@ -82,6 +82,23 @@ pub fn preprocess(pack: &Pack, path: &str, macros: &Macros) -> Preprocessed {
     run.out
 }
 
+/// The pack-relative targets of `#include` directives in `text`, resolved exactly as
+/// [`preprocess`] resolves them. Comments and non-include directives are ignored.
+pub fn include_targets(from_file: &str, text: &str) -> Vec<String> {
+    let (text, _) = strip_comments(text);
+    text.lines()
+        .filter_map(|line| {
+            let after = line.trim_start().strip_prefix('#')?;
+            let (word, rest) = split_directive(after)?;
+            if word != "include" {
+                return None;
+            }
+            let target = rest.trim_matches(|c| c == '"' || c == '<' || c == '>');
+            resolve(from_file, target)
+        })
+        .collect()
+}
+
 struct Run<'p> {
     pack: &'p Pack,
     macros: Macros,
@@ -335,6 +352,17 @@ mod tests {
             ]
         );
         assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    }
+
+    #[test]
+    fn include_targets_ignore_trailing_line_comments() {
+        assert_eq!(
+            include_targets(
+                "world0/program/main.fsh",
+                "#include \"../lib/common.glsl\" // shared helpers\n#include </root.glsl> /* root */\n#define KEEP 1\n"
+            ),
+            ["world0/lib/common.glsl", "root.glsl"]
+        );
     }
 
     #[test]
