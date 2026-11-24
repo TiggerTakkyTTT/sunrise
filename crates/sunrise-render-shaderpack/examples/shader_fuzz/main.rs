@@ -588,6 +588,8 @@ fn expect_compute(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
     let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
     paths.retain(|path| case.files.get(path) != files.get(path));
     let options_changed = effective_option_macros(&case.files) != effective_option_macros(files);
+    let image_settings_changed = image_settings(&effective_properties(&case.files))
+        != image_settings(&effective_properties(files));
     active
         .into_iter()
         .filter(|stage| {
@@ -598,6 +600,7 @@ fn expect_compute(case: &Case, base: &Outcome, files: &Files) -> Vec<String> {
             }
             folder != previous_folder
                 || options_changed
+                || image_settings_changed
                 || paths
                     .iter()
                     .any(|path| reaches(case, files, &folder, owner, path))
@@ -1265,6 +1268,35 @@ mod tests {
         );
         assert_eq!(image_settings(&effective_properties(&files)).len(), 1);
         assert_eq!(expect(&case, &base, &files), ["final"]);
+    }
+
+    #[test]
+    fn image_setting_changes_recheck_loaded_compute_stages() {
+        let case = Case {
+            seed: 0,
+            pack: "compute".into(),
+            dim: 0,
+            flat: true,
+            programs: Vec::new(),
+            folder: String::new(),
+            files: [
+                ("composite.csh".into(), b"void main() {}".to_vec()),
+                ("shaders.properties".into(), Vec::new()),
+            ]
+            .into(),
+            steps: Vec::new(),
+        };
+        let base = Outcome {
+            compute_loaded: vec!["composite".into()],
+            ..Default::default()
+        };
+        let mut files = case.files.clone();
+        files.insert(
+            "shaders.properties".into(),
+            b"image.fz_test = none RGBA RGBA8 BYTE false false 8 8\n".to_vec(),
+        );
+
+        assert_eq!(expect_compute(&case, &base, &files), ["composite"]);
     }
 
     #[test]
