@@ -571,10 +571,10 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "daily"]
     fn written_custom_sky_modes_keep_their_factors_and_light() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
         let (device, queue) =

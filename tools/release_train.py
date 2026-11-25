@@ -779,7 +779,7 @@ def break_glass_legs(paths):
 
 
 # The crates that judge a release: its mod API surface (sunrise-stage), its packages and its signature.
-JUDGES = ("crates/sunrise-mod-api-gen", "crates/sunrise-mod-surface", "crates/sunrise-mod-package",
+JUDGES = ("crates/sunrise-stage", "crates/sunrise-mod-api-gen", "crates/sunrise-mod-surface", "crates/sunrise-mod-package",
           "crates/sunrise-release-sign")
 DEPENDENCY_KINDS = ("dependencies", "build-dependencies")
 

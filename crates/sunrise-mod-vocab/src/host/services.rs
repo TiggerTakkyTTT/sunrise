@@ -1,6 +1,7 @@
 //! Host method declarations; access defaults and game forwarders are generated.
 #![allow(unused_variables)]
 use crate::*;
+use std::sync::mpsc::Sender;
 /// The server host's methods of the `services` area, implemented by the game and reached through [`ServerHost`].
 #[sunrise_mod_api_macros::host_area]
 pub trait ServicesServerHost {
@@ -16,6 +17,9 @@ pub trait ServicesServerHost {
     /// The players service.
     #[service]
     fn players(&self) -> &dyn Players;
+    /// The profiles service.
+    #[service]
+    fn profiles(&self) -> &dyn Profiles;
     /// The runtime_levels service.
     #[service]
     fn runtime_levels(&mut self) -> &mut dyn RuntimeLevels;
@@ -29,6 +33,14 @@ pub trait ServicesClientHost {
     /// such as the client-side `entity_entering_section` callback, or after a task from
     /// the calling mod panicked in this client session.
     fn client_executor(&self) -> Option<ClientExecutor>;
+    /// Ask the local client to quit, even from the title screen without a world open.
+    /// The client uses the normal Quit Game path after the calling hook returns,
+    /// disconnecting from any server and waiting for an integrated server to save
+    /// and release its world lock before exiting. This is not a server operation.
+    /// Returns `true` if the request was recorded, not if shutdown succeeded;
+    /// returns `false` if there is no live client or a quit is pending or underway.
+    #[decline_unavailable]
+    fn request_client_quit(&self) -> bool;
     /// Persistent model groups.
     #[service]
     fn instance_groups(&self) -> &dyn InstanceGroups;
@@ -65,12 +77,12 @@ pub trait ClientSession {
         unimplemented!("ClientSession::client_latency")
     }
     /// Side: client.
-    /// The player list as the Tab overlay draws it: each listed player's drawn name, profile
-    /// name, UUID, game mode and latency in drawn order, at most the 80 it draws, with the
-    /// header and footer. What this client has been sent; None outside a logged-in client
-    /// world. Sends nothing.
-    fn client_tab_list(&self) -> Option<ClientTabList> {
-        unimplemented!("ClientSession::client_tab_list")
+    /// Borrow the live Tab overlay view, without copying rows or text. `Ok(None)` means
+    /// no logged-in client world; an empty list in a logged-in world still has a view.
+    /// An unavailable session service returns [`ClientSessionReadError::Unavailable`].
+    /// Sends nothing.
+    fn client_tab_list(&self) -> Result<Option<&dyn ClientTabList>, ClientSessionReadError> {
+        Err(ClientSessionReadError::Unavailable)
     }
     /// Side: client.
     /// Existing local frame counters; None outside a logged-in client world.
@@ -93,12 +105,44 @@ pub trait Commands {
         unimplemented!("Commands::refresh_commands")
     }
     /// Side: server.
-    /// An executor can send success feedback to the command's originating source, using
-    /// vanilla's silence, send-command-feedback and block/cart track-output rules.
-    /// This sends a message; the executor's return value determines the command result.
+    /// An executor's success line, as vanilla's `CommandSourceStack.sendSuccess(line,
+    /// broadcast_to_admins)`. A silent source (`execute` run quietly, a function, a mod's
+    /// suppressed run) sends nothing at all. Otherwise the line goes to the originating
+    /// source when it takes success feedback: a player while `send_command_feedback` is on,
+    /// the console and RCON always, a command block or minecart that tracks output while
+    /// `send_command_feedback` is on; never to the `execute as` entity.
+    ///
+    /// With `broadcast_to_admins`, and when the origin informs operators (a player always,
+    /// a block or minecart that tracks output while `command_block_output` is on, the
+    /// console and RCON per `broadcast-console-to-ops` / `broadcast-rcon-to-ops`), the line
+    /// is also wrapped as `[name: line]` (`chat.type.admin`, gray and italic, with the
+    /// display name of the `execute as` entity, else the block's, minecart's or server's).
+    /// That line goes to every operator (`PlayerList.isOp`, a level-0 operator too) but
+    /// the source player while `send_command_feedback` is on, and to the server log while
+    /// `log_admin_commands` is on unless the console is the source; neither rule gates
+    /// the other. Pass `false` for a query or list, as vanilla does.
+    ///
+    /// The text is converted once. Delivering to no one is still `Ok(())`, and the
+    /// executor's return value alone determines the command result.
     /// Refuses text deeper than 512 component nodes before applying any changes.
-    fn feedback(&mut self, line: Text) -> Result<(), TextFormError> {
+    fn feedback(&mut self, line: Text, broadcast_to_admins: bool) -> Result<(), TextFormError> {
         unimplemented!("Commands::feedback")
+    }
+    /// Side: server.
+    /// An executor can send a failure line to the command's originating source, as vanilla's
+    /// `CommandSourceStack.sendFailure` (the same call a NeoForge command registered in
+    /// `RegisterCommandsEvent` makes on its source): the line in red, shown unless the source is
+    /// silent or does not accept failures (a command block or minecart with track output off),
+    /// and independent of `sendCommandFeedback`. A command block or minecart keeps it as its last
+    /// output. It changes nothing else: the executor still returns the command's result, so
+    /// Java's `source.sendFailure(text); return 0;` is `failure(text)` then `Ok(0)`: `execute
+    /// store result` reads 0, without the `Err` path of a failed command (`execute store success`
+    /// reads 1 and a command block counts a success, as for any vanilla command that returns 0).
+    /// Refuses text deeper than 512 component nodes before
+    /// applying any changes; a line whose red formatting no longer fits a packet or a saved
+    /// command block is replaced by `command.failed`, as a returned failure is.
+    fn failure(&mut self, line: Text) -> Result<(), TextFormError> {
+        unimplemented!("Commands::failure")
     }
     /// Side: server.
     /// Runs `line` (no slash) as the server's console does: permission
@@ -112,33 +156,58 @@ pub trait Commands {
         unimplemented!("Commands::run_command")
     }
     /// Side: server.
-    /// `run_command` with its feedback kept: the same line, source and run
-    /// path (one leading slash is dropped here), answering with whether it
-    /// ran without failing (`success`, what `run_command` returns) and what the
-    /// console would have printed for it as plain text (`feedback`, as a mod
-    /// that answers a remote console wants; Paper's `Server.dispatchCommand`
-    /// with a capturing `CommandSender`). The feedback of the command alone is
-    /// kept, never the lines other code logs meanwhile; a call made while
-    /// another one runs captures its own lines and the outer capture goes on
-    /// unchanged. At most 256 lines of 4096 bytes each
-    /// come back (a longer line is cut at a character boundary). A command that ran and failed
-    /// is `success: false` with its message in `feedback`. A line run where no server
-    /// is open to players, or empty once its whitespace and slash are
-    /// dropped, runs nothing and is `success: false` with no feedback, exactly as
-    /// `run_command` answers `false` for it; no refusal type tells those
-    /// apart from a failed command, as `run_command` has none either. The
-    /// dedicated console's own commands (`stop`, `op`, `whitelist`, `ban`...)
-    /// are not reached: they answer as an unknown command.
+    /// Runs a console command from the world spawn level (`MinecraftServer.createCommandSourceStack`)
+    /// and returns a synchronous snapshot of every source message emitted before the call returns,
+    /// as plain text in order and without truncation. Messages sent by delayed command listeners
+    /// after dispatch returns (such as `/test` completion summaries) are not waited for or
+    /// included; use [`Self::run_command_with_feedback`] to receive structured messages including
+    /// delayed ones, and to tell success, failure and direct system messages apart. Both methods
+    /// have the same execution result and source routing. A command can fail after already sending
+    /// success feedback. Public `/say` and `/me` announcements are chat, not source feedback.
     fn run_command_with_output(&mut self, line: &str) -> CommandResult {
         unimplemented!("Commands::run_command_with_output")
+    }
+    /// Side: server.
+    /// Runs `line` as the server console from the world spawn level
+    /// (`MinecraftServer.createCommandSourceStack`), dropping one leading slash, and sends the
+    /// command source's structured messages to `output` in order as they occur. Logs, public
+    /// chat, chat to other recipients and operator broadcasts are not source feedback.
+    /// Outgoing confirmations addressed to a non-player command source (such as `/msg`) are delivered as
+    /// [`CommandFeedback::System`]. Nested calls have their own output. Output is not truncated;
+    /// the receiver decides what to keep or display. A component that cannot be represented is
+    /// sent as a `TextFormError` in its place. Dropping the receiver stops delivery but does not
+    /// interrupt the command.
+    ///
+    /// The channel closes once the command returns and every delayed listener bound to that
+    /// command source (such as a `/test` runner's summary displayer or `/fetchprofile`) finishes
+    /// and drops its source. On the server thread, drain with `try_iter()` or `try_recv()` rather
+    /// than blocking iteration so delayed commands can keep ticking; a background reader thread
+    /// may block until disconnection.
+    ///
+    /// Returns whether the command ran without failing. A blank line or no open server runs
+    /// nothing and returns `false` without sending a message. Commands handled only by the
+    /// dedicated console (`stop`, `op`, `whitelist`, `ban`...) are unknown to this dispatcher.
+    fn run_command_with_feedback(
+        &mut self,
+        line: &str,
+        output: Sender<Result<CommandFeedback, TextFormError>>,
+    ) -> bool {
+        unimplemented!("Commands::run_command_with_feedback")
     }
 }
 /// The levels service, reached through its host.
 pub trait Levels {
     /// Side: server.
-    /// Loaded server levels, in vanilla dimension order. Empty without a server world.
-    fn list_levels(&self) -> Vec<LevelRef> {
-        unimplemented!("Levels::list_levels")
+    /// Visit loaded server levels in creation order: the Overworld first, then the other
+    /// configured levels in registry traversal, then later opens. Return `Break(())` to stop.
+    /// Without an open world, the visit completes without a call. An unavailable service returns
+    /// `Unavailable`.
+    fn visit_levels(
+        &self,
+        visit: &mut dyn FnMut(LevelRef) -> core::ops::ControlFlow<()>,
+    ) -> Result<core::ops::ControlFlow<()>, ServerReadError> {
+        let _ = visit;
+        Err(ServerReadError::Unavailable)
     }
 }
 /// The messages service, reached through its host.
@@ -172,35 +241,69 @@ pub trait Players {
     fn acting_player(&self) -> Option<PlayerRef> {
         unimplemented!("Players::acting_player")
     }
+    /// Side: server.
+    /// `MinecraftServer.getSingleplayerProfile`: the profile an integrated server was created
+    /// with, its owner's name, UUID and login properties, borrowed from the host. Fixed when
+    /// the server is created, so every read returns the same profile, from the
+    /// `server_about_to_start` and `server_starting` hooks on, before the owner joins and
+    /// after they leave. None on a dedicated server and on a client.
+    /// [`PlayerRef::is_singleplayer_owner`] matches a player to it by name.
+    fn singleplayer_profile(&self) -> Option<GameProfile<'_>> {
+        unimplemented!("Players::singleplayer_profile")
+    }
+}
+/// The profiles service, reached through its host: account profiles by name or UUID through
+/// the server's `ProfileResolver.Cached`, the one `/fetchprofile` and dynamic player heads use,
+/// also on an offline-mode server. Each name and each UUID is kept 10 minutes after its last
+/// lookup, at most 256 of each, so polling a lookup keeps its answer. A lookup that failed
+/// or found no account is kept the same way, as `Done(None)`; a new request is sent only
+/// once it has expired.
+pub trait Profiles {
+    /// Side: server.
+    /// The profile of the account named `name`, any case (`ProfileResolver.fetchByName`):
+    /// its UUID from the name lookup, then the session service's signed profile. A name
+    /// `StringUtil.isValidPlayerName` refuses (over 16 UTF-16 units, or anything but printable
+    /// ASCII other than a space) answers `Done(None)` without a request. `Done(None)` off a
+    /// server.
+    fn resolve_name(&self, name: &str) -> ProfileResolution {
+        unimplemented!("Profiles::resolve_name")
+    }
+    /// Side: server.
+    /// The session service's signed profile of the account `uuid`
+    /// (`ProfileResolver.fetchById`). `Done(None)` off a server.
+    fn resolve_id(&self, uuid: u128) -> ProfileResolution {
+        unimplemented!("Profiles::resolve_id")
+    }
 }
 /// The runtime_levels service, reached through its host.
-/// Success from `open` or `unload` admits a queued request, not its completion.
+/// Success from `open`, `unload` or `delete` admits a queued request, not its completion.
+/// These requests are not restricted to the calling mod's namespace.
 /// Apply failures are logged with the requesting mod and level id. A failed open
 /// leaves the id unpublished and free to retry; a failed unload keeps it open for retry.
 pub trait RuntimeLevels {
     /// Side: server.
-    /// Open the level `id` (`mymod:instance/ab`), in the calling mod's namespace, as `level`
-    /// describes. The request is checked now and applied after this server tick's levels have
-    /// ticked, never inside a level's tick: the level is not open, and `is_open` says false, until
-    /// then. The handle names this open of the level and never a later one. A folder that
-    /// exists under the id is reopened as it was saved. `level_load` fires when it opens.
-    /// Refused with [`RuntimeLevelError`] for an id outside the mod's namespace, one already
-    /// open or waiting, an unknown dimension type or generator, a noise generator, and when
-    /// the server's cap of open runtime levels (`sunrise-max-runtime-levels`, 64) is reached.
+    /// Open the level `id` (`mymod:instance/ab`), as `level` describes. The request is checked
+    /// now and applied after this server tick's levels have ticked, never inside a level's tick:
+    /// the level is not open, and `is_open` says false, until then. The handle names this open of
+    /// the level and never a later one. A folder that exists under the id is reopened as it was
+    /// saved. `level_load` fires when it opens. Refused with [`RuntimeLevelError`] for an invalid
+    /// or reserved id, one already open or waiting, an unknown dimension type or generator, or an
+    /// unknown, invalid or incompatible biome source.
     fn open(&mut self, id: &str, level: RuntimeLevel) -> Result<LevelRef, RuntimeLevelError> {
         unimplemented!("RuntimeLevels::open")
     }
     /// Side: server.
-    /// Save and close the level `id` the calling mod opened, keeping its folder, once this server
+    /// Save and close the open runtime level `id`, keeping its folder, once this server
     /// tick's levels have ticked: `level_unload` fires then. Refused with
     /// [`RuntimeLevelError::PlayersInside`] while a player or an arrival not yet landed is in the
     /// level, now and again when it is applied: the mod moves its players out first
-    /// (`entity_teleport_to_level`).
+    /// (`entity_teleport_to_level`). [`RuntimeLevelError::NotOpen`] means no runtime level
+    /// of that id is open to unload.
     fn unload(&mut self, id: &str) -> Result<(), RuntimeLevelError> {
         unimplemented!("RuntimeLevels::unload")
     }
     /// Side: server.
-    /// Remove the level `id` the calling mod owns, folder and all, once this server tick's levels
+    /// Remove the runtime level `id`, folder and all, once this server tick's levels
     /// have ticked. A level that is open is saved and closed first (`level_unload` fires), as by
     /// `unload`; a level that is not open, such as the leftovers of a crash, only has its files
     /// removed, and a level with no files is nothing to delete. The structure references the
@@ -210,7 +313,8 @@ pub trait RuntimeLevels {
     /// it is applied, with [`RuntimeLevelError::PlayersInside`] while a player or an arrival not
     /// yet landed is in the level, with [`RuntimeLevelError::LevelsBelow`] while a level below
     /// the id exists (`mymod:instance/ab` below `mymod:instance`: the folders nest), and with
-    /// [`RuntimeLevelError::AlreadyOpen`] for a level still waiting to open. An `open` of a level
+    /// [`RuntimeLevelError::AlreadyOpen`] for a level still waiting to open. A vanilla, startup
+    /// or data-pack id is refused with [`RuntimeLevelError::ReservedId`]. An `open` of a level
     /// that is open and being deleted is `AlreadyOpen` until the delete is applied; one of a
     /// level that was not open, made after the `delete`, is applied after it and starts empty.
     /// If the level closed but its files could not all be removed, it stays closed and
@@ -239,11 +343,12 @@ pub trait RenderAssets {
     }
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
-    /// Resolve a pipeline registered in `register_render_pipelines` once in `client_setup` and
-    /// again in `client_resources_reloaded`, not each frame. `Unknown` for an id no mod
-    /// registered, `Invalid` for one whose shader the current resources don't give or that
+    /// Resolve the handle of a registered render pipeline by ID once in `client_setup` and
+    /// again in `client_resources_reloaded`, not each frame. `Unknown` for an ID
+    /// no mod registered, `Invalid` for one whose shader the current resources don't give or that
     /// didn't compile. Nothing is read or compiled here.
     fn render_pipeline(&self, id: &Identifier) -> Result<RenderPipelineRef, RenderPipelineError> {
+        let _ = id;
         unimplemented!("RenderAssets::render_pipeline")
     }
     /// Side: client.
@@ -296,9 +401,7 @@ pub trait RenderAssets {
 
 /// Client-side persistent copies of resolved models.
 pub trait InstanceGroups {
-    /// Allocate up to 16,384 copies, initially length zero. Each mod may reserve 65,536
-    /// copies total (an empty group reserves one slot). Only visible copies in the drawn
-    /// length, not capacity, consume the view budget. At most 16,384 groups per view.
+    /// Allocate storage for `capacity` copies, initially length zero.
     /// Create at setup/reload, not each frame. Visible GPU-routed copies upload each drawn frame.
     /// Reload, world close, disabling the owning mod, or explicit destroy retires the group.
     /// Re-enabling a mod never revives its old handles; recreate groups after publication.

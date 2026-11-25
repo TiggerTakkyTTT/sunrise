@@ -37,9 +37,8 @@ my_mod.smod
 
 There is no mod-id directory level inside the archive. `sunrise-mod.toml` is the only manifest and the only
 source of the mod's id and version; Cargo's package name and version are not mod identity. IDs are plain
-`[a-z0-9_]{1,64}` names, also used as resource namespaces. The launcher writes `horizon-mixin.toml` in its
-staging area when needed. Hand-written tool manifests, `sunrise-native.json`, and input `native/` or `rust/`
-folders are unsupported.
+`[a-z0-9_]{1,64}` names, also used as resource namespaces. The native builder writes its own tool manifest
+in its staging area when needed.
 
 ## `sunrise-mod.toml`
 
@@ -67,7 +66,13 @@ file that receives it, a `name` that is a Rust module identifier, and a `source`
 `"pub"` or `"pub(crate)"`, the default. See [Support modules](../concepts/native-route/5-support-modules.md).
 
 Native source edits use `[[native.mixin]]` with `id`, `target`, uppercase `kind`, `helper` and the
-other horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). This package reads only `id`, `target`, `kind` and `helper` of a row (and refuses `hook` and `hook_version`) and forwards every other key to the tool as written; the tool then refuses a key it does not know, so an unknown key on a mixin row fails at build time, not when the manifest is read. The same holds for the keys of `[[native.bridge]]` and `[[native.state]]` rows. An `OVERWRITE` row must carry the tool's `fingerprint`. `[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route; `[[native.state]]` is refused. See [The native route](../concepts/native-route.md) for every table, its fields and its refusals.
+other horizon-mixins options ([Mixins](../concepts/native-route/2-mixins.md)). The package reader checks
+`id`, `target`, `kind` and `helper`, refuses `hook` and `hook_version`, and forwards the other keys as
+written. An unknown mixin option fails at build time, when the tool reads it. The tool also validates
+forwarded `[[native.bridge]]` options. An `OVERWRITE` row must carry the tool's `fingerprint`.
+`[[native.loop]]`, `[[native.bridge]]` and `[[native.module]]` complete the route. The package reader
+refuses `[[native.state]]` with `E_MIXIN_STATE_LAYOUT`; it is never forwarded to the tool.
+See [The native route](../concepts/native-route.md) for each table and its fields.
 
 ### `[runtime]`: data files beside the code
 
@@ -105,9 +110,9 @@ base = { version = "^1", optional = false, side = "both", order = "after", reaso
 Versions refer to `sunrise-mod.toml`, not Cargo metadata. `optional` defaults to false;
 `side` defaults to `"both"`; `order` is `"after"` (default), `"before"` or `"none"`.
 After means the dependency's listeners/content precede the owner's; before reverses that
-**dispatch** edge; none removes it. Reason is at most 512 bytes and URL must start with
-`https://`. Unknown fields and malformed values refuse the manifest; there is no `kind`
-key or alternate optional spelling.
+**dispatch** edge; none removes it. `reason` is a string, and `url` must start with
+`https://`. Unknown fields and malformed values are reported when the manifest is parsed;
+there is no `kind` key or alternate optional spelling.
 
 Side is the **installation**, not the logical side executing a hook: an integrated server
 belongs to the client installation, a dedicated server to the server installation.
@@ -116,10 +121,11 @@ missing/version/order checks at startup. A missing required dependency, incompat
 version or dispatch cycle refuses loading; an absent optional dependency is allowed. Content and
 native manifests share the installed-set rule resolver.
 
-**Physical linking is separate from dispatch policy.** Native builds wire only supplied code
-packages; a content-only target has no Cargo alias. At startup, the loader and compiled package
-inventory enforce physical requirements. Dispatch order, side filters and instance overrides cannot
-remove those requirements or bypass ABI and build identity checks.
+**Physical linking is separate from dispatch policy.** The build wires supplied native dependencies
+by their actual root Cargo package, not a separate API declaration. A content-only target has no Cargo
+alias. At startup, the loader and compiled package inventory enforce physical requirements. Dispatch
+order, side filters and instance overrides cannot remove those requirements or bypass ABI and build
+identity checks.
 See [Dependencies between mods](../concepts/dependencies.md).
 
 Top-level `served_by = "<native_mod_id>"` lets a content package delegate code-side namespace authority to an opting-in native runtime mod (for example a bytecode or script host that compiles once and serves generated `.smod` packages). Both sides opt in:
@@ -131,9 +137,10 @@ Top-level `served_by = "<native_mod_id>"` lets a content package delegate code-s
 - **Host-runtime trust contract:** setting `serves_content = true` allows any installed content package to name the host in `served_by`. The loader verifies package syntax, opt-in, side coverage, and load order, not provenance; the host runtime is responsible for checking which `served_by` packages in `context.mods()` it actually generated or understands before registering parts or declarations for their namespaces.
 - A served content package failing to load (missing jar, unreadable file, or content refusal) refuses startup so host code never runs without its served data. Toggling either the served package or its serving host on the Mods screen requires a restart; when a serving host is disabled at startup, its served packages are withheld (with a Mods-screen note naming the disabled host) rather than loaded without it.
 
-Top-level `[properties]` holds free-form values other mods read: strings, integers, floats and booleans only,
-at most 64 keys and 8 KiB (keys and strings by length, 8 bytes per number, 1 per boolean); a table, an array
-or a larger table refuses the package. A mod reads any loaded package's manifest through
+Top-level `[properties]` holds free-form values other mods read: strings, integers, floats and booleans only.
+Unsupported values, such as arrays or tables, are refused when the manifest is parsed. The complete
+`sunrise-mod.toml` is limited to 32 MiB; there is no separate limit on property count, property size or
+reason length. A mod reads any loaded package's manifest through
 `context.mods().get(id)`: `PackageInfo` gives `name`, `description`, `authors`, `license`, `homepage`,
 `issues`, `icon_path`, `kind`, `served_by`, `dependencies` and `property(key)`. Each read-only
 `PackageDependency` exposes `id()`, `version()`, `kind()`, `order()`, `side()`, `reason()` and
@@ -160,7 +167,7 @@ shaders = { version = "*", reason = "Flickers with the water shader", url = "htt
 ```
 
 An `[incompatible]` or `[discouraged]` entry is a semver requirement on the other mod's version, or a
-table with `version` (every version when left out), `reason` (at most 512 bytes), `url` (`https://`
+table with `version` (every version when left out), `reason` (a string), `url` (`https://`
 only) and `side` (`"both"`, the default, `"client"` or `"server"`, the dedicated server). A rule
 about a mod that isn't loaded holds nothing. A matching incompatible mod refuses startup with the
 owner's reason and link; a matching discouraged mod loads with a warning in the log and on

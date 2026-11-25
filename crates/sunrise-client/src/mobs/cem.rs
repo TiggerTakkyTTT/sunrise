@@ -904,6 +904,7 @@ fn part(
             .iter()
             .map(|c| part(c, count, ids, anchors))
             .collect(),
+        layer: None,
     }
 }
 
@@ -923,6 +924,7 @@ mod tests {
                 vertices: [[0.0; 5]; 4],
             }],
             children,
+            layer: None,
         }
     }
     fn get<'a>(part: &'a Part, name: &str) -> &'a Part {
@@ -1441,7 +1443,6 @@ mod tests {
             heightmaps: Default::default(),
             animations: Default::default(),
             biome_tags: Default::default(),
-            entity_tags: Default::default(),
             villager_hats: Default::default(),
             frame_models: Default::default(),
             cem: std::sync::RwLock::new(models.clone()),
@@ -1495,6 +1496,7 @@ mod tests {
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children: vec![plane(part, vec![])],
+            layer: None,
         };
         let textured = |texture: &str| {
             format!(
@@ -1572,6 +1574,7 @@ mod tests {
             pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children: vec![plane("body", vec![])],
+            layer: None,
         };
         let file = format!(
             r#"{{"texture": "textures/entity/wolf/custom_armor.png", "models": [

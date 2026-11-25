@@ -7,7 +7,7 @@ use crate::{
         ingress::{Prepared, Producer, ReceiveLease, Refusal, Refused},
     },
 };
-use mod_api::PayloadContextError;
+use mod_api::{__private::game::CallbackFailure, PayloadContextError};
 
 pub enum MainQueue {
     Client(Producer<Event>),
@@ -44,7 +44,7 @@ impl MainQueue {
         &self,
         incoming: Incoming,
         credit: Option<ReceiveLease<Event>>,
-    ) -> Result<PreparedMain, PayloadContextError> {
+    ) -> Result<PreparedMain, (PayloadContextError, Option<CallbackFailure>)> {
         let refusal = |reason| match reason {
             Refusal::Pressure => PayloadContextError::Backpressure,
             Refusal::Closed => PayloadContextError::Disconnected,
@@ -57,7 +57,12 @@ impl MainQueue {
                     None => events.prepare(event),
                 }
                 .map(PreparedMain::Client)
-                .map_err(|error| refusal(error.reason))
+                .map_err(|error| {
+                    let Event::RawPayload(mut incoming) = error.value else {
+                        unreachable!("only payloads were submitted")
+                    };
+                    (refusal(error.reason), incoming.dispose_body().err())
+                })
             }
             Self::ClientBundle(work) => {
                 // Incoming (including enqueued work) already holds its payload
@@ -78,7 +83,15 @@ impl MainQueue {
                     incoming,
                 })))
                 .map(PreparedMain::Server)
-                .map_err(|error| refusal(error.reason)),
+                .map_err(|error| {
+                    let NetEvent::RawPayload(mut delivery) = error.value else {
+                        unreachable!("only payloads were submitted")
+                    };
+                    (
+                        refusal(error.reason),
+                        delivery.incoming.dispose_body().err(),
+                    )
+                }),
         }
     }
 }

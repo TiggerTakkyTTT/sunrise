@@ -78,6 +78,7 @@ impl Game<'_> {
             pos,
             facing,
             variant: Arc::from(""),
+            asset: None,
             width: 1,
             height: 1,
             check_interval: 0,
@@ -126,6 +127,7 @@ impl Game<'_> {
             pos,
             facing,
             variant: Arc::from(""),
+            asset: None,
             width: 1,
             height: 1,
             check_interval: 0,
@@ -199,8 +201,7 @@ impl Game<'_> {
             (lo[1] + hi[1]) / 2.0,
             (lo[2] + hi[2]) / 2.0,
         ];
-        self.audio
-            .play("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
+        self.play_audio("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
         // HangingEntityItem.useOn: ENTITY_PLACE at the painting, by the player, before it is
         // added; ItemStack.useOn then counts the use.
         let ctx = self.player_context(None);
@@ -217,13 +218,6 @@ impl Game<'_> {
     }
     /// The painting under the crosshair within reach and its distance.
     pub(super) fn painting_hit(&self) -> Option<(usize, f64)> {
-        let mut pick = crate::game::pick_accumulator::PickAccumulator::new(self.entity_reach);
-        self.painting_hit_with_pick(&mut pick)
-    }
-    pub(super) fn painting_hit_with_pick(
-        &self,
-        pick: &mut crate::game::pick_accumulator::PickAccumulator,
-    ) -> Option<(usize, f64)> {
         if let Some(hit) = self.cached_entity_pick() {
             let (entity, distance, _) = hit?;
             let index = self.paintings.iter().position(|f| f.id == entity.id())?;
@@ -231,25 +225,17 @@ impl Game<'_> {
         }
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
+        let (from, to) = super::pick_accumulator::pick_ray_segment(eye, dir, reach);
+        let mut pick = super::pick_accumulator::PickAccumulator::new(reach * reach);
         let mut best: Option<(usize, f64)> = None;
         for (i, p) in self.paintings.iter().enumerate() {
             let (lo, hi) = p.bounds();
-            let (mut t0, mut t1) = (0.0f64, reach);
-            let mut hit = true;
-            for a in 0..3 {
-                if dir[a].abs() < 1e-9 {
-                    hit &= eye[a] >= lo[a] && eye[a] <= hi[a];
-                    continue;
-                }
-                let (mut ta, mut tb) = ((lo[a] - eye[a]) / dir[a], (hi[a] - eye[a]) / dir[a]);
-                if ta > tb {
-                    std::mem::swap(&mut ta, &mut tb);
-                }
-                t0 = t0.max(ta);
-                t1 = t1.min(tb);
-            }
-            if hit && t0 <= t1 && pick.consider(self, p.id, t0) {
-                best = Some((i, t0));
+            let bb = Aabb::new(
+                Vec3::new(lo[0], lo[1], lo[2]),
+                Vec3::new(hi[0], hi[1], hi[2]),
+            );
+            if pick.consider_box(self, p.id, from, to, bb) {
+                best = Some((i, pick.hovered.unwrap().distance_sq.sqrt()));
             }
         }
         best
@@ -275,7 +261,17 @@ impl Game<'_> {
         };
         // BlockAttachedEntity.kill, before dropItem.
         self.entity_killed_event_by(at, source);
-        self.drop_painting(p, at, by_player);
+        let creative = match source {
+            Some(super::commands::Target::Player) => self.creative,
+            Some(super::commands::Target::Guest(conn)) if self.lan_acting == Some(conn) => {
+                self.creative
+            }
+            Some(super::commands::Target::Guest(conn)) => {
+                self.command_guest(conn).is_some_and(|g| g.creative())
+            }
+            _ => by_player && self.creative,
+        };
+        self.drop_painting(p, at, creative);
         true
     }
     /// `BlockAttachedEntity.tick`: a painting whose `survives()` failed is
@@ -306,9 +302,8 @@ impl Game<'_> {
         self.world.modified.insert((p.pos[0] >> 4, p.pos[2] >> 4));
         Some((p, at))
     }
-    /// `Painting.dropItem`: the break sound, then the item unless drops are off
-    /// or the player who broke it has infinite materials.
-    fn drop_painting(&mut self, p: Painting, at: [f64; 3], by_player: bool) {
+    /// `Painting.dropItem`: break sound, then item unless drops off or creative.
+    fn drop_painting(&mut self, p: Painting, at: [f64; 3], creative: bool) {
         if !self
             .ui
             .rules
@@ -316,9 +311,8 @@ impl Game<'_> {
         {
             return;
         }
-        self.audio
-            .play("minecraft:entity.painting.break", Some(at), 1.0, 1.0);
-        if by_player && self.creative {
+        self.play_audio("minecraft:entity.painting.break", Some(at), 1.0, 1.0);
+        if creative {
             return;
         }
         let stack = ItemStack {
@@ -365,6 +359,9 @@ impl Game<'_> {
         let sprites = &self.gui.atlas.sprites;
         let partial = alpha as f32;
         for p in &self.paintings {
+            if self.hides_as_camera(p.id) {
+                continue;
+            }
             // EntityRenderer.shouldRender: the default range and its box,
             // measured from the box's centre (HangingEntity's position).
             let (lo, hi) = p.bounds();
@@ -430,10 +427,14 @@ impl Game<'_> {
             let Some(back) = sprites.get("painting/back").copied() else {
                 continue;
             };
-            let Some(v) = self.painting_variants.get(&p.variant) else {
-                continue;
+            let asset = match p.asset.as_deref() {
+                Some(asset) => asset,
+                None => match self.painting_variants.get(&p.variant) {
+                    Some(v) => v.asset.as_str(),
+                    None => continue,
+                },
             };
-            let Some(front) = sprites.get(&format!("painting/{}", v.asset)).copied() else {
+            let Some(front) = sprites.get(&format!("painting/{asset}")).copied() else {
                 continue;
             };
             let (lo, hi) = p.bounds();
@@ -577,6 +578,7 @@ mod tests {
             pos: [0, 0, 0],
             facing: 0,
             variant: Arc::from("minecraft:kebab"),
+            asset: None,
             width: 1,
             height: 1,
             check_interval: 0,

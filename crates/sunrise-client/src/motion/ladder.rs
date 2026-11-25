@@ -134,7 +134,7 @@ impl LivingAirWorld for MotionWorld<'_, '_, '_> {
         self.player.velocity
     }
     fn set_velocity(&mut self, v: Vec3) -> Result<()> {
-        self.player.velocity = v;
+        self.player.set_velocity(v);
         Ok(())
     }
     fn on_climbable(&mut self) -> Result<bool> {

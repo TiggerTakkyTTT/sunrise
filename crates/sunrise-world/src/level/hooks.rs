@@ -124,6 +124,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
 
     /// `BlockState.onPlace`.
     pub fn on_place(&mut self, state: BlockStateId, pos: BlockPos, old: BlockStateId, moved: bool) {
+        self.level
+            .observe_on_place(self.ticks, pos, state, old, moved);
         let b = self.b;
         let block = b.block(state);
         let same = b.block(old) == block;

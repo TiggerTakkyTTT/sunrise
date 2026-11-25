@@ -15,10 +15,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     f32::consts::PI,
 };
-use sunrise_core::{
-    geometry::{Vec3, trig::Mth},
-    random::RandomSource,
-};
+use sunrise_core::geometry::{Vec3, trig::Mth};
 use sunrise_protocol::entity_data::PositionSource;
 
 pub const EMERGE_DURATION: i64 = warden_brain::EMERGE_DURATION as i64;
@@ -126,7 +123,7 @@ pub enum AngerLevel {
     Angry,
 }
 impl AngerLevel {
-    pub fn by_anger(anger: i32) -> Self {
+    pub(crate) fn by_anger(anger: i32) -> Self {
         if anger >= 80 {
             Self::Angry
         } else if anger >= 40 {
@@ -142,7 +139,7 @@ impl AngerLevel {
             Self::Angry => 80,
         }
     }
-    pub fn is_angry(self) -> bool {
+    pub(crate) fn is_angry(self) -> bool {
         self == Self::Angry
     }
     pub fn ambient_sound(self) -> &'static str {
@@ -152,7 +149,7 @@ impl AngerLevel {
             Self::Angry => "entity.warden.angry",
         }
     }
-    pub fn listening_sound(self) -> &'static str {
+    pub(crate) fn listening_sound(self) -> &'static str {
         match self {
             Self::Calm => "entity.warden.listening",
             _ => "entity.warden.listening_angry",
@@ -324,7 +321,7 @@ impl AngerManagement {
     /// and the binding is forgotten. As vanilla, the increase is capped first, and
     /// a new suspect then gets the anger kept under its UUID while it was away
     /// (`angerByUuid.removeInt(entity.getUUID())`), uncapped.
-    pub fn increase_player(&mut self, uuid: Option<[i32; 4]>, amount: i32) -> i32 {
+    pub(crate) fn increase_player(&mut self, uuid: Option<[i32; 4]>, amount: i32) -> i32 {
         if self.player != uuid
             && let Some(anger) = self.anger.get(&Who::Player).copied()
         {
@@ -366,10 +363,10 @@ impl AngerManagement {
         }
     }
     /// `getActiveEntity`: the first suspect that can still be targeted.
-    pub fn active_entity(&self, can_target: impl Fn(Who) -> bool) -> Option<Who> {
+    pub(crate) fn active_entity(&self, can_target: impl Fn(Who) -> bool) -> Option<Who> {
         self.suspects.iter().copied().find(|w| can_target(*w))
     }
-    pub fn anger_of(&self, who: Who) -> i32 {
+    pub(crate) fn anger_of(&self, who: Who) -> i32 {
         self.anger.get(&who).copied().unwrap_or(0)
     }
     pub fn suspects(&self) -> &[Who] {
@@ -421,14 +418,15 @@ impl Warden {
 }
 
 pub fn register(m: &mut Mob) {
-    // The brain at construction, with the mob's own type id so a mod part's
-    // behaviors join it (#824).
-    let id = m.kind.id.clone();
+    // The brain at construction; authoritative mobs stage mod behaviors for it
+    // when `attach_mod_parts` runs.
+    let generation = m.next_brain_generation();
     let st = Warden {
-        brain: Brain::new(&id, 0),
+        brain: Brain::new(generation, 0),
         ..Warden::default()
     };
     m.extra.warden = Some(Box::new(st));
+    m.stage_brain_behaviors(super::mod_behaviors::BehaviorTarget::Warden(generation));
     m.ai.nav.can_float = true;
     m.set_malus(PathType::UnpassableRail, 0.0);
     m.set_malus(PathType::Damaging, 8.0);
@@ -449,13 +447,18 @@ pub fn delay_sensors(m: &mut Mob) {
 /// A brain whose `RunOne` shuffles with `seed` (vanilla seeds it from the
 /// clock; harnesses seed both sides alike), its sensors delayed again.
 pub fn init_brain(m: &mut Mob, seed: i64) {
+    let generation = m.next_brain_generation();
+    let mut built = false;
     if let Some(st) = m.extra.warden.as_mut() {
         let mem = std::mem::take(&mut st.brain.mem);
-        let id = m.kind.id.clone();
-        st.brain = Brain::new(&id, seed);
+        st.brain = Brain::new(generation, seed);
         st.brain.mem = mem;
+        built = true;
     }
     delay_sensors(m);
+    if built {
+        m.stage_brain_behaviors(super::mod_behaviors::BehaviorTarget::Warden(generation));
+    }
 }
 /// `Warden.finalizeSpawn`: a minute until it digs back down; a summoned
 /// warden climbs out of the ground first.
@@ -482,10 +485,6 @@ fn sound(m: &Mob, name: &'static str, volume: f32, pitch: f32, events: &mut Vec<
     if !m.silent {
         events.push(MobEvent::Sound(name, at(m), volume, pitch));
     }
-}
-/// `LivingEntity.getVoicePitch` for an adult.
-fn voice_pitch(m: &mut Mob) -> f32 {
-    (m.random.next_float() - m.random.next_float()) * 0.2 + 1.0
 }
 fn closer_than(m: &Mob, p: Vec3, horizontal: f64, vertical: f64) -> bool {
     let (dx, dy, dz) = (p.x - m.position.x, p.y - m.position.y, p.z - m.position.z);
@@ -519,7 +518,7 @@ pub fn can_be_targeted(m: &Mob) -> bool {
 
 /// `Warden.canTargetEntity`: living, neither creative nor spectator, not a
 /// warden, not an armor stand, not an ally, not invulnerable, alive.
-pub fn can_target(w: &MobWorld, warden: u32, who: Who) -> bool {
+pub(crate) fn can_target(w: &MobWorld, warden: u32, who: Who) -> bool {
     let targetable = match who {
         Who::Player => w
             .selected_player()
@@ -575,7 +574,7 @@ pub(super) fn increase_anger(
     }
     if play_sound && pose(m) != Pose::Roaring {
         let level = anger_level(m);
-        let pitch = voice_pitch(m);
+        let pitch = m.voice_pitch();
         sound(m, level.listening_sound(), 10.0, pitch, events);
     }
 }
@@ -589,7 +588,7 @@ pub(super) fn entity_angry_at(m: &Mob, w: &MobWorld) -> Option<Who> {
     }
 }
 /// `Warden.getAngerLevel`.
-pub fn anger_level(m: &Mob) -> AngerLevel {
+pub(crate) fn anger_level(m: &Mob) -> AngerLevel {
     m.extra.warden.as_ref().map_or(AngerLevel::Calm, |s| {
         AngerLevel::by_anger(s.anger.active_anger(s.target()))
     })
@@ -598,7 +597,7 @@ pub fn anger_level(m: &Mob) -> AngerLevel {
 // ---- damage ----
 
 /// `Warden.isInvulnerableTo`: while digging or emerging.
-pub fn accepts_damage(m: &Mob, source: &Damage) -> bool {
+pub(crate) fn accepts_damage(m: &Mob, source: &Damage) -> bool {
     !(digging_or_emerging(m) && !source.kind.bypasses_invulnerability())
 }
 /// `Warden.hurtServer`'s reaction, handled at the warden's next tick.
@@ -675,7 +674,7 @@ pub(super) fn do_hurt_target(
         event: 4,
         at: at(m),
     });
-    let pitch = voice_pitch(m);
+    let pitch = m.voice_pitch();
     sound(m, "entity.warden.attack_impact", 10.0, pitch, events);
     warden_brain::mem(m).sonic_boom_cooldown.set_ttl((), 40);
     let mut cx = warden_brain::cx(w, level, events);
@@ -696,7 +695,7 @@ pub fn brain_target_id(m: &Mob) -> Option<u32> {
 // ---- vibrations ----
 
 /// `Warden.VibrationUser.canReceiveVibration`.
-pub fn can_receive_vibration(m: &Mob, _now: i64, ctx: &Context) -> bool {
+pub(crate) fn can_receive_vibration(m: &Mob, _now: i64, ctx: &Context) -> bool {
     let Some(st) = m.extra.warden.as_ref() else {
         return false;
     };
@@ -821,7 +820,7 @@ fn receive_vibration(m: &mut Mob, w: &MobWorld, info: Info, events: &mut Vec<Mob
         event: 61,
         at: at(m),
     });
-    let pitch = voice_pitch(m);
+    let pitch = m.voice_pitch();
     sound(m, "entity.warden.tendril_clicks", 5.0, pitch, events);
     let origin = [
         info.pos[0].floor() as i32,
@@ -1043,7 +1042,7 @@ fn heartbeat(m: &mut Mob) -> bool {
 pub fn client_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
     m.anim.vo = m.anim.v;
     if heartbeat(m) && !m.silent {
-        let pitch = voice_pitch(m);
+        let pitch = m.voice_pitch();
         events.push(MobEvent::LocalSound(
             "entity.warden.heartbeat",
             at(m),
@@ -1130,7 +1129,7 @@ pub fn describe(m: &Mob) -> Option<serde_json::Value> {
     }))
 }
 /// `Warden.getHeartBeatDelay`.
-pub fn heart_beat_delay(client_anger: i32) -> i32 {
+pub(crate) fn heart_beat_delay(client_anger: i32) -> i32 {
     let anger = client_anger as f32 / AngerLevel::Angry.minimum() as f32;
     40 - (anger.clamp(0.0, 1.0) * 30.0).floor() as i32
 }
@@ -1143,10 +1142,10 @@ pub fn ambient_sound(m: &Mob) -> Option<&'static str> {
     }
 }
 /// `getTendrilAnimation` / `getHeartAnimation` at the partial tick.
-pub fn tendril_animation(m: &Mob, partial: f32) -> f32 {
+pub(crate) fn tendril_animation(m: &Mob, partial: f32) -> f32 {
     m.anim.lerp(TENDRIL, partial) / 10.0
 }
-pub fn heart_animation(m: &Mob, partial: f32) -> f32 {
+pub(crate) fn heart_animation(m: &Mob, partial: f32) -> f32 {
     m.anim.lerp(HEART, partial) / 10.0
 }
 

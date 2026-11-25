@@ -1,6 +1,6 @@
 //! Collider sync: the boxes of a moving collider (an entity's `set_collider`), sent by a
 //! Sunrise server to the Sunrise clients that track the entity
-//! (docs/modding/src/how-to/native-mods.md, "Moving colliders").
+//! (docs/modding/src/how-to/entities/collision-exclusions.md, "Moving colliders").
 //!
 //! A client that starts tracking the entity gets the collider whole, split into messages of
 //! at most [`MAX_MESSAGE`] bytes; after that it gets only what changed: boxes replaced,

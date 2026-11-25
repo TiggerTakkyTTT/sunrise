@@ -60,6 +60,9 @@ class Events:
     def wheel(self, t, dy):
         self.list.append({"t": START + t, "type": "wheel", "dy": dy})
 
+    def rel(self, t, dx, dy):
+        self.list.append({"t": START + t, "type": "rel", "dx": dx, "dy": dy})
+
 
 def cell(index):
     """The north-west corner (x, z) of a route's course cell."""
@@ -88,12 +91,15 @@ def give(slot, item):
 ROUTES = {}
 
 
-def route(name, index, build=(), setup=(), during=(), opponent=None, pitch=0):
+def route(name, index, build=(), setup=(), during=(), opponent=None, pitch=0, shots=(), expect=None):
     """A route: its cell, blocks, console setup, console commands at times during it (seconds, as its input's),
-    and where the opponent stands (blocks ahead of the player), if it fights one."""
+    and where the opponent stands (blocks ahead of the player), if it fights one. `shots` are (seconds, label)
+    screenshots of the window taken while it plays; `expect(ticks, shots)` lists what the route's run did not do
+    (client_packet_diff makes each a problem of the run), `shots` being {label: png path}."""
     def wrap(fn):
         ROUTES[name] = {"index": index, "build": build, "setup": setup, "events": fn, "opponent": opponent, "pitch": pitch,
-                        "during": [(START + t, c) for t, c in during]}
+                        "during": [(START + t, c) for t, c in during], "expect": expect,
+                        "shots": [(START + t, label) for t, label in shots]}
         return fn
     return wrap
 
@@ -326,6 +332,30 @@ def terrain(e):
     e.turn(2.2, -600, 0, 1.2)
 
 
+# F3+2 toggles the FPS/TPS charts (the client's debug subscription); op makes the server stream the samples.
+CHARTS_ON, CHARTS_OFF = 0.8, 2.6  # when F3+2 is pressed, seconds into the route (KEY_2 lands 0.1 s later)
+# ClientDebugSubscriber.tick's packets: the set {dedicated_server_tick_time} (id 0), then the empty set.
+SUBSCRIBE, CLEAR = "0100", "00"
+
+
+def expect_debug_fps_charts(ticks, _shots):
+    """The wire stream subscribes once, then clears once. Check receipt in the client fixture."""
+    requests = [payload for tick in ticks for _, name, payload in tick["raw"]
+                if name == "debug_subscription_request"]
+    if requests != [SUBSCRIBE, CLEAR]:
+        return [f"expected the subscribe {SUBSCRIBE} then the clear {CLEAR}, saw {requests}"]
+    return []
+
+
+@route("debug_fps_charts", 28, setup=[f"op {PLAYER}"], expect=expect_debug_fps_charts)
+def debug_fps_charts(e):
+    e.key(0.3, "KEY_F3", 0.1)
+    for t in (CHARTS_ON, CHARTS_OFF):
+        e.key(t, "KEY_F3", 0.3)
+        e.key(t + 0.1, "KEY_2")
+    e.key(3.3, "KEY_F3", 0.1)
+
+
 SWORD = give("hotbar.0", "diamond_sword")
 KNOCK = f"damage {PLAYER} 1 minecraft:player_attack by {OPPONENT}"
 
@@ -386,13 +416,46 @@ def pvp_strafe(e):
     e.button(2.6)
 
 
-# Lava sets the player alight; the swim route right after it puts the fire out.
-ORDER = ["walk", "sprint", "sprint_jump", "strafe", "sneak_edge", "stairs_slabs", "ladder", "ice", "soul_sand",
-         "lava_edge", "swim", "break_block", "place_block", "eat", "bow", "shield", "hit_mob", "inventory", "drop",
-         "hotbar_scroll", "terrain", "pvp_hits", "pvp_spam", "pvp_wtap", "pvp_crit", "pvp_knockback", "pvp_shield",
-         "pvp_strafe"]
+@route("look_x", 29)
+def look_x(e):
+    # Vanilla 26.3 X11 mouse-look parity: post-marker first move, two equal +40 X deltas, then -80 back.
+    e.rel(0.3, 40, 0)
+    e.rel(1.2, 40, 0)
+    e.rel(2.1, 40, 0)
+    e.rel(3.0, -80, 0)
+
+
+@route("look_y", 30)
+def look_y(e):
+    # Vanilla 26.3 X11 mouse-look parity: post-marker first move, two equal +40 Y deltas, then -80 back.
+    e.rel(0.3, 0, 40)
+    e.rel(1.2, 0, 40)
+    e.rel(2.1, 0, 40)
+    e.rel(3.0, 0, -80)
+
+
+@route("look_counts", 31)
+def look_counts(e):
+    # Vanilla 26.3 X11 mouse-look parity: six single (+1, -1) counts, the mouse's smallest step.
+    for i in range(6):
+        e.rel(0.3 + 0.2 * i, 1, -1)
+
+
+@route("regrab", 32)
+def regrab(e):
+    # Vanilla 26.3 X11 mouse-look parity: inventory releases, Escape re-grabs and warps, then X and Y moves.
+    e.key(0.3, "KEY_E")
+    e.key(1.3, "KEY_ESC")
+    e.rel(2.3, 40, 0)
+    e.rel(3.2, 0, 20)
+    e.rel(4.1, 40, 0)
+
+
+# By cell index. Lava sets the player alight; the swim route right after it puts the fire out.
+ORDER = sorted(ROUTES, key=lambda name: ROUTES[name]["index"])
+assert [ROUTES[name]["index"] for name in ORDER] == list(range(len(ORDER)))
 PVP = [name for name in ORDER if name.startswith("pvp_")]
-assert sorted(ORDER) == sorted(ROUTES)
+MOUSE_LOOK = ["look_x", "look_y", "look_counts", "regrab"]
 
 
 def course_bounds():
@@ -418,7 +481,7 @@ def reset_commands(name, terrain_spot):
     """The console commands that put the player at a route's start, as both clients get it."""
     spec = ROUTES[name]
     ox, oz = cell(spec["index"])
-    first = [f"kill @e[type=!minecraft:player]", f"clear {PLAYER}", f"effect clear {PLAYER}",
+    first = [f"kill @e[type=!minecraft:player]", f"clear {PLAYER}", f"effect clear {PLAYER}", f"deop {PLAYER}",
              f"effect give {PLAYER} minecraft:saturation 1 20 true",
              f"effect give {PLAYER} minecraft:instant_health 1 5 true", f"gamemode survival {PLAYER}"]
     setup = []

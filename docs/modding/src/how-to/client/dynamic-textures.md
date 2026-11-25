@@ -7,25 +7,7 @@ each one under a name and draws it as a GUI sprite. This is vanilla's `DynamicTe
 the GUI atlas, so it draws as any other GUI sprite.
 
 ```rust
-use mod_api::prelude::*;
-use mod_api::{DynamicTextureError, Identifier};
-
-const PANEL: &str = "mymod:dynamic/panel";
-
-/// Bake the panel once: 64 by 32 pixels, row by row from the top left, four bytes (RGBA) each.
-fn bake_panel(host: &mut dyn ClientHost) -> Result<(), DynamicTextureError> {
-    let (width, height) = (64, 32);
-    let rgba = [24, 24, 48, 230].repeat(width * height);
-    let id = Identifier::parse(PANEL).unwrap();
-    host.create_dynamic_texture(&id, width as u32, height as u32, &rgba)
-}
-
-fn gui_render_post(&self, _: &dyn ClientHost, event: &mut GuiRenderPostEvent<'_>) {
-    // The whole image (`src` in its own pixels), stretched over 128 by 64 GUI pixels.
-    event
-        .batch
-        .sprite(PANEL, [0.0, 0.0, 64.0, 32.0], [8.0, 8.0, 128.0, 64.0], None);
-}
+{{#include ../../../examples/src/client_rendering.rs:dynamic_panel}}
 ```
 
 The four calls are on the client host. They change
@@ -33,8 +15,11 @@ the game's atlas, so they take `&mut dyn ClientHost`: call them from a hook that
 not from inside a draw.
 
 - **`create_dynamic_texture(id, width, height, rgba)`** makes the image. From the next frame, its id is a GUI sprite of
-  `width` x `height` pixels: `DrawContext::sprite`, `gui_nine_slice`, `tiled_sprite`, `gui_paint`'s `Blit` and
-  `gui_sprite` draw and find it as any other sprite.
+  `width` x `height` pixels: `DrawContext::sprite`, `gui_nine_slice` and `tiled_sprite` draw it,
+  and `gui_sprite` finds its current region. Inside a [canvas group](gui-paint.md#blits), use
+  `canvas.blit_sprite(PANEL, [8.0, 8.0, 128.0, 64.0], None, 0xFFFF_FFFF, Blend::Textured)`
+  for the whole image (`Blend` is in `mod_api::client::hud_layout`). Use `canvas.blit` with a
+  `GuiBlitRegion` for the raw-texture path.
 - **`update_dynamic_texture(id, width, height, rgba)`** gives it new pixels, written into the slot it already holds on
   the next frame. The size may change within the image's class (below); the sprite takes the new size. Update when
   the image changed, not every frame: each update copies the pixels and uploads the image.
@@ -107,18 +92,7 @@ both sign faces. Each call sees one translated, styled `event.run` with legacy f
 runs before wrapping, width measurement and bidi reordering, not for each glyph as it is painted.
 
 ```rust
-use mod_api::prelude::*;
-use mod_api::{Identifier, InlineImageReplacement, SubstituteInlineImagesEvent};
-
-fn substitute_inline_images(&self, _: &dyn ClientHost, event: &mut SubstituteInlineImagesEvent<'_>) {
-    let sprite = Identifier::parse("mymod:dynamic/star").unwrap();
-    for (start, matched) in event.run.match_indices(":star:") {
-        let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(start + matched.len())) else {
-            continue;
-        };
-        event.images.push(InlineImageReplacement { start, end, sprite: sprite.clone() });
-    }
-}
+{{#include ../../../examples/src/client_rendering.rs:inline_images}}
 ```
 
 Each half-open UTF-8 byte range must stay within the run and must not include a newline. The first valid proposal in

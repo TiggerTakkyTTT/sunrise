@@ -110,6 +110,7 @@ impl Game<'_> {
                 if let Some(state) = transferred.take() {
                     self.adopt_transferred_entity_state(id, state);
                 }
+                let uuid = with_constructor_uuid(uuid);
                 self.remember_uuid(id, uuid, &tag);
                 self.bind_saved_entity_attachments(id, &mut orb.attachment_lifetime);
             }
@@ -205,7 +206,9 @@ impl Game<'_> {
         player_uuid: Option<[i32; 4]>,
         transferred: Option<crate::game::entity_initialization::TransferredEntityState>,
     ) {
-        if let Some(mut p) = entity_nbt::throwable_from_nbt(&tag, player_uuid) {
+        if let Some(mut p) =
+            entity_nbt::throwable_from_nbt_with_items(&tag, player_uuid, self.res.items())
+        {
             self.claim_owner(&mut p);
             // A projectile that came through a portal keeps its cooldown.
             self.next_entity += 1;
@@ -224,10 +227,14 @@ impl Game<'_> {
 
     pub(in crate::game) fn load_falling_transferred(
         &mut self,
-        tag: Tag,
+        mut tag: Tag,
         uuid: Option<[i32; 4]>,
         transferred: Option<crate::game::entity_initialization::TransferredEntityState>,
     ) {
+        if transferred.is_none() && uuid.is_some_and(|u| self.target_with_uuid(u).is_some()) {
+            return;
+        }
+        entity_nbt::sanitize_custom_name(&mut tag);
         if let Some((state, position, velocity, age, fall_distance)) =
             entity_nbt::falling_block_from_nbt(&tag)
             && let Some(state) =
@@ -242,11 +249,14 @@ impl Game<'_> {
             self.remember_uuid(self.next_entity, uuid, &tag);
             let uuid = self.uuid_for(self.next_entity);
             self.falling.push(FallingBlock {
+                size_answer: None,
                 attachment_lifetime: Default::default(),
-                rotation: [0.0, 0.0],
+                // Entity.load's rotation, which nothing turns afterwards.
+                rotation: entity_nbt::loaded_rotation(&tag),
                 join: Default::default(),
                 id: self.next_entity,
                 state,
+                blocks_building: false,
                 // DATA_START_POS is not persisted by vanilla.
                 start_pos: sunrise_core::position::BlockPos::default(),
                 position,
@@ -286,6 +296,7 @@ impl Game<'_> {
             let mut t =
                 crate::game::trident::ThrownTrident::from_nbt(n, &tag, self.pack.assets.registry);
             t.id = self.take_entity_id();
+            self.resolve_trident_loyalty(&mut t);
             // One that came through a portal keeps its cooldown.
             let id = t.id;
             self.tridents.push(t);
@@ -345,6 +356,7 @@ impl Game<'_> {
             // to int before short narrowing; integer tags narrow directly.
             let fuse = tnt_fuse(&tag);
             self.tnts.push(crate::game::tnt::PrimedTnt {
+                size_answer: None,
                 used_portal,
                 attachment_lifetime: Default::default(),
                 rotation: [0.0, 0.0],
@@ -507,14 +519,28 @@ impl Game<'_> {
         let riders = self.take_passengers(&mut tag);
         // The mob's own random makes its UUID, kept unless the tag has one.
         let (own, fresh) = sunrise_client::mobs::living_random();
-        let uuid = Some(uuid.unwrap_or(fresh));
-        let mut m = entity_nbt::mob_from_nbt_with_random(
+        let uuid = uuid.unwrap_or(fresh);
+        let mob = entity_nbt::mob_from_nbt_with_random(
             &tag,
             self.res.mob_types(),
             self.next_entity,
             Some(self.pack.assets.registry),
             own,
         )?;
+        let id = self.install_loaded_mob((mob, uuid), tag, mount, transferred, finalize, None);
+        self.load_passengers(id, riders);
+        Some(id)
+    }
+
+    pub(super) fn install_loaded_mob(
+        &mut self,
+        (mut m, uuid): (Mob, [i32; 4]),
+        tag: Tag,
+        mount: Option<u32>,
+        transferred: Option<crate::game::entity_initialization::TransferredEntityState>,
+        finalize: bool,
+        admitted: Option<bool>,
+    ) -> u32 {
         self.resolve_loaded_profession(&mut m);
         if sunrise_client::mobs::camel::is_camel(m.species()) {
             sunrise_client::mobs::camel::finish_load(&mut m, self.world.game_time);
@@ -564,11 +590,9 @@ impl Game<'_> {
         }
         sunrise_client::mobs::armor::prepare(&m, &self.motion.attributes);
         let id = m.id;
-        // PersistentEntitySectionManager.addEntityUuid refuses residency, not
-        // the already-constructed object or its passenger links. Descendants
-        // are still considered individually in preorder.
-        let refused = self.uuid_admission_refused(uuid);
-
+        // Refuse residency, not the already-constructed object or its links.
+        // A spawner tree has already run this decision in preorder.
+        let resident = admitted.unwrap_or_else(|| !self.uuid_admission_refused(Some(uuid)));
         if let Some(mut state) = transferred {
             state.restore_mob(&mut m);
             self.adopt_transferred_entity_state(id, state);
@@ -576,18 +600,20 @@ impl Game<'_> {
             // A saved dying body has already passed die; loading only resumes tickDeath.
             self.died.insert(id);
         }
-        self.remember(id, uuid, tag);
-        if refused {
-            self.persist.off_level.insert(id, OffLevel::Mob(m));
-        } else {
+        self.remember(id, Some(uuid), tag);
+        if resident {
             self.bind_saved_entity_attachments(id, &mut m.attachment_lifetime);
             self.mobs.push(m);
+            let join = self.mobs.last().unwrap().join;
+            self.flush_resident_mob_parts(id, join);
+            if restore_target {
+                self.native_restore_loaded_target(id, anger_uuid);
+            }
+        } else {
+            self.flush_unjoined_mob_parts(&mut m);
+            self.persist.off_level.insert(id, OffLevel::Mob(m));
         }
-        if !refused && restore_target {
-            self.native_restore_loaded_target(id, anger_uuid);
-        }
-        self.load_passengers(id, riders);
-        Some(id)
+        id
     }
 
     /// The supported records under an entity's `Passengers`, taken out of it; the
@@ -753,6 +779,19 @@ impl Game<'_> {
         let prepared = self.prepare_vehicle_transfer(tag, tree)?;
         let mut by_source = HashMap::new();
         let root = self.restore_vehicle_transfer(prepared, &mut by_source)?;
+        // A natural-spawn candidate is still the argument of the spawn callback after
+        // crossing levels in a join listener. Follow the exact restored object, not its UUID.
+        use crate::game::natural_spawning::NaturalAdmission;
+        if let Some(NaturalAdmission::Detached(candidate)) = &self.creatures.natural_admission
+            && let Some(&id) = by_source.get(&candidate.id)
+            && let Some(mob) = self.mob_object(id)
+        {
+            self.creatures.natural_admission = Some(NaturalAdmission::Placed {
+                level: self.dim,
+                id,
+                join: mob.join,
+            });
+        }
         Some(RestoredVehicleTree { root, by_source })
     }
 
@@ -921,6 +960,7 @@ impl Game<'_> {
             .cloned()
             .unwrap_or_else(|| Tag::Compound(Default::default()));
         self.put_last_hurt_by_mob(self.mob_at(object), &mut retained);
+        self.save_portal_cooldown(id, &mut retained);
         // `write_leash` may assign the holder a UUID. Other references retain
         // the lookup they had before that assignment.
         let holder = match self.mob_at(object).extra.leash {
@@ -932,7 +972,7 @@ impl Game<'_> {
         // final passenger list, as in the persistent mob tree.
         let paused = self.mob_at(object).ai.ai_paused;
         entity_nbt::write_ai_paused(paused, &mut retained);
-        write_attachments(&mut retained, id, &self.entity_attachments);
+        self.write_entity_attachments(&mut retained, id);
         entity_nbt::write_ai_paused(paused, &mut retained);
         let mut out = entity_nbt::EntityTagWriter::from_saved(retained);
         entity_nbt::write_mob(

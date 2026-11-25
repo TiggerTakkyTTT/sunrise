@@ -40,8 +40,8 @@ def main():
         CARGO_TARGET_DIR=lab.LOCAL / "parity-target",
     )
     oracle_harness.run_logged(
-        ["cargo", "test", "--locked", "-p", "sunrise-client", "--lib",
-         "entity_draw_order_after_client_packets", "--", "--ignored", "--nocapture"],
+        [lab.parity_fixtures(),
+         "entity_draw_order_after_client_packets", "--ignored", "--nocapture"],
         build, "rust", env=env, timeout=2400)
     expected, actual = snapshots(build / "vanilla.log"), snapshots(build / "rust.log")
     frames = scene.read_text().splitlines().count("frame")

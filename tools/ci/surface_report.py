@@ -133,7 +133,7 @@ def tree_tool(tree: Path, work: Path) -> str:
     tool = work / f"base-stage-{len(list(work.glob('base-stage-*')))}"
     with open(target / "surface-report.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        built = subprocess.run(["cargo", "build", "--locked", "--profile", "test", "-p", "sunrise-mod-api-gen",
+        built = subprocess.run(["cargo", "build", "--locked", "--profile", "test",
                                 "--bin", "sunrise-stage", "--target-dir", str(target)],
                                cwd=tree, capture_output=True, text=True)
         if built.returncode != 0:

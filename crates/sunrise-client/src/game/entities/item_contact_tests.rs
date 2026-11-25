@@ -58,7 +58,7 @@ fn the_active_stack_survives_a_partial_contact_and_consumption_removes_the_entit
     let prepare = |game: &mut Game<'_>| {
         game.options.dedicated = Some(Vec::new());
         game.native_lifecycle
-            .begin_open(mod_api::Authority::IntegratedServer);
+            .begin_open(Some(mod_api::Authority::IntegratedServer));
         game.world = World::new(game.res.facts().air, 1);
         game.world
             .chunks
@@ -303,6 +303,7 @@ fn item_restitution_uses_the_legacy_contact_on_both_simulating_sides() {
                                     None,
                                     &[],
                                     client,
+                                    None,
                                     &mut |_| {},
                                 )
                             });
@@ -489,7 +490,7 @@ fn item_support_survives_idle_then_clears_on_an_airborne_move() {
                 );
                 let mut item = game.dropped[0].clone();
                 let tick = |game: &mut Game<'_>, item: &mut ItemEntity| {
-                    game.tick_item_with_block_contacts(item, None, &[], false, &mut |_| {})
+                    game.tick_item_with_block_contacts(item, None, &[], false, None, &mut |_| {})
                 };
                 assert_eq!(tick(game, &mut item), (true, false));
                 assert_eq!(item.position, Vec3::new(5.5, 64.0, 4.5));
@@ -557,10 +558,9 @@ impl BlockPart for StepProbe {
         event: &mut mod_api::EntityInsideEvent<'_>,
     ) {
         // A later inside write wins over the step; settle then drags this movement.
-        event.run_after(
-            mod_api::InsideEffect::Freeze,
-            mod_api::EntityWrite::SetMovement([0.5, 0.0, 0.0]),
-        );
+        event.run_after(mod_api::InsideEffect::Freeze, |view| {
+            view.set_velocity([0.5, 0.0, 0.0]);
+        });
     }
 
     fn item_after_vertical_collision(
@@ -635,6 +635,7 @@ fn step_on_edits_grounded_bodies_before_inside_effects_and_settle() {
                                     escape,
                                     &[],
                                     client,
+                                    None,
                                     &mut |_| {},
                                 )
                             },
@@ -749,13 +750,19 @@ fn step_on_edits_grounded_bodies_before_inside_effects_and_settle() {
 }
 
 #[derive(Clone, Default)]
-struct StepWrites(Arc<Mutex<Vec<[[f64; 3]; 2]>>>);
+struct StepWrites(
+    Arc<Mutex<Vec<[[f64; 3]; 2]>>>,
+    Option<mod_api::DamageTypeKey>,
+);
 
 #[mod_api::sunrise_part]
 impl BlockPart for StepWrites {
     fn step_on(&self, level: mod_api::LevelRandomSide<'_>, event: &mut mod_api::StepOnEvent<'_>) {
         self.0.lock().unwrap().push(event.bounds);
-        let hurt = mod_api::EntityWrite::Hurt { amount: 0.5 };
+        let hurt = mod_api::EntityWrite::Hurt {
+            damage_type: self.1.unwrap(),
+            amount: 0.5,
+        };
         match level {
             mod_api::LevelRandomSide::Server(level) => {
                 let state = level.block_state_id("minecraft:glass").unwrap();
@@ -774,7 +781,8 @@ impl BlockPart for StepWrites {
 impl Hooks for StepWrites {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let stone = r.block_key("minecraft:stone");
-        r.block_part(stone, self.clone());
+        let generic = r.damage_type_key("minecraft:generic");
+        r.block_part(stone, Self(self.0.clone(), Some(generic)));
     }
 }
 
@@ -819,6 +827,7 @@ fn step_on_hurts_the_stepping_body_and_guards_its_block_writes() {
                                 None,
                                 &[],
                                 client,
+                                None,
                                 &mut |_| {}
                             ),
                             (true, false)
@@ -868,6 +877,7 @@ fn step_on_hurts_the_stepping_body_and_guards_its_block_writes() {
                                         None,
                                         &[],
                                         false,
+                                        None,
                                         &mut |_| {}
                                     ),
                                     (false, true),
@@ -897,12 +907,116 @@ fn step_on_hurts_the_stepping_body_and_guards_its_block_writes() {
     );
 }
 
+type LivingStep = (i32, Option<bool>);
+
+#[derive(Clone, Default)]
+struct LivingFloor(Arc<Mutex<Vec<LivingStep>>>, Option<mod_api::DamageTypeKey>);
+
+#[mod_api::sunrise_part]
+impl BlockPart for LivingFloor {
+    fn step_on(&self, level: mod_api::LevelRandomSide<'_>, event: &mut mod_api::StepOnEvent<'_>) {
+        let mod_api::LevelRandomSide::Server(level) = level else {
+            return;
+        };
+        let living = level.entity_type_is_living(event.kind);
+        self.0.lock().unwrap().push((event.entity, living));
+        if living == Some(true) && !event.stepping_carefully {
+            // MagmaBlock.stepOn hurts with the hot floor damage type.
+            event.write_entity(mod_api::EntityWrite::Hurt {
+                damage_type: self.1.unwrap(),
+                amount: 1.0,
+            });
+        }
+    }
+}
+
+#[mod_api::__subscriptions]
+impl Hooks for LivingFloor {
+    fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+        let stone = r.block_key("minecraft:stone");
+        let hot_floor = r.damage_type_key("minecraft:hot_floor");
+        r.block_part(stone, Self(self.0.clone(), Some(hot_floor)));
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn step_on_can_hurt_only_living_bodies_on_the_same_block() {
+    crate::game::in_own_process(
+        "game::item_contact_tests::step_on_can_hurt_only_living_bodies_on_the_same_block",
+        || {
+            let part = LivingFloor::default();
+            let mods: mod_api::Mods = vec![mod_api::ModEntry::new(
+                "living_floor",
+                Box::new(part.clone()),
+            )]
+            .into();
+            mod_platform::testing::with_mods(mods.clone(), || {
+                crate::game::api_values::install_parts(&mods).unwrap();
+                crate::game::native_hooks::install_block_contact_hooks();
+                crate::game::native_entity_refs::tests::with_game(|game| {
+                    game.world
+                        .chunks
+                        .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                    let stone = game
+                        .pack
+                        .assets
+                        .registry
+                        .default_state("minecraft:stone")
+                        .unwrap();
+                    game.world.set(4, 63, 4, stone).unwrap();
+                    game.tickets.update(None);
+
+                    let kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+                    let mut pig =
+                        sunrise_client::mobs::Mob::new(77, kind, Vec3::new(4.5, 64.0, 4.5), 0.0);
+                    pig.no_ai = true;
+                    pig.ground.on_ground = true;
+                    let pig_health = pig.health;
+                    game.mobs.push(pig);
+                    game.spawn_item(
+                        ItemStack::new("minecraft:iron_ingot", 1),
+                        [4.5, 64.25, 4.5],
+                        [0.0, -0.96, 0.0],
+                        20,
+                    );
+                    let mut item = game.dropped.remove(0);
+                    let item_health = item.health;
+
+                    sunrise_client::block_contact::in_level(game.tick, Some(game.dim.id()), || {
+                        game.tick_creature_entities().unwrap();
+                        assert_eq!(
+                            game.tick_item_with_block_contacts(
+                                &mut item,
+                                None,
+                                &[],
+                                false,
+                                None,
+                                &mut |_| {}
+                            ),
+                            (true, false)
+                        );
+                    });
+                    let seen = part.0.lock().unwrap();
+                    assert!(seen.contains(&(77, Some(true))), "pig contact: {seen:?}");
+                    assert!(
+                        seen.contains(&(item.id as i32, Some(false))),
+                        "item contact: {seen:?}"
+                    );
+                    assert_eq!(game.mobs[0].health, pig_health - 1.0);
+                    assert_eq!(item.health, item_health);
+                });
+            });
+        },
+    );
+}
+
 const ACCEPT_BEFORE: u8 = 0;
 const REJECT: u8 = 1;
 const ACCEPT_AFTER: u8 = 2;
 
 #[derive(Clone, Copy)]
-struct StepAnswer<const ORDER: u8>;
+struct StepAnswer<const ORDER: u8>(Option<mod_api::DamageTypeKey>);
 
 #[mod_api::sunrise_part]
 impl<const ORDER: u8> BlockPart for StepAnswer<ORDER> {
@@ -923,7 +1037,10 @@ impl<const ORDER: u8> BlockPart for StepAnswer<ORDER> {
             REJECT => {
                 assert_eq!(event.movement[0], 0.25);
                 event.movement[0] = 3.0;
-                event.write_entity(EntityWrite::Hurt { amount: 10.0 });
+                event.write_entity(EntityWrite::Hurt {
+                    damage_type: self.0.unwrap(),
+                    amount: 10.0,
+                });
                 event.request(LandingWrite::DestroyBlock { drop: false });
                 match event.pos.x {
                     4 => {
@@ -963,7 +1080,8 @@ impl<const ORDER: u8> BlockPart for StepAnswer<ORDER> {
 impl<const ORDER: u8> Hooks for StepAnswer<ORDER> {
     fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
         let stone = r.block_key("minecraft:stone");
-        r.block_part(stone, *self);
+        let generic = r.damage_type_key("minecraft:generic");
+        r.block_part(stone, Self(Some(generic)));
     }
 }
 
@@ -974,9 +1092,9 @@ fn step_on_refuses_only_the_invalid_part_outputs() {
         "game::item_contact_tests::step_on_refuses_only_the_invalid_part_outputs",
         || {
             let mods: mod_api::Mods = vec![
-                mod_api::ModEntry::new("a_before", Box::new(StepAnswer::<ACCEPT_BEFORE>)),
-                mod_api::ModEntry::new("b_invalid", Box::new(StepAnswer::<REJECT>)),
-                mod_api::ModEntry::new("c_after", Box::new(StepAnswer::<ACCEPT_AFTER>)),
+                mod_api::ModEntry::new("a_before", Box::new(StepAnswer::<ACCEPT_BEFORE>(None))),
+                mod_api::ModEntry::new("b_invalid", Box::new(StepAnswer::<REJECT>(None))),
+                mod_api::ModEntry::new("c_after", Box::new(StepAnswer::<ACCEPT_AFTER>(None))),
             ]
             .into();
             mod_platform::testing::with_mods(mods.clone(), || {
@@ -1009,6 +1127,7 @@ fn step_on_refuses_only_the_invalid_part_outputs() {
                                         None,
                                         &[],
                                         false,
+                                        None,
                                         &mut |_| {}
                                     ),
                                     (true, false),
@@ -1023,6 +1142,286 @@ fn step_on_refuses_only_the_invalid_part_outputs() {
                         assert_eq!(game.world.block(x, 63, 4), glass);
                     }
                 });
+            });
+        },
+    );
+}
+
+struct ContactHeat(mod_api::DamageTypeKey);
+
+#[mod_api::sunrise_part]
+impl BlockPart for ContactHeat {
+    fn step_on(&self, _: mod_api::LevelRandomSide<'_>, event: &mut mod_api::StepOnEvent<'_>) {
+        event.write_entity(mod_api::EntityWrite::Hurt {
+            damage_type: self.0,
+            amount: 40.0,
+        });
+    }
+}
+
+struct HeatedBlocks;
+
+#[mod_api::__subscriptions]
+impl Hooks for HeatedBlocks {
+    fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+        for (block, damage_type) in [
+            ("minecraft:stone", "minecraft:hot_floor"),
+            ("minecraft:glass", "test:stove_burn"),
+            ("minecraft:terracotta", "minecraft:fall"),
+        ] {
+            let block = r.block_key(block);
+            let damage_type = r.damage_type_key(damage_type);
+            r.block_part(block, ContactHeat(damage_type));
+        }
+    }
+}
+
+fn with_heated_game(test: impl FnOnce(&mut Game<'_>)) {
+    let mods: mod_api::Mods = vec![mod_api::ModEntry::new("heat", Box::new(HeatedBlocks))].into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        crate::game::api_values::install_parts(&mods).unwrap();
+        crate::game::native_hooks::install_block_contact_hooks();
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            test(game);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn contact_hurt_uses_the_world_damage_type_tags_and_death_message() {
+    crate::game::in_own_process(
+        "game::item_contact_tests::contact_hurt_uses_the_world_damage_type_tags_and_death_message",
+        || {
+            use crate::game::native_entity_refs::tests::fixture_root;
+            with_heated_game(|game| {
+                for (id, x, kind, block) in [
+                    (71, 4, "minecraft:blaze", "minecraft:stone"),
+                    (72, 7, "minecraft:pig", "minecraft:stone"),
+                    (73, 10, "minecraft:pig", "minecraft:glass"),
+                    (74, 4, "minecraft:zombie", "minecraft:stone"),
+                    (75, 7, "minecraft:cat", "minecraft:terracotta"),
+                    (76, 10, "minecraft:pig", "minecraft:terracotta"),
+                ] {
+                    let z = if id <= 73 { 4 } else { 8 };
+                    let support = game.pack.assets.registry.default_state(block).unwrap();
+                    game.world.set(x, 63, z, support).unwrap();
+                    let mut mob = sunrise_client::mobs::Mob::new(
+                        id,
+                        game.res.mob_types().get(kind).unwrap().clone(),
+                        Vec3::new(f64::from(x) + 0.5, 64.0, f64::from(z) + 0.5),
+                        0.0,
+                    );
+                    mob.no_ai = true;
+                    mob.ground.on_ground = true;
+                    mob.velocity.y = -0.08;
+                    if id == 74 {
+                        let mut boots = ItemStack::new("minecraft:leather_boots", 1);
+                        boots.enchant("minecraft:frost_walker", 1);
+                        assert!(
+                            mob.set_equipment_stack(sunrise_items::equipment::FEET, Some(boots))
+                        );
+                    }
+                    game.mobs.push(mob);
+                }
+                let health =
+                    |game: &Game<'_>, id| game.mobs.iter().find(|mob| mob.id == id).unwrap().health;
+                game.tick_mobs().unwrap();
+                assert_eq!(health(game, 71), 20.0, "hot floor is fire damage");
+                assert_eq!(health(game, 72), 0.0, "the same hit kills a non-immune pig");
+                assert_eq!(
+                    health(game, 73),
+                    10.0,
+                    "no generic fallback for a missing type"
+                );
+                assert_eq!(health(game, 74), 20.0, "Frost Walker stops hot floor");
+                assert_eq!(health(game, 75), 10.0, "cats are immune to fall damage");
+                assert_eq!(health(game, 76), 0.0, "fall damage kills the untagged pig");
+
+                let files = [(
+                    "damage_type/test:stove_burn".into(),
+                    vec![
+                        br#"{"message_id":"stove_burn","scaling":"never","exhaustion":0.0}"#
+                            .to_vec(),
+                    ],
+                )];
+                game.health_resources = game
+                    .health_resources
+                    .with_packs(
+                        &fixture_root(),
+                        &sunrise_world::loot::PackOverlay::new(&files),
+                        false,
+                    )
+                    .unwrap();
+                game.tick_mobs().unwrap();
+                let dead = game.mobs.iter().find(|mob| mob.id == 73).unwrap().clone();
+                assert_eq!(dead.health, 0.0);
+                assert_eq!(
+                    game.mob_death_message(&dead, None).component()["translate"],
+                    "death.attack.stove_burn"
+                );
+            });
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn contact_hurt_uses_the_player_creative_and_frost_walker_bypass_tag() {
+    crate::game::in_own_process(
+        "game::item_contact_tests::contact_hurt_uses_the_player_creative_and_frost_walker_bypass_tag",
+        || {
+            use crate::game::native_entity_refs::tests::fixture_root;
+            use sunrise_client::motion::{MotionWorld, PlayerMotion};
+            use sunrise_world::loot::PackOverlay;
+
+            with_heated_game(|game| {
+                let registry = game.pack.assets.registry;
+                game.world
+                    .set(4, 63, 4, registry.default_state("minecraft:glass").unwrap())
+                    .unwrap();
+                let at = Vec3::new(4.5, 64.0, 4.5);
+                let mut boots = ItemStack::new("minecraft:leather_boots", 1);
+                boots.enchant("minecraft:frost_walker", 1);
+                for (bypass, creative, wears_boots, health) in [
+                    (false, false, true, 20.0),
+                    (false, false, false, 0.0),
+                    (true, true, true, 0.0),
+                ] {
+                    let mut files = vec![
+                        (
+                            "damage_type/test:stove_burn".into(),
+                            vec![br#"{"message_id":"stove_burn","scaling":"never","exhaustion":0.0}"#.to_vec()],
+                        ),
+                        (
+                            "tags/minecraft:damage_type/burn_from_stepping".into(),
+                            vec![br#"{"values":["test:stove_burn"]}"#.to_vec()],
+                        ),
+                    ];
+                    if bypass {
+                        files.push((
+                            "tags/minecraft:damage_type/bypasses_invulnerability".into(),
+                            vec![br#"{"values":["test:stove_burn"]}"#.to_vec()],
+                        ));
+                    }
+                    game.health_resources = game
+                        .health_resources
+                        .with_packs(&fixture_root(), &PackOverlay::new(&files), false)
+                        .unwrap();
+                    let mut items = world_items!(game).clone();
+                    Arc::make_mut(&mut items.enchantments)
+                        .bind_damage_catalog(&game.health_resources.damage);
+                    game.server_items = Some(Arc::new(items));
+                    let resources = game.motion;
+                    let new_player = || {
+                        let mut player = PlayerMotion::new(resources, at).unwrap();
+                        player.ground.on_ground = true;
+                        player.invulnerable = creative;
+                        player
+                    };
+                    game.player = Some(new_player());
+                    // Equip or remove the boots and hit immediately, without a body tick.
+                    game.armor[3] = wears_boots.then(|| boots.clone());
+                    game.hurt_player_by("test:stove_burn", 40.0);
+                    assert_eq!(
+                        game.player.as_ref().unwrap().health.health(),
+                        health,
+                        "direct hit, boots: {wears_boots}, bypass tag: {bypass}"
+                    );
+                    game.player = Some(new_player());
+                    let items = world_items!(game);
+                    let side = game_side!(game);
+                    let mut world = MotionWorld {
+                        player: game.player.as_mut().unwrap(),
+                        scene: &mut game.world,
+                        assets: &game.pack.assets,
+                        collision_binding: game.collision,
+                        resources: game.motion,
+                        health: &game.health_resources,
+                        tag_items: Some(items),
+                        loop_context: &game.loop_context,
+                        side: &side,
+                        damage_hooks: &game.damage_hooks,
+                        block_registries: Some(&game.pack.block_registries),
+                        entities: &[],
+                    };
+                    sunrise_client::block_contact::in_level(
+                        game.tick,
+                        Some("minecraft:overworld"),
+                        || {
+                            world.apply_effects_from_blocks().unwrap();
+                        },
+                    );
+                    assert_eq!(
+                        world.player.health.health(),
+                        health,
+                        "step-on hit, boots: {wears_boots}, bypass tag: {bypass}"
+                    );
+                }
+            });
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn contact_hurt_uses_the_orbs_level_fall_immunity_tag() {
+    crate::game::in_own_process(
+        "game::item_contact_tests::contact_hurt_uses_the_orbs_level_fall_immunity_tag",
+        || {
+            use sunrise_client::{
+                entities::ExperienceOrb, items::EntityTypeTags, join_seq::JoinSeq,
+            };
+            with_heated_game(|game| {
+                let block = game
+                    .pack
+                    .assets
+                    .registry
+                    .default_state("minecraft:terracotta")
+                    .unwrap();
+                game.world.set(4, 63, 4, block).unwrap();
+                game.tickets.update(None);
+                for tagged in [false, true] {
+                    let mut items = world_items!(game).clone();
+                    let mut tags = items.entity_type_tags.ordered().clone();
+                    let members = tags
+                        .entry("minecraft:fall_damage_immune".into())
+                        .or_default();
+                    members.retain(|id| id != "minecraft:experience_orb");
+                    if tagged {
+                        members.push("minecraft:experience_orb".into());
+                    }
+                    items.set_entity_type_tags(EntityTypeTags::from_ordered(
+                        tags,
+                        items.entity_type_tags.ids().clone(),
+                    ));
+                    game.server_items = Some(Arc::new(items));
+                    game.orbs.push(ExperienceOrb::new(
+                        17,
+                        Vec3::new(4.5, 64.25, 4.5),
+                        Vec3::new(0.0, -0.5, 0.0),
+                        1,
+                    ));
+                    game.ordered.announced = JoinSeq::MAX;
+                    game.begin_ordered_ticks();
+                    sunrise_client::block_contact::in_level(
+                        game.tick,
+                        Some("minecraft:overworld"),
+                        || {
+                            game.run_ordered_ticks(JoinSeq::MAX, false).unwrap();
+                        },
+                    );
+                    if tagged {
+                        assert_eq!(game.orbs.len(), 1);
+                        assert_eq!(game.orbs[0].position.y.to_bits(), 64.0_f64.to_bits());
+                        assert_eq!(game.orbs[0].health, 5);
+                    } else {
+                        assert!(game.orbs.is_empty());
+                    }
+                }
             });
         },
     );

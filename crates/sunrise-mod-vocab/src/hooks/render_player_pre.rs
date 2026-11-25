@@ -5,9 +5,11 @@ pub trait Hooks {
     /// player in view and for this window's player in third person (including front view) when it
     /// holds the camera, before its `render_living_pre`. `player` is its render state, `who` its profile name and whether it is
     /// this window's own player, and `draw` the frame `render_living_pre` gets. Set `canceled` to
-    /// skip all of the player's drawing this frame, `render_living_pre`, `render_living_post` and
-    /// `render_player_post` included. `event.model` borrows the selected player's hierarchy and
-    /// bind pose as a [`crate::FrameModelEdit`]. Look up `model.part("head")` and call
+    /// skip the player's own drawing this frame, `render_living_pre`, `render_living_post` and
+    /// `render_player_post` included. Canceling only `render_living_pre` skips Living Post but
+    /// still calls Player Post with `model: None`. Either cancel leaves eligible flames and shadows
+    /// to the frame; a replacement body should not submit them again. `event.model` borrows the
+    /// selected player's hierarchy and bind pose as a [`crate::FrameModelEdit`]. Look up `model.part("head")` and call
     /// `model.hide(index)` if it exists. That leaves the head and its children out for this draw
     /// after Skin Customization. Living Pre sees the same draw-local edits. Armour, held items
     /// and other independent layers, including the cape, are unaffected. In the ordered body pass,
@@ -17,7 +19,7 @@ pub trait Hooks {
         receiver = "read",
         dispatch = "flat",
         side = "client",
-        version = 5,
+        version = 6,
         contract = "cancel",
         out = "canceled",
         neoforge = "RenderPlayerEvent.Pre",

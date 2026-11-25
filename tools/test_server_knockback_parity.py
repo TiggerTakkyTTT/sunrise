@@ -266,7 +266,7 @@ def server_dir(directory, world):
     return port
 
 
-def run_side(label, server_command, client_command, build, world, cases=CASES, *, tracking=False):
+def run_side(label, server_command, client_command, build, world, cases, *, tracking=False):
     directory = build / label
     port = server_dir(directory, world)
     out = build / f'{label}.txt'
@@ -314,11 +314,19 @@ def run_side(label, server_command, client_command, build, world, cases=CASES, *
                     # Alice hits the mob. A frozen server still ticks its players, and the hit lands in Alice's
                     # next tick, not when the packet arrives: the mob's motion says when it has.
                     sync()
-                    mob = f'@e[type=minecraft:{line.split()[1]},limit=1]'
+                    kind = line.split()[1]
+                    mob = f'@e[type=minecraft:{kind},limit=1]'
                     before = server_data(server, mob, 'Motion')
-                    client.stdin.write(f'attack Alice {line.split()[1]}\n')
+                    client.stdin.write(f'attack Alice {kind}\n')
                     client.stdin.flush()
-                    while server_data(server, mob, 'Motion') == before:
+                    # Use the same console-observation deadline as tickstep and server_data.
+                    deadline = time.monotonic() + 120
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise AssertionError(f'{label}: hitting {kind} did not change its motion')
+                        if server_data(server, mob, 'Motion', timeout=remaining) != before:
+                            break
                         time.sleep(0.05)
                     sync()
                 elif word == 'tickstep':
@@ -433,11 +441,11 @@ def main():
     report.unlink(missing_ok=True)
     vanilla_server, sunrise_server, client = harness_commands(lock, jars, libraries, build)
     world = generate_world(vanilla_server, build)
-    vanilla = compared(run_side('vanilla', vanilla_server, client, build, world))
+    vanilla = compared(run_side('vanilla', vanilla_server, client, build, world, CASES))
     takeoff = [line for line in vanilla.get('pvp-takeoff', []) if line.startswith('Alice motion self ')]
     if len(takeoff) != 1 or not 0.4 < float(takeoff[0].split()[4]) < 0.43:
         raise AssertionError(f'pvp-takeoff: vanilla did not hit after the jump and before travel: {takeoff}')
-    sunrise = compared(run_side('sunrise', sunrise_server, client, build, world))
+    sunrise = compared(run_side('sunrise', sunrise_server, client, build, world, CASES))
     differ, fixed = [], []
     for case in CASES:
         want, got = vanilla.get(case, []), sunrise.get(case, [])

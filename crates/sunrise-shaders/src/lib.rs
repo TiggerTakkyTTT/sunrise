@@ -35,25 +35,25 @@ mod translate;
 pub use biomes::{
     category as biome_category, pack_id as biome_pack_id, precipitation as biome_precipitation,
 };
-pub use block_ids::BlockIds;
+pub use block_ids::{BlockIds, BlockLayers, LayerMatch, RenderLayer};
 pub use condition::{Conditionals, eval_condition, resolve_defined};
 pub use config::{
     BUFFERS, Buffer, Config, Format, HALF_LIVES, Kind, SHADOW_COLORS, Shadow, buffer_index,
     draw_buffers, shadow_color,
 };
 pub use custom::{Custom, Val};
-pub use discover::{Found, discover};
+pub use discover::{Found, candidates, discover};
 pub use lang::Lang;
 pub use macros::{MC_VERSION, Macros, RENDER_STAGES, render_stage};
 pub use options::{
-    PackOption, apply as apply_options, chosen_file, chosen_text, options, options_from_sources,
-    parse_chosen, properties_from_sources, properties_macros, read_properties, switches_on,
-    value_options, with_options,
+    PackOption, apply as apply_options, choose as choose_option, chosen_file, chosen_text, options,
+    options_from_sources, parse_chosen, properties_from_sources, properties_macros,
+    read_properties, switches_on, value_options, with_options,
 };
 pub use pack::{Pack, PackError};
 pub use post::{
-    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, Factor, GameInputs, Group,
-    ImageSize,
+    Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, DEVICELESS_INTERFACE_LIMITS,
+    Factor, GameInputs, Group, ImageSize, ModPackProgram, ModPackProgramRequest,
 };
 pub use post::{
     ComputeStageAttempt, LoaderRefusal, Post, PostProgram, STARS_BLEND, ShadowCulling, SkySwitches,

@@ -1,5 +1,4 @@
 //! The `framerate_limit` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0219
 
 pub trait Hooks {
     /// The frame rate this window is about to be held to: Max Framerate after the

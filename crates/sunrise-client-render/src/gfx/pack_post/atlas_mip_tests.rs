@@ -77,6 +77,7 @@ fn atlas(gpu: &Fixture) -> wgpu::TextureView {
 }
 
 #[test]
+#[ignore = "daily"]
 fn the_atlas_blends_its_two_nearest_levels() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

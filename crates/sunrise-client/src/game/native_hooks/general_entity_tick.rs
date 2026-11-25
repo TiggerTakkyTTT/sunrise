@@ -106,6 +106,41 @@ impl EntityServerAccess for GeneralTickAccess<'_, '_, '_> {
     fn host(&mut self) -> &mut dyn ServerHost {
         self.game
     }
+
+    fn with_current_transaction_scope(
+        &mut self,
+        callback: &mut dyn for<'loan> FnMut(
+            &'loan mut dyn mod_api::EntityServerAccess,
+            &'loan mod_api::TransactionContext,
+        ),
+    ) -> Result<(), mod_api::TransactionUnavailable> {
+        let frame = self
+            .game
+            .current_storage_frame()
+            .ok_or(mod_api::TransactionUnavailable)?;
+        frame.lend(|tx| callback(self, tx));
+        Ok(())
+    }
+
+    fn with_transaction_scope(
+        &mut self,
+        callback: &mut dyn for<'loan> FnMut(
+            &'loan mut dyn mod_api::EntityServerAccess,
+            &'loan mod_api::TransactionContext,
+        ) -> bool,
+    ) -> Result<bool, mod_api::TransactionScopeError> {
+        let (subject, kind) = (self.subject, self.kind);
+        self.game
+            .scoped_storage(|game, tx| {
+                let mut child = GeneralTickAccess {
+                    game,
+                    subject,
+                    kind,
+                };
+                callback(&mut child, tx).then_some(())
+            })
+            .map(|settled| settled.is_some())
+    }
 }
 
 impl Game<'_> {
@@ -152,6 +187,10 @@ mod tests {
             || {
                 with_game(|game| {
                     game.options.dedicated = Some(Vec::new());
+                    crate::game::native_entity_refs::tests::fixture_resident_column(
+                        &mut game.world,
+                        (0, 0),
+                    );
                     game.spawn_item(ItemStack::new("minecraft:stick", 1), [0.0; 3], [0.0; 3], 0);
                     let peer = game
                         .item_entity(game.entity(game.dropped[0].id).unwrap())
@@ -190,20 +229,30 @@ mod tests {
                                 scope.with_view(|mut view| view.set_velocity([7.0; 3])),
                                 Some(true)
                             );
-                            scope.transaction(|scope, _| {
-                                scope
-                                    .with_view(|mut view| {
-                                        assert!(view.set_velocity([8.0; 3]));
-                                        assert!(view.set_rotation(9.0, 10.0));
-                                        view.reset_fall_distance();
-                                    })
-                                    .unwrap();
-                                assert_eq!(peer.set_stack(scope.host(), stack.clone()), Ok(true));
-                                Ok::<_, ()>(())
-                            })?;
+                            scope
+                                .transaction(|scope, _| {
+                                    scope
+                                        .with_view(|mut view| {
+                                            assert!(view.set_velocity([8.0; 3]));
+                                            assert!(view.set_rotation(9.0, 10.0));
+                                            view.reset_fall_distance();
+                                        })
+                                        .unwrap();
+                                    assert_eq!(
+                                        peer.set_stack(scope.host(), Some(stack.clone())),
+                                        Ok(true)
+                                    );
+                                    Ok::<_, ()>(())
+                                })
+                                .unwrap();
                             commit.then_some(()).ok_or(())
                         });
-                        assert_eq!(result, commit.then_some(()).ok_or(()));
+                        assert_eq!(
+                            result,
+                            commit
+                                .then_some(())
+                                .ok_or(mod_api::TransactionError::Aborted(()))
+                        );
                         let row = game.resident_entities.general.row(id).unwrap();
                         assert_eq!(
                             (

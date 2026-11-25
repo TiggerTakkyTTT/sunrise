@@ -14,11 +14,15 @@ pub mod arrows;
 pub mod bed_geometry;
 pub mod block_contact;
 pub mod block_sounds;
+#[cfg(test)]
+mod fresh_process;
 pub mod item_damage;
 pub mod mod_packet_builders;
 pub mod packet_source;
 pub mod parallel;
 pub mod powder_snow;
+#[cfg(test)]
+mod rule_replacements;
 #[cfg(test)]
 mod test_log;
 #[cfg(test)]
@@ -190,6 +194,7 @@ pub mod tick_chunk_membership;
 pub mod ticket_levels;
 pub mod title;
 pub mod toasts;
+pub mod tooltip_components;
 pub mod travel_gate;
 pub mod ui_theme;
 pub mod vanillagen;

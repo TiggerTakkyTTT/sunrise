@@ -26,21 +26,119 @@ pub struct StackedClick {
     pub carried: Option<ItemStack>,
     pub clicked: Option<ItemStack>,
 }
+/// Which policy governs applying edits from [`StackedOutcome`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StackedEditPolicy {
+    /// Global `Hooks::item_stacked_on_other` event: edits are allowed only when `canceled &&
+    /// handled`, and result/potion slots cannot be directly modified.
+    #[default]
+    Global,
+    /// `ItemPart::item_stacked_on_other` override phases (`CarriedOnOther` / `OtherStackedOnMe`):
+    /// edits may occur on both handled ("stop") and declined ("continue with edits") outcomes, and
+    /// taking from or directly editing an occupied output/result slot is allowed inside the
+    /// transaction.
+    Part,
+}
+
+/// Where `pickup` should resume after applying any [`StackedOutcome`] edits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StackedResume {
+    /// Run vanilla carried override, then vanilla clicked override, then plain pickup.
+    #[default]
+    VanillaAll,
+    /// Vanilla carried override won the carried phase: run it on the live menu now (skipping
+    /// vanilla clicked override and plain pickup when it takes the click).
+    VanillaCarried,
+    /// The carried phase (carried Part + vanilla carried override) declined: run vanilla clicked
+    /// override, then plain pickup.
+    VanillaClicked,
+    /// Global listener canceled without handling: skip both vanilla overrides and run plain pickup.
+    Plain,
+    /// Click was handled: stop without running vanilla overrides or plain pickup.
+    Done,
+}
+
+/// Persistent quick-craft (drag) state of a [`super::Menu`], preserved across clicks by hosted
+/// menus that rebuild an engine [`super::Menu`] per packet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QuickCraftDrag {
+    pub(super) status: i32,
+    pub(super) ty: i32,
+    pub(super) slots: Vec<usize>,
+}
+
+impl QuickCraftDrag {
+    /// Whether a drag is currently in progress (`quickcraftStatus != 0`).
+    pub fn active(&self) -> bool {
+        self.status != 0
+    }
+}
+
+/// One edit the mods made to a pickup click's cursor or clicked slot, applied in order.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StackedEdit {
+    /// Write the cursor (`SlotAccess.set`).
+    Carried(Option<ItemStack>),
+    /// Directly write the clicked slot (`Slot.set` / `setByPlayer`): `None` clears the slot
+    /// without running `Slot.onTake` side effects.
+    Clicked(Option<ItemStack>),
+    /// Take this many items from the clicked slot via `Slot.safeTake` / `Slot.onTake`.
+    Take(u32),
+}
+
 /// What the mods decided about a pickup click (`item_stacked_on_other`), validated by the game
-/// before the click: `canceled` skips the bundle override, and a cancelled click that is also
-/// `handled` is done, leaving the cursor and the slot as the `Some` stacks say.
+/// before the click.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StackedOutcome {
     pub canceled: bool,
     pub handled: bool,
-    /// The cursor after a cancelled, handled click.
-    pub carried: Option<Option<ItemStack>>,
-    /// The clicked slot after a cancelled, handled click.
-    pub clicked: Option<Option<ItemStack>>,
-    /// Set by the click when the clicked slot's own rules refuse `clicked` (it changes a slot
-    /// whose `onTake` would not run, takes what `mayPickup` keeps, or puts in what `mayPlace` or
-    /// the slot's size refuses): the click changed nothing and its decision is undone.
+    pub policy: StackedEditPolicy,
+    pub resume: StackedResume,
+    /// The listeners' edits to the cursor and the clicked slot, in the order they made them.
+    pub edits: Vec<StackedEdit>,
+    /// Set when the slot rules refuse an edit or a suspended edit's inputs changed.
+    /// The click and its listener writes are then undone.
     pub refused: std::cell::Cell<bool>,
+}
+
+/// Slot category for [`super::apply_stacked_outcome`], shared by local/client [`super::Menu`] and
+/// hosted LAN [`crate::lan::menu::View`] pickups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StackedSlotKind {
+    /// Ordinary inventory, container, or equipment slot.
+    Ordinary,
+    /// Non-interactive result slot (for example `CrafterMenu`'s display result).
+    Inert,
+    /// Furnace output slot (`Role::Output`): full take runs `safe_take`, partial same-item take
+    /// runs `remove` + `on_take`, and occupied direct edits use the item's max stack size.
+    Output,
+    /// Brewing stand potion slot (`Role::Potion`): global policy refuses edits when held; part
+    /// policy runs `safe_take` / partial take and caps occupied direct edits at 1.
+    Potion,
+    /// Crafting, station, merchant, or mod result slot: global policy refuses edits; part policy
+    /// runs `safe_take` on full take and allows occupied direct edits up to the item's max stack.
+    Result,
+}
+
+/// Slot operations required by [`super::apply_stacked_outcome`] so local/client [`super::Menu`]
+/// and hosted LAN [`crate::lan::menu::View`] share one outcome-application implementation.
+pub trait StackedSlotTarget {
+    fn slot_kind(&self) -> StackedSlotKind;
+    fn current_clicked(&self) -> Option<ItemStack>;
+    fn may_pickup(&self) -> bool;
+    fn may_place(&self, stack: &ItemStack) -> bool;
+    fn slot_max(&self, stack: &ItemStack) -> u32;
+    fn item_max_stack(&self, stack: &ItemStack) -> u32;
+    fn set_carried(&mut self, carried: Option<ItemStack>);
+    fn set_clicked(&mut self, clicked: Option<ItemStack>);
+    /// Run a compound clicked-slot edit on private state, committing only when it succeeds.
+    fn with_staged(&mut self, edit: impl FnOnce(&mut dyn StackedSlotTarget) -> bool) -> bool
+    where
+        Self: Sized;
+    /// Full take from a slot (`Slot.safeTake`, including `onTake` side effects).
+    fn safe_take(&mut self, amount: u32, max_amount: u32) -> Option<ItemStack>;
+    /// Partial take from an output/potion slot (`Slot.remove` followed by `Slot.onTake`).
+    fn take_partial(&mut self, amount: u32) -> Option<ItemStack>;
 }
 /// Who and where a `menu_slot_rules` ask is about: the player whose menu it is, the menu's
 /// block, the container the asked slot indexes, and the menu's and player's live slots as they
@@ -53,6 +151,8 @@ pub struct SlotContext<'a> {
     pub pos: Option<[i32; 3]>,
     pub container: MenuContainer,
     pub(crate) slots: &'a [Option<ItemStack>],
+    pub(crate) slots_second: &'a [Option<ItemStack>],
+    pub(crate) linked: Option<crate::lan::menu::LinkedSlots<'a>>,
     /// A flattened LAN container stores grid/result values in Main's unused positions.
     /// These positions are empty in the prediction's separate Main container.
     pub(crate) main_crafting: Option<crate::containers::ModCrafting>,
@@ -61,6 +161,8 @@ pub struct SlotContext<'a> {
     pub(crate) player_slots: &'a [Option<ItemStack>],
     pub(crate) player_armor: Option<&'a [Option<ItemStack>; 4]>,
     pub(crate) player_offhand: Option<&'a Option<ItemStack>>,
+    /// A hosted rule sees the tentative slot as well as the stack being checked.
+    pub(crate) staged_slot: Option<(MenuContainer, usize, Option<&'a ItemStack>)>,
 }
 
 /// `menu_slot_rules` inside a menu click, which cannot reach the game: the game lends the menu

@@ -374,7 +374,8 @@ impl Game<'_> {
         | Target::Crystal(id)
         | Target::Dragon(id)
         | Target::Spawner(id)
-        | Target::Cloud(id)) = target
+        | Target::Cloud(id)
+        | Target::Bolt(id)) = target
         else {
             return Ok(None);
         };
@@ -931,9 +932,9 @@ impl Game<'_> {
                     });
                 }
             }
-            Target::Stand(id) if yaw.is_finite() => {
+            Target::Stand(id) => {
                 if let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id) {
-                    a.yaw = yaw;
+                    a.set_rotation([yaw, pitch.unwrap_or(a.pitch)]);
                 }
             }
             Target::Boat(id) if yaw.is_finite() => {
@@ -960,6 +961,18 @@ impl Game<'_> {
                 if let Some(i) = self.fangs.list.iter().position(|e| e.id == id) {
                     self.fangs.list.update(i, |f| {
                         f.yaw = yaw;
+                    });
+                }
+            }
+            Target::Bolt(id) => {
+                if let Some(i) = self.bolts.iter().position(|e| e.id == id) {
+                    self.bolts.update(i, |b| {
+                        if yaw.is_finite() {
+                            b.rotation[0] = yaw;
+                        }
+                        if let Some(pitch) = pitch {
+                            b.rotation[1] = pitch;
+                        }
                     });
                 }
             }

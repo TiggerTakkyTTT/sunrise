@@ -1,6 +1,22 @@
 //! Read-only client session and local-player status.
 
-use crate::{BlockPos, GameMode, Text};
+use crate::{BlockPos, GameMode, Text, TextFormError};
+use core::ops::ControlFlow;
+
+/// Why a client-session read could not run.
+// no wire: this refusal is returned by in-process client-session reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClientSessionReadError {
+    /// The current phase or backend does not allow this read.
+    Unavailable,
+}
+
+impl crate::NoBackend for ClientSessionReadError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
 
 // no wire: borrows the current client connection and integrated world.
 /// The connected server, not the reconnect target of an earlier session.
@@ -82,64 +98,45 @@ pub enum BlockBreakingState {
     },
 }
 
-/// The player list as the Tab overlay draws it (`PlayerTabOverlay`), read with
-/// `ClientSession::client_tab_list`: what this client has been sent, changing as the server
-/// updates the list.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct ClientTabList {
-    /// The listed players in drawn order (`getPlayerInfos`: higher list order first, spectators
-    /// last, then team name and profile name), at most the 80 the overlay draws.
-    pub entries: Vec<ClientTabListEntry>,
-    /// The header the server set; `None` when it is empty or was cleared.
-    pub header: Option<Text>,
-    /// The footer the server set; `None` when it is empty or was cleared.
-    pub footer: Option<Text>,
-}
+/// The live player list as the Tab overlay draws it (`PlayerTabOverlay`), read with
+/// [`crate::ClientSession::client_tab_list`]. It reflects what the server has sent.
+// no wire: the view lends the current list and overlay text in-process.
+pub trait ClientTabList {
+    /// Visit the listed players in drawn order (`getPlayerInfos`: higher list order first,
+    /// then non-spectators before spectators, team and profile name), at most the 80 it draws.
+    /// Each row is valid only during its callback. Return `Break(())` to stop; an empty list
+    /// returns `Continue(())` without calling the visitor.
+    fn visit_entries(
+        &self,
+        visit: &mut dyn FnMut(&dyn ClientTabListEntry) -> ControlFlow<()>,
+    ) -> ControlFlow<()>;
 
-impl ClientTabList {
-    /// A list from its entries, header and footer.
-    pub fn new(
-        entries: Vec<ClientTabListEntry>,
-        header: Option<Text>,
-        footer: Option<Text>,
-    ) -> Self {
-        Self {
-            entries,
-            header,
-            footer,
-        }
-    }
+    /// Copy the header the server set. `Ok(None)` means absent or cleared; a conversion
+    /// refusal affects only this copy.
+    fn copy_header(&self) -> Result<Option<Text>, TextFormError>;
+
+    /// Copy the footer the server set. `Ok(None)` means absent or cleared; a conversion
+    /// refusal affects only this copy.
+    fn copy_footer(&self) -> Result<Option<Text>, TextFormError>;
 }
 
 /// One listed player (`PlayerInfo`) as the Tab overlay shows it.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-#[derive(sunrise_mod_api_macros::Wire)]
-pub struct ClientTabListEntry {
-    /// The profile name (`GameProfile.name`).
-    pub name: String,
-    /// The profile UUID.
-    pub uuid: u128,
-    /// The game mode the server reported.
-    pub game_mode: GameMode,
-    /// The latency in milliseconds the ping icon shows; negative when unknown.
-    pub latency: i32,
-    /// The name as drawn (`getNameForDisplay`): the display name the server set, else the
-    /// profile name with its team's prefix, suffix and colour; italic for a spectator.
-    pub display: Text,
-}
+// no wire: a row lends the player's current information for one callback.
+pub trait ClientTabListEntry {
+    /// Borrow the profile name (`GameProfile.name`); copy it only if retaining it.
+    fn name(&self) -> &str;
 
-impl ClientTabListEntry {
-    /// An entry from its parts.
-    pub fn new(name: String, uuid: u128, game_mode: GameMode, latency: i32, display: Text) -> Self {
-        Self {
-            name,
-            uuid,
-            game_mode,
-            latency,
-            display,
-        }
-    }
+    /// The profile UUID.
+    fn uuid(&self) -> u128;
+
+    /// The game mode the server reported.
+    fn game_mode(&self) -> GameMode;
+
+    /// The latency in milliseconds the ping icon shows; negative when unknown.
+    fn latency(&self) -> i32;
+
+    /// Copy the name as drawn (`getNameForDisplay`): the display name the server sent, or
+    /// the profile name with its team's prefix, suffix and colour; italic for a spectator.
+    /// A conversion refusal affects only this copy; there is no plaintext fallback.
+    fn copy_display(&self) -> Result<Text, TextFormError>;
 }

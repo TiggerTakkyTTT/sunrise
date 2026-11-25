@@ -308,16 +308,18 @@ fn assert_engineer_acquisition(game: &mut Game<'_>) {
         .registry_entry("minecraft:villager_profession", "test:engineer")
         .expect("the registered gameplay profession is a generic registry entry");
     assert_eq!(engineer.id.to_string(), "test:engineer");
-    assert!(
-        host.registry_entries("minecraft:villager_profession")
-            .unwrap()
-            .contains(&Identifier::parse("test:engineer").unwrap())
+    use std::ops::ControlFlow;
+    let mut engineer_seen = false;
+    let mut farmer_seen = false;
+    assert_eq!(
+        host.visit_registry_entries("minecraft:villager_profession", &mut |id| {
+            engineer_seen |= id == "test:engineer";
+            farmer_seen |= id == "minecraft:farmer";
+            ControlFlow::Continue(())
+        }),
+        Ok(ControlFlow::Continue(()))
     );
-    assert!(
-        host.registry_entries("minecraft:villager_profession")
-            .unwrap()
-            .contains(&Identifier::parse("minecraft:farmer").unwrap())
-    );
+    assert!(engineer_seen && farmer_seen);
     assert_eq!(table.acquiring("test:assembler"), Some(15));
     assert_eq!(table.trade_key("test:engineer", 1), Some("test:engineer"));
     assert_eq!(table.trade_key("test:engineer", 2), None);

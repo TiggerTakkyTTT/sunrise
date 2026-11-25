@@ -5,7 +5,7 @@ use crate::{
 };
 use std::{
     collections::{
-        VecDeque,
+        BTreeSet, VecDeque,
         hash_map::{Iter, ValuesMut},
     },
     ops::Deref,
@@ -22,6 +22,35 @@ use sunrise_mod_runtime::attachments::{
 
 type Key = (i32, i32);
 type Columns = FxHashMap<Key, Arc<Chunk>>;
+
+/// `ClientChunkCache.Storage`: a square view over floor-modulo slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientChunkRange {
+    center: Key,
+    radius: u32,
+}
+
+impl ClientChunkRange {
+    pub fn new(center: Key, view_distance: i32) -> Self {
+        Self {
+            center,
+            radius: view_distance.max(2) as u32 + 3,
+        }
+    }
+
+    pub fn contains(self, (x, z): Key) -> bool {
+        x.abs_diff(self.center.0) <= self.radius && z.abs_diff(self.center.1) <= self.radius
+    }
+
+    fn slot(self, (x, z): Key) -> (i64, i64) {
+        // A sparse ring keeps only occupied slots; the server supplies the radius.
+        let diameter = 2 * i64::from(self.radius) + 1;
+        (
+            i64::from(x).rem_euclid(diameter),
+            i64::from(z).rem_euclid(diameter),
+        )
+    }
+}
 
 /// The logical group cells in a client's resident columns, shared by its active and viewed
 /// worlds. A worker's `Arc<Chunk>` snapshot is not another resident column.
@@ -85,6 +114,13 @@ pub enum ChunkMembershipDelta {
 /// Tokens are process-wide: replacing the entire map also invalidates caches.
 pub struct ChunkMap {
     columns: Columns,
+    // The x-then-z projection of visible membership; gameplay still iterates the hash map.
+    ordered: BTreeSet<Key>,
+    /// In-range coordinates already uniquely index their ring slots. Only hidden occupants
+    /// need a modulo index. They retain their blocks, attachments and light, but none of
+    /// the normal map reads (including mesh/tick membership) can see them.
+    hidden: FxHashMap<(i64, i64), Arc<Chunk>>,
+    cache_range: Option<ClientChunkRange>,
     revision: u64,
     /// The oldest revision `recent_deltas` still answers for: the revision of
     /// the change it last dropped, or the revision that cleared them. A
@@ -109,6 +145,9 @@ impl Default for ChunkMap {
         let revision = next_revision();
         Self {
             columns: Columns::default(),
+            ordered: BTreeSet::new(),
+            hidden: FxHashMap::default(),
+            cache_range: None,
             revision,
             min_valid_revision: revision,
             recent_deltas: VecDeque::new(),
@@ -153,6 +192,7 @@ impl ChunkMap {
             0,
             self.columns
                 .values()
+                .chain(self.hidden.values())
                 .map(|c| c.connection_groups.len())
                 .sum(),
         );
@@ -189,10 +229,26 @@ impl ChunkMap {
 
     fn unload_attachments(&self) {
         if let Some(observer) = &self.attachment_observer {
-            for key in self.columns.keys() {
-                observer.unload(Holder::Chunk([key.0, key.1]));
+            for (x, z) in self.resident_keys() {
+                observer.unload(Holder::Chunk([x, z]));
             }
         }
+    }
+
+    /// Read an existing loaded column without creating saved extras or an index binding.
+    pub fn attachments(&self, key: &Key) -> Result<Option<&Attachments>, AttachmentError> {
+        use sunrise_core::nbt::JavaString;
+        static KEY: std::sync::LazyLock<JavaString> =
+            std::sync::LazyLock::new(|| ATTACHMENTS_KEY.into());
+        let column = self
+            .columns
+            .get(key)
+            .ok_or(AttachmentError::MissingHolder)?;
+        let Some(saved) = &column.saved else {
+            return Ok(None);
+        };
+        attachment_compound(saved.root.get(&KEY))?;
+        Ok(Some(&saved.attachments))
     }
 
     /// The live map, rebound after extras COW but never merely for lighting COW.
@@ -209,6 +265,90 @@ impl ChunkMap {
             let _ = observer.bind(Holder::Chunk([key.0, key.1]), &mut saved.attachments);
         }
         Ok(&mut saved.attachments)
+    }
+
+    /// Move the view without retiring any column. On a diameter change the caller has
+    /// already discarded out-of-range occupants, so all surviving slots are in range.
+    #[must_use]
+    pub fn set_client_chunk_range(&mut self, range: ClientChunkRange) -> (Vec<Key>, Vec<Key>) {
+        if self.cache_range == Some(range) {
+            return (Vec::new(), Vec::new());
+        }
+        let shown: Vec<_> = self
+            .hidden
+            .values()
+            .filter_map(|chunk| {
+                let key = (chunk.x, chunk.z);
+                range.contains(key).then_some(key)
+            })
+            .collect();
+        for &key in &shown {
+            let slot = self
+                .cache_range
+                .expect("hidden slots have a range")
+                .slot(key);
+            let chunk = self.hidden.remove(&slot).expect("visible again");
+            self.add_visible(key);
+            self.columns.insert(key, chunk);
+        }
+        let hidden: Vec<_> = self
+            .columns
+            .keys()
+            .copied()
+            .filter(|&key| !range.contains(key))
+            .collect();
+        for &key in &hidden {
+            let chunk = self
+                .columns
+                .remove(&key)
+                .expect("visible before centre moved");
+            self.remove_visible(key);
+            let previous = self.hidden.insert(range.slot(key), chunk);
+            debug_assert!(previous.is_none(), "one column per client cache slot");
+        }
+        self.cache_range = Some(range);
+        (hidden, shown)
+    }
+
+    /// An in-range admission can collide only with a hidden column. The caller must
+    /// unload it before inserting, while that column's state is still resident.
+    pub fn client_chunk_alias(&self, key: Key) -> Option<Key> {
+        if self.hidden.is_empty() {
+            return None;
+        }
+        let slot = self.cache_range?.slot(key);
+        let chunk = self.hidden.get(&slot)?;
+        Some((chunk.x, chunk.z))
+    }
+
+    /// Includes hidden occupants for a storage resize or level teardown.
+    pub fn resident_keys(&self) -> impl Iterator<Item = Key> + '_ {
+        self.columns
+            .keys()
+            .copied()
+            .chain(self.hidden.values().map(|chunk| (chunk.x, chunk.z)))
+    }
+
+    pub fn resident_get(&self, key: &Key) -> Option<&Arc<Chunk>> {
+        self.columns.get(key).or_else(|| {
+            if self.hidden.is_empty() {
+                return None;
+            }
+            let chunk = self.hidden.get(&self.cache_range?.slot(*key))?;
+            ((chunk.x, chunk.z) == *key).then_some(chunk)
+        })
+    }
+
+    /// Light is owned by the level, not by the block cache's current view.
+    pub fn resident_get_mut(&mut self, key: &Key) -> Option<&mut Arc<Chunk>> {
+        if let Some(chunk) = self.columns.get_mut(key) {
+            return Some(chunk);
+        }
+        if self.hidden.is_empty() {
+            return None;
+        }
+        let chunk = self.hidden.get_mut(&self.cache_range?.slot(*key))?;
+        ((chunk.x, chunk.z) == *key).then_some(chunk)
     }
 
     pub fn membership_revision(&self) -> u64 {
@@ -301,19 +441,52 @@ impl ChunkMap {
             );
         }
         if previous.is_none() {
-            for z in key.1 - 1..=key.1 + 1 {
-                for x in key.0 - 1..=key.0 + 1 {
-                    *self.near.entry((x, z)).or_insert(0) += 1;
-                }
-            }
-            self.revision = next_revision();
-            self.record_delta(ChunkMembershipDelta::Added(key));
+            self.add_visible(key);
         }
         previous
     }
+    fn add_visible(&mut self, key: Key) {
+        self.ordered.insert(key);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let near = (key.0.wrapping_add(dx), key.1.wrapping_add(dz));
+                *self.near.entry(near).or_insert(0) += 1;
+            }
+        }
+        self.revision = next_revision();
+        self.record_delta(ChunkMembershipDelta::Added(key));
+    }
+    fn remove_visible(&mut self, key: Key) {
+        self.ordered.remove(&key);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let near = (key.0.wrapping_add(dx), key.1.wrapping_add(dz));
+                if let Some(n) = self.near.get_mut(&near) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.near.remove(&near);
+                    }
+                }
+            }
+        }
+        self.revision = next_revision();
+        self.record_delta(ChunkMembershipDelta::Removed(key));
+    }
     pub fn remove(&mut self, key: &Key) -> Option<Arc<Chunk>> {
         self.fresh.remove(key);
-        let previous = self.columns.remove(key);
+        let previous = if let Some(chunk) = self.columns.remove(key) {
+            self.remove_visible(*key);
+            Some(chunk)
+        } else if let Some(range) = self.cache_range {
+            let slot = range.slot(*key);
+            if self.hidden.get(&slot).is_some_and(|c| (c.x, c.z) == *key) {
+                self.hidden.remove(&slot)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         if let Some(chunk) = &previous {
             if let Some(residency) = &mut self.group_residency {
                 residency.replace(chunk.connection_groups.len(), 0);
@@ -321,28 +494,18 @@ impl ChunkMap {
             if let Some(observer) = &self.attachment_observer {
                 observer.unload(Holder::Chunk([key.0, key.1]));
             }
-            for z in key.1 - 1..=key.1 + 1 {
-                for x in key.0 - 1..=key.0 + 1 {
-                    if let Some(n) = self.near.get_mut(&(x, z)) {
-                        *n -= 1;
-                        if *n == 0 {
-                            self.near.remove(&(x, z));
-                        }
-                    }
-                }
-            }
-            self.revision = next_revision();
-            self.record_delta(ChunkMembershipDelta::Removed(*key));
         }
         previous
     }
     pub fn clear(&mut self) {
-        if !self.columns.is_empty() {
+        if !self.columns.is_empty() || !self.hidden.is_empty() {
             self.unload_attachments();
             self.columns.clear();
+            self.hidden.clear();
             if let Some(residency) = &mut self.group_residency {
                 residency.replace(residency.occupied, 0);
             }
+            self.ordered.clear();
             self.fresh.clear();
             self.near.clear();
             self.revision = next_revision();
@@ -352,6 +515,11 @@ impl ChunkMap {
             self.min_valid_revision = self.revision;
         }
     }
+    /// Resident columns in lexical (x, z) order, independently of hash iteration.
+    pub fn ordered_keys(&self) -> impl ExactSizeIterator<Item = Key> + '_ {
+        self.ordered.iter().copied()
+    }
+
     /// Whether the column at `key` and its eight neighbours are all resident.
     #[inline]
     pub fn surrounded(&self, key: Key) -> bool {
@@ -480,7 +648,7 @@ mod tests {
             },
         }),
         copy_on_death: false,
-        sync: false,
+        sync_codec: None,
     };
     fn observe(map: &mut ChunkMap, index: &Index, dimension: DimensionKey) -> Arc<AtomicUsize> {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -504,7 +672,7 @@ mod tests {
     fn saved_chunk() -> Arc<Chunk> {
         let mut source = Attachments::default();
         VALUE.set(&mut source, Holder::Chunk([3, 5]), 7).unwrap();
-        let form = source.to_nbt();
+        let form = source.try_to_nbt().unwrap();
         let mut chunk = Chunk::empty(3, 5);
         chunk.saved = Some(Arc::new(crate::chunk::ChunkExtras {
             attachments: Attachments::from_nbt(form),
@@ -662,7 +830,7 @@ mod tests {
             default: || unreachable!(),
             codec: None,
             copy_on_death: false,
-            sync: false,
+            sync_codec: None,
         };
         let index = Index::default();
         let drops = Arc::new(Mutex::new(Vec::new()));
@@ -704,7 +872,7 @@ mod tests {
         map.insert((0, 0), chunk.clone());
         let inserted = map.membership_revision();
         assert_ne!(empty, inserted);
-        map.insert((0, 0), chunk.clone());
+        map.insert((0, 0), chunk);
         Arc::make_mut(map.get_mut(&(0, 0)).unwrap()).lit = true;
         for column in map.values_mut() {
             Arc::make_mut(column).light_loaded = true;
@@ -718,15 +886,20 @@ mod tests {
             &mut crate::light::LightChanges::default(),
         );
         assert_eq!(inserted, map.membership_revision());
+        assert!(map.ordered_keys().eq([(0, 0)]), "replacement keeps one key");
         map.remove(&(0, 0));
-        map.insert((1, 0), chunk);
-        assert_eq!(map.len(), 1);
+        for (x, z) in [(1, -3), (-2, 4), (-2, -1)] {
+            map.insert((x, z), Arc::new(Chunk::empty(x, z)));
+        }
+        assert!(map.ordered_keys().eq([(-2, -1), (-2, 4), (1, -3)]));
         assert_ne!(inserted, map.membership_revision());
         let replaced = map.membership_revision();
         map.clear();
+        assert!(map.ordered_keys().next().is_none());
         assert_ne!(replaced, map.membership_revision());
         let cleared = map.membership_revision();
         map = ChunkMap::default();
+        assert!(map.ordered_keys().next().is_none());
         assert_ne!(cleared, map.membership_revision());
     }
 

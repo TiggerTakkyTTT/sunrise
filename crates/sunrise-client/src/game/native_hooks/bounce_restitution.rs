@@ -77,7 +77,7 @@ impl StepOnView<'_> {
                         v.iter().all(|v| v.is_finite())
                     }
                     mod_api::EntityWrite::StuckIn(v) => v.iter().all(|v| v.is_finite()),
-                    mod_api::EntityWrite::Hurt { amount } => amount.is_finite(),
+                    mod_api::EntityWrite::Hurt { amount, .. } => amount.is_finite(),
                     _ => true,
                 };
                 let valid = event.movement.iter().all(|v| v.is_finite())
@@ -114,7 +114,7 @@ const RESTITUTION_HOOKS: sunrise_client::block_contact::RestitutionHooks =
             )
         },
         restitution: |level, c, factor| {
-            FrictionView(level)
+            FrictionView(level, None)
                 .native_bounce_restitution(c.entity, c.kind, c.state, c.position, factor);
         },
     };

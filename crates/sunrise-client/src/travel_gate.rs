@@ -7,7 +7,7 @@
 //! one branch.
 use mod_api::TravelMode;
 use sunrise_core::geometry::Vec3;
-use sunrise_world::native_load_context::{LoopContext, LoopSide};
+use sunrise_world::native_load_context::LoopContext;
 use sunrise_world::travel::TravelMode as GameTravelMode;
 
 /// The `living_travel` hook's target (#2414): the generated dispatch the
@@ -49,21 +49,18 @@ fn mode_of(mode: GameTravelMode) -> TravelMode {
 
 /// Ask one travel invocation (#2414) about to run for `entity` of `kind` in
 /// `mode`'s branch: the `living_travel` hook fires here - in this one
-/// function - on the authoritative side, and only when a listener
-/// subscribes; with none, or on a client's own prediction, the resolved
-/// values stand and the cost is the subscriber branch. `mode` names the
+/// function - on whichever side runs the travel (the server's, and the
+/// client's own prediction), and only when a listener subscribes; with none
+/// the resolved values stand and the cost is the subscriber branch. `mode` names the
 /// branch only when a listener asks for it. A listener that cancels skips
 /// the invocation - its nested move does not run and the flying vertical
-/// damping is skipped; what the tick already did is not undone. A
-/// replacement of `input` (each component within [-1, 1]) or `velocity`
-/// (finite, each component within ±64 blocks) supplies the branch's
-/// starting values. The dispatch checks each listener's pair as it
-/// returns: one with a component that is not a finite number, or outside
-/// its budget, is refused whole, naming the mod and the field, and the
-/// pair the preceding listeners left stands (the values the game resolved
-/// before any), never clamped. If a listener unwinds, only its proposal is
-/// discarded and the callback is disabled for this hook for the session.
-/// Earlier results stand and later eligible listeners still get the travel.
+/// damping is skipped; what the tick already did is not undone. Listeners
+/// registered with `#[listener(receive_cancelled)]` may clear cancellation.
+/// Replacements pass through to `Entity.moveRelative` and
+/// `Entity.setDeltaMovement` without synthetic limits or output validation
+/// during dispatch. If a listener unwinds, only its own edits are discarded
+/// and that callback is disabled for this hook for the session. Earlier edits
+/// stand and later eligible listeners still run.
 ///
 /// Returns whether the travel runs; `input` and `velocity` are the values
 /// the branch starts from.
@@ -76,9 +73,6 @@ pub fn decide(
     input: &mut Vec3,
     velocity: &mut Vec3,
 ) -> bool {
-    if context.side() != LoopSide::Server {
-        return true;
-    }
     if !mod_api::__private::listened(mod_api::HookId::LivingTravel) {
         return true;
     }
@@ -99,8 +93,6 @@ pub fn decide(
     if canceled {
         return false;
     }
-    // The dispatch checked each listener's pair as it returned (budgets in
-    // `refused_travel_output`): what stands here is the last accepted pair.
     *input = Vec3::new(replaced_input[0], replaced_input[1], replaced_input[2]);
     *velocity = Vec3::new(
         replaced_velocity[0],

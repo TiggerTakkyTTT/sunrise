@@ -310,6 +310,7 @@ fn assert_none_wrong(wrong: Option<Vec<Wrong>>) {
 /// both triangles of each strip have their sides (a vertex's `gl_VertexID % 2` is its
 /// corner's side).
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_widens_its_line_draws_its_own_band() {
     let wrong = wrong_pixels(&widening(4.0), &[(0xFFFF_FFFF, 6.0)], 0.0, &[(2.0, WHITE)]);
     assert_none_wrong(wrong);
@@ -318,6 +319,7 @@ fn a_line_program_that_widens_its_line_draws_its_own_band() {
 /// A line program that only places the line (as BSL's `gbuffers_basic` does) is widened by the
 /// game to its 6 pixels, 3 to each side.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_only_places_its_line_is_widened_by_the_game() {
     let wrong = wrong_pixels(
         &transforming(0.0),
@@ -331,6 +333,7 @@ fn a_line_program_that_only_places_its_line_is_widened_by_the_game() {
 /// A line program that reads its vertex index and `vaNormal` into a varying but only
 /// transforms its line is widened by the game: reading them doesn't widen the line.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_reading_its_index_and_normal_but_only_placing_its_line_is_widened() {
     let strokes = [(0xFFFF_FFFF, 6.0)];
     let wrong = wrong_pixels(READS_INDEX_AND_NORMAL, &strokes, 0.0, &[(3.0, WHITE)]);
@@ -340,6 +343,7 @@ fn a_line_program_reading_its_index_and_normal_but_only_placing_its_line_is_wide
 /// A line the pack moves 2.3 pixels up the screen, its two sides alike, is still the game's to
 /// widen: 3 pixels to each side of where the pack put it.
 #[test]
+#[ignore = "daily"]
 fn a_line_the_pack_moves_is_widened_by_the_game() {
     let wrong = wrong_pixels(
         &transforming(2.3),
@@ -354,6 +358,7 @@ fn a_line_the_pack_moves_is_widened_by_the_game() {
 /// column and row) is widened by the game, at the game's 6 pixels: every vertex moved, both
 /// sides of each end alike.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_maps_the_frame_into_a_quarter_is_widened_by_the_game() {
     let strokes = [(0xFFFF_FFFF, 6.0)];
     let wrong = wrong_pixels_of(
@@ -370,6 +375,7 @@ fn a_line_program_that_maps_the_frame_into_a_quarter_is_widened_by_the_game() {
 /// pixel centre of the horizontal and vertical edges is within, and only those on the
 /// diagonal's own line).
 #[test]
+#[ignore = "daily"]
 fn a_line_widened_by_a_little_keeps_the_packs_width() {
     let wrong = wrong_pixels(&widening(0.6), &[(0xFFFF_FFFF, 6.0)], 0.0, &[(0.3, WHITE)]);
     assert_none_wrong(wrong);
@@ -379,6 +385,7 @@ fn a_line_widened_by_a_little_keeps_the_packs_width() {
 /// 0.2 to each side, within which only the pixel centres on the diagonal's own line are.
 /// Any width the pack gives its line is the pack's.
 #[test]
+#[ignore = "daily"]
 fn a_line_widened_by_less_than_half_a_pixel_keeps_the_packs_width() {
     let wrong = wrong_pixels(&widening(0.4), &[(0xFFFF_FFFF, 6.0)], 0.0, &[(0.2, WHITE)]);
     assert_none_wrong(wrong);
@@ -389,6 +396,7 @@ fn a_line_widened_by_less_than_half_a_pixel_keeps_the_packs_width() {
 /// line), is widened by the game: 3 pixels to each side, give or take the pack's 1/8192, which
 /// no pixel centre is near.
 #[test]
+#[ignore = "daily"]
 fn a_line_spread_below_the_rounding_floor_is_widened_by_the_game() {
     let wrong = wrong_pixels(
         &widening(1.0 / 4096.0),
@@ -404,6 +412,7 @@ fn a_line_spread_below_the_rounding_floor_is_widened_by_the_game() {
 /// of the edge where the pack drew it. The game measures the pack's width across the edge as
 /// drawn, not as the camera puts it.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_widens_and_turns_its_line_draws_its_own_band() {
     let wrong = wrong_pixels_of(
         &turned(&widening(4.0)),
@@ -419,6 +428,7 @@ fn a_line_program_that_widens_and_turns_its_line_draws_its_own_band() {
 /// the game to its 6 pixels, 3 to each side, across the edge where the pack drew it: across
 /// the camera's direction, it would be along the drawn edge, with no area.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_turns_its_line_is_widened_across_it_by_the_game() {
     let wrong = wrong_pixels_of(
         &turned(&transforming(0.0)),
@@ -435,6 +445,7 @@ fn a_line_program_that_turns_its_line_is_widened_across_it_by_the_game() {
 /// that one) draws the line its single run draws, 4 pixels wide, though the game runs it three
 /// times for each vertex: each run starts from the globals' first values.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_reading_its_globals_draws_its_single_runs_line() {
     let vsh = widening_with(4.0, [0.0; 2], "    t *= 2.0;\n    count();\n")
         .replacen(
@@ -452,6 +463,7 @@ fn a_line_program_reading_its_globals_draws_its_single_runs_line() {
 /// then jitters 0.4 pixels right and up, across each edge, keeps the pack's width on both
 /// sides of where the jitter put it: the jitter moves both of an end's sides alike.
 #[test]
+#[ignore = "daily"]
 fn a_widened_line_with_a_jitter_keeps_the_packs_width_on_both_sides() {
     let jitter = [0.4, 0.4];
     let wrong = wrong_pixels_of(
@@ -468,6 +480,7 @@ fn a_widened_line_with_a_jitter_keeps_the_packs_width_on_both_sides() {
 /// only transforms it, in two steps: the game widens all of it to its 6 pixels, the part on
 /// screen too (`NEAR_ZERO`). Each end's corners have the same `w`, however near 0.
 #[test]
+#[ignore = "daily"]
 fn a_line_with_an_end_near_or_behind_the_camera_keeps_the_games_width() {
     let strokes = [(0xFFFF_FFFF, 6.0)];
     let wrong = wrong_pixels_of(
@@ -486,6 +499,7 @@ fn a_line_with_an_end_near_or_behind_the_camera_keeps_the_games_width() {
 /// widens it to (an even corner to the right of the line's direction on screen), so the two
 /// add up: 3 + 2 to each side. Skipped on an adapter without vertex writable storage.
 #[test]
+#[ignore = "daily"]
 fn a_line_program_that_writes_an_image_is_widened_by_the_game() {
     {
         let _gpu = crate::gfx::test_gpu::lock();
@@ -519,6 +533,7 @@ fn a_line_program_that_writes_an_image_is_widened_by_the_game() {
 /// width, 2 to each side, and the black one reaches 2 more to each side, (6 - 2) / 2, as the
 /// game draws it 4 pixels wider than the bright one.
 #[test]
+#[ignore = "daily"]
 fn a_high_contrast_outline_keeps_its_black_border_under_a_pack_that_widens_its_lines() {
     let strokes = [(0xFF00_0000, 6.0), (0xFFFF_FFFF, 2.0)];
     let bands = [(4.0, BLACK), (2.0, WHITE)];
@@ -529,6 +544,7 @@ fn a_high_contrast_outline_keeps_its_black_border_under_a_pack_that_widens_its_l
 /// frame a quarter turn: the black stroke's extra 2 pixels to each side are across the edge as
 /// drawn, so it still shows around the bright one, as without the turn.
 #[test]
+#[ignore = "daily"]
 fn a_high_contrast_outline_keeps_its_black_border_under_a_pack_that_turns_its_lines() {
     let strokes = [(0xFF00_0000, 6.0), (0xFFFF_FFFF, 2.0)];
     let bands = [(4.0, BLACK), (2.0, WHITE)];
@@ -539,6 +555,7 @@ fn a_high_contrast_outline_keeps_its_black_border_under_a_pack_that_turns_its_li
 /// The same high contrast outline under a pack that only places its lines: each stroke at the
 /// game's width, 3 and 1 pixels to each side.
 #[test]
+#[ignore = "daily"]
 fn a_high_contrast_outline_under_a_pack_that_places_its_lines_has_the_games_widths() {
     let strokes = [(0xFF00_0000, 6.0), (0xFFFF_FFFF, 2.0)];
     let bands = [(3.0, BLACK), (1.0, WHITE)];

@@ -4,13 +4,16 @@
 //! `game/modding/native_shaders.rs`. The programs of the current dimension's folder are loaded when the
 //! dimension changes (spec 1.2).
 
+use super::remote_camera::CameraFogEffects;
 use sunrise_client::camera::CameraFluid;
-use sunrise_client::gfx::pack_uniforms::{PackInputs, PlayerStatus};
+use sunrise_client::gfx::pack_uniforms::{PackInputs, PlayerStatus, ViewEntity};
 use sunrise_client::mod_list::ModList;
 use sunrise_client::shader_options::ShaderOptions;
 use sunrise_client::text::Text;
 use sunrise_shader_api::Api;
-use sunrise_shaders::{BlockIds, Macros, Pack, Properties, dimension_folder_named, load_post};
+use sunrise_shaders::{
+    BlockIds, BlockLayers, Macros, Pack, Properties, dimension_folder_named, load_post,
+};
 
 use super::native_shaders::{fingerprint, outcome, refused, remember};
 use super::{Dim, Game, Screen};
@@ -166,8 +169,7 @@ pub(crate) struct PickedPack {
     /// the frame is float.
     pub linear: Option<sunrise_shader_api::Blend>,
     /// Under `SUNRISE_HDR_FRAME=float`, with no pack available or a 0.2 one: the frame is the
-    /// layered float one where HDR output is on (docs/design/hdr-linear-light.md, The HUD and
-    /// menus; the renderer decides, `FrameRequest::hdr_float`).
+    /// layered float one where HDR output is on (the renderer decides, `FrameRequest::hdr_float`).
     pub hdr_float: bool,
 }
 impl PickedPack {
@@ -261,6 +263,8 @@ pub(super) fn picks_material_pack(settings: &sunrise_client::settings::Settings)
 pub(super) struct PackIds {
     entities: HashMap<String, i32>,
     blocks: BlockIds,
+    /// `block.properties`' `layer.*` rules (4.2), as the terrain meshes them.
+    pub(super) layers: super::pack_layers::PackLayers,
     /// `blockEntityId` by block state, filled as states are drawn.
     block_states: RefCell<HashMap<u32, i32>>,
     /// The id of a name the file lacks: 65535, or 0 without the file.
@@ -304,6 +308,7 @@ impl Game<'_> {
     pub(super) fn shader_pack_inputs(
         &mut self,
         camera: glam::DVec3,
+        eye: glam::DVec3,
         partial: f32,
         sky: &sunrise_client::environment::Sky,
     ) -> PackInputs {
@@ -320,11 +325,18 @@ impl Game<'_> {
             self.streaming.shader_pack = shader_pack;
             self.all_sections_changed();
         }
+        // The renderer keeps the meshes' sources while they carry them, and frees them after.
+        if let Some(renderer) = &mut self.renderer {
+            renderer.keep_pack_sources(shader_pack);
+        }
         let separate_ao = self.pack_ids.as_ref().is_some_and(|ids| ids.separate_ao);
         if self.streaming.separate_ao != separate_ao {
             self.streaming.separate_ao = separate_ao;
             self.all_sections_changed();
         }
+        // Its `layer.*` rules (4.2), none without a pack: in the frame after it loads or drops, as
+        // the flags above, so one meshing of every section takes them all.
+        self.sync_pack_layers();
         let selected = picked_pack(&self.settings).to_owned();
         let path = self.native_shaders.resolve_path(
             &Self::shader_packs_dir(),
@@ -418,9 +430,7 @@ impl Game<'_> {
                                 note.message
                             );
                         }
-                        let separate_ao = properties
-                            .get("separateAo")
-                            .is_some_and(|v| v.trim() == "true");
+                        let separate_ao = properties.separate_ao();
                         renderer.set_separate_ao(separate_ao);
                         // Lava's faces draw with the solid terrain's program.
                         renderer.set_pack_lava_layers(
@@ -433,6 +443,11 @@ impl Game<'_> {
                                 .collect(),
                         );
                         let folder = dimension_folder_named(&pack, self.dim.id(), dimension);
+                        // Its terrain programs read the section arena's pages, or else the
+                        // normal stream, where they still fit the vertex stage with them.
+                        renderer.set_pack_terrain_bindings(
+                            sunrise_client::gfx::pack_atlas::TerrainBindings::of(&properties),
+                        );
                         let inputs = renderer.pack_inputs();
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
                         // Textures that name one of the game's: from the resource packs over
@@ -449,8 +464,10 @@ impl Game<'_> {
                             biomes.list.iter().map(|b| b.name.as_str()).collect();
                         post.custom.set_biomes(&names);
                         let text = pack.read_text("block.properties").unwrap_or_default();
-                        let ids = BlockIds::parse(&Properties::parse(&text, &macros));
-                        for note in &ids.notes {
+                        let block_properties = Properties::parse(&text, &macros);
+                        let ids = BlockIds::parse(&block_properties);
+                        let layers = BlockLayers::parse(&block_properties);
+                        for note in ids.notes.iter().chain(&layers.notes) {
                             log::warn!("shader pack {name}: block.properties: {note}");
                         }
                         let text = pack.read_text("entity.properties");
@@ -487,6 +504,7 @@ impl Game<'_> {
                             missing_entity: if text.is_some() { 65535 } else { 0 },
                             missing_block: if ids.is_empty() { 0 } else { 65535 },
                             blocks: ids.clone(),
+                            layers: super::pack_layers::PackLayers::new(name, layers),
                             block_states: RefCell::default(),
                         });
                         let started_ids = std::time::Instant::now();
@@ -584,9 +602,49 @@ impl Game<'_> {
             end_flash,
             end_flash_direction,
             ambient_light: dimension.map_or(0.0, |d| d.ambient_light),
-            mood: self.ambience.moodiness,
+            view: self.pack_view_entity(eye, partial),
             still_ticks: self.clock.still().then(|| self.visual_ticks()),
             frame_timing: None,
+        }
+    }
+
+    /// The camera entity's (`Minecraft.getCameraEntity`, [`Self::camera_subject`]) values for
+    /// the uniforms tied to the view (#3948), at `eye`, the entity's eye
+    /// `Camera.alignWithEntity` placed (the frame's `eyePosition`). The local player's are the
+    /// ones the lightmap, the HUD and the cave ambience have; another living entity's are the
+    /// effects the server sent for it (its `CameraFogEffects`, the same the fog reads); an
+    /// entity that isn't living has none and looks nowhere.
+    pub(super) fn pack_view_entity(&self, eye: glam::DVec3, partial: f32) -> ViewEntity {
+        let at = eye.floor().as_ivec3();
+        let light = self.world.light(at.x, at.y, at.z);
+        let eye_light = [i32::from(light & 15), i32::from(light >> 4)];
+        let other = self.camera_subject().filter(|c| !c.is_local_player);
+        let (living, effects, night_vision, mood) = match &other {
+            Some(c) => {
+                let fx = c.fog_effects;
+                let night_vision = fx.night_vision.map_or(0.0, |duration| {
+                    super::sculk::night_vision_scale(duration, partial)
+                });
+                (c.camera.living.is_some(), fx, night_vision, 0.0)
+            }
+            None => (
+                true,
+                CameraFogEffects::from_effects(&self.potions.effects, self.sculk.darkness),
+                self.night_vision_intensity(partial),
+                self.ambience.moodiness,
+            ),
+        };
+        // LivingEntity.getEffectBlendFactor: the fade only while the instance is there.
+        let darkness = effects
+            .darkness_blend
+            .map_or(0.0, |blend| super::sculk::darkness_blend_at(blend, partial));
+        ViewEntity {
+            living,
+            blindness: f32::from(u8::from(effects.blindness.is_some())),
+            night_vision,
+            darkness: darkness * self.darkness_effect_scale(),
+            mood,
+            eye_light,
         }
     }
 
@@ -755,6 +813,17 @@ impl Game<'_> {
     }
 
     fn mark_entity_part(&self, start: usize, name: &str, translucent: bool) {
+        if let Some(span) = self.entity_part_span(start, name, translucent) {
+            self.push_entity_span(span);
+        }
+    }
+
+    pub(super) fn entity_part_span(
+        &self,
+        start: usize,
+        name: &str,
+        translucent: bool,
+    ) -> Option<EntitySpan> {
         let id = match &self.pack_ids {
             Some(ids) => ids
                 .entities
@@ -762,15 +831,15 @@ impl Game<'_> {
                 .copied()
                 .unwrap_or(ids.missing_entity),
             None if native_spans() => name_id(name),
-            None => return,
+            None => return None,
         };
-        self.push_span(start, "ENTITIES", id);
-        if let Some(last) = self.entity_spans.borrow_mut().last_mut() {
-            last.translucent = translucent;
-            if let Some(gpu) = self.skin_frame.borrow_mut().spans.last_mut() {
-                gpu.translucent = translucent;
-            }
-        }
+        Some(EntitySpan {
+            start: start as u32,
+            stage: sunrise_shaders::render_stage("ENTITIES"),
+            id,
+            translucent,
+            ..Default::default()
+        })
     }
 
     /// Starts a span for the block entity of block state `state`.
@@ -812,10 +881,13 @@ impl Game<'_> {
     /// Starts a span for mod model copies (`WorldDrawContext::draw_model_instances`) under a
     /// pack: block entities, as `BlockEntityDrawContext::model` draws the same model, with the
     /// id of a block the pack doesn't list, since no block owns them. Nothing without a pack.
-    pub(super) fn mark_model_copies(&self, start: usize) {
-        if let Some(ids) = &self.pack_ids {
-            self.push_span(start, "BLOCK_ENTITIES", ids.missing_block);
-        }
+    pub(super) fn model_copy_span(&self, start: usize) -> Option<EntitySpan> {
+        Some(EntitySpan {
+            start: start as u32,
+            stage: sunrise_shaders::render_stage("BLOCK_ENTITIES"),
+            id: self.pack_ids.as_ref()?.missing_block,
+            ..Default::default()
+        })
     }
 
     /// Starts the span of the local player's model; `hidden` in first person, where only a
@@ -848,13 +920,16 @@ impl Game<'_> {
     }
 
     fn push_span(&self, start: usize, stage: &str, id: i32) {
-        let mut spans = self.entity_spans.borrow_mut();
-        let span = EntitySpan {
+        self.push_entity_span(EntitySpan {
             start: start as u32,
             stage: sunrise_shaders::render_stage(stage),
             id,
             ..Default::default()
-        };
+        });
+    }
+
+    fn push_entity_span(&self, span: EntitySpan) {
+        let mut spans = self.entity_spans.borrow_mut();
         if self.pack_ids.is_some() && self.skinning() {
             let mut skin = self.skin_frame.borrow_mut();
             let gpu = EntitySpan {
@@ -1499,11 +1574,21 @@ mod player_status_tests {
         game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
     }
 
-    /// Plains under the player's column, and rain starting (`true`) or stopping.
+    /// Plains in every quart `BiomeManager.getBiome` can pick for the player's feet and head
+    /// blocks, (0, 64, 0) and (0, 65, 0): the eight corners of the quart around (block - 2),
+    /// (-1, 15, -1), which reach into the three neighbouring chunks. Then rain starts (`true`)
+    /// or stops.
     fn rain_on_the_player(game: &mut Game<'_>, raining: bool) {
         let plains = game.res.biomes().id("minecraft:plains");
-        let qy = (64 - game.world.bottom_y()) >> 2;
-        Arc::make_mut(game.world.chunks.get_mut(&(0, 0)).unwrap()).set_biome_cell(0, qy, 0, plains);
+        let bottom = game.world.bottom_y() >> 2;
+        for x in [-1, 0] {
+            for y in [15, 16] {
+                for z in [-1, 0] {
+                    let chunk = game.world.chunks.get_mut(&(x >> 2, z >> 2)).unwrap();
+                    Arc::make_mut(chunk).set_biome_cell(x, y - bottom, z, plains);
+                }
+            }
+        }
         game.world.weather.raining = raining;
         game.world.weather.settle_levels();
     }
@@ -1618,6 +1703,7 @@ mod player_status_tests {
                 .push(crate::game::creatures::NativeSound {
                     dimension: "minecraft:overworld",
                     sound: "minecraft:entity.pig.ambient".into(),
+                    inline_range: None,
                     at,
                     source: 0,
                     volume: 1.0,
@@ -1625,6 +1711,7 @@ mod player_status_tests {
                     seed: 0,
                     except: None,
                     entity: None,
+                    skip_hooks: false,
                 });
             game.spill.orbs.push((at, 1, 0));
             rain_on_the_player(game, true);

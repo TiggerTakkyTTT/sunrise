@@ -6,7 +6,9 @@ use crate::{
 
 #[test]
 fn entity_type_key_derive_checks_host_slots_and_round_trips() {
-    registry_keys::resolve_entity_types(["minecraft:zombie", "minecraft:player"]).unwrap();
+    crate::parts::install_input(crate::__private::parts_installation::InstalledInput::default());
+    registry_keys::resolve_entity_types(["minecraft:zombie", "minecraft:player"], |_| None)
+        .unwrap();
     let zombie = registry_keys::resolved_entity_type_key("minecraft:zombie").unwrap();
     let player = registry_keys::resolved_entity_type_key("minecraft:player").unwrap();
     assert_ne!(zombie, player);

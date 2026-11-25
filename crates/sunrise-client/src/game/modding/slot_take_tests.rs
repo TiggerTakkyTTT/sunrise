@@ -1,12 +1,13 @@
-//! `menu_slot_take` through a real `BlockEntityPart` on the block a mod menu type is open on, as
-//! a LAN guest's clicks reach the server: what each take hands over, once per take; what is not a
-//! take is silent; and a failing listener undoes its writes with the take. The fixtures need
-//! prepared resources.
+//! `menu_slot_take` through a real `MenuPart` on the mod menu type, block-backed or a blockless
+//! owned menu, as a LAN guest's clicks reach the server: what each take hands over, once per take;
+//! what is not a take is silent; and a failing listener undoes its writes, effects and transient
+//! slots with the take. The fixtures need prepared resources.
 use crate::game::native_guest_turn_tests::with_guests;
+use mod_api::item::menu::StackedOnOtherDirection;
 use mod_api::{
-    BlockEntityPart, BlockPart, Hooks, HostBlockStates, HostTransaction, ITEMS, ItemCraftedEvent,
-    ItemPlace, ItemResource, MenuPart, MenuSlotRulesEvent, MenuSlotTakeEvent, ModEntry, Mods,
-    Registrar,
+    BlockPart, Hooks, HostBlockStates, HostTransaction, ITEMS, ItemCraftedEvent, ItemPlace,
+    ItemResource, MenuContainer, MenuPart, MenuSlotChangedEvent, MenuSlotRulesEvent,
+    MenuSlotTakeEvent, MenuSlotWrite, ModEntry, Mods, Registrar, SoundSource,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -45,6 +46,9 @@ type Heard = (u128, String, usize, (String, u32), Option<(String, u32)>);
 #[derive(Clone, Copy)]
 enum TakeScript {
     Hear,
+    CheckLiveRemainder,
+    MoveStickToCursor,
+    RemoveBackingWithPartCursor,
     ChargeInputs,
     Reward,
     Panic,
@@ -105,8 +109,9 @@ impl BlockPart for Pot {
         assert_eq!(entity.set_changed(host), Ok(true));
     }
 }
+/// The pot's take listener, on its menu type (`menu_slot_take` v3 is keyed by menu).
 #[mod_api::sunrise_part]
-impl BlockEntityPart for Pot {
+impl MenuPart for Pot {
     fn menu_slot_take(&self, event: &mut MenuSlotTakeEvent<'_>) {
         let heard = (
             event.player,
@@ -126,17 +131,29 @@ impl BlockEntityPart for Pot {
         };
         match SCRIPT.get() {
             TakeScript::Hear | TakeScript::ChargeInputs => {}
+            TakeScript::CheckLiveRemainder => {
+                let live = event.subject.with_view(|entity| {
+                    entity
+                        .item_slot(event.slot as u32)
+                        .map(|stack| stack.count())
+                });
+                assert_eq!(live, Some(event.left.map(|stack| stack.count())));
+            }
             TakeScript::PanicWithoutReward => panic!("a broken craft listener"),
             TakeScript::Reward | TakeScript::Panic => {
-                let host = event.subject.host();
-                let tx = host.transaction_current().expect("a take is tentative");
-                assert_eq!(
-                    place.insert(host, &tx, &ItemResource::of(event.taken), 1),
-                    1
-                );
-                if matches!(SCRIPT.get(), TakeScript::Panic) {
-                    panic!("a broken listener");
-                }
+                assert!(!event.subject.host().transaction_matches(None));
+                let _: Result<(), mod_api::TransactionError<()>> =
+                    event.subject.transaction(|scope, tx| {
+                        let host = scope.host();
+                        assert_eq!(
+                            place.insert(host, tx, &ItemResource::of(event.taken), 1),
+                            Ok(1)
+                        );
+                        if matches!(SCRIPT.get(), TakeScript::Panic) {
+                            panic!("a broken listener");
+                        }
+                        Ok::<_, ()>(())
+                    });
             }
             TakeScript::Invalid => {
                 let err = event
@@ -187,7 +204,9 @@ impl BlockEntityPart for Pot {
                     })
                     .expect("live resident block entity");
             }
-            TakeScript::RemoveBacking | TakeScript::RemoveBackingDuringSwap => {
+            TakeScript::RemoveBacking
+            | TakeScript::RemoveBackingDuringSwap
+            | TakeScript::RemoveBackingWithPartCursor => {
                 let host = event.subject.host();
                 let level = host.level("minecraft:overworld").unwrap();
                 let air = mod_api::BlockState::of(
@@ -208,35 +227,66 @@ impl BlockEntityPart for Pot {
                 assert!(event.subject.with_view(|_| ()).is_none());
             }
             TakeScript::SwapRoom => {
-                let host = event.subject.host();
-                let tx = host.transaction_current().expect("a take is tentative");
-                // The old slot stack has not been added to inventory or dropped yet.
-                let dirt = place.resource(host).expect("hotbar 8 still holds dirt");
-                assert_eq!(place.extract(host, &tx, &dirt, 64), 64);
+                assert!(!event.subject.host().transaction_matches(None));
+                let _: Result<(), mod_api::TransactionError<()>> =
+                    event.subject.transaction(|scope, tx| {
+                        let host = scope.host();
+                        // The old slot stack has not been added to inventory or dropped yet.
+                        let dirt = place.resource(host).expect("hotbar 8 still holds dirt");
+                        assert_eq!(place.extract(host, tx, &dirt, 64), Ok(64));
+                        Ok::<_, ()>(())
+                    });
+            }
+            TakeScript::MoveStickToCursor if heard_count == 1 => {
+                assert!(!event.subject.host().transaction_matches(None));
+                let _: Result<(), mod_api::TransactionError<()>> =
+                    event.subject.transaction(|scope, tx| {
+                        let host = scope.host();
+                        let stick = ItemResource::of(&api_item("minecraft:stick", 1));
+                        let player = host.player(event.player).unwrap();
+                        let cursor = player.container_menu(host).unwrap().cursor();
+                        assert_eq!(place.extract(host, tx, &stick, 1), Ok(1));
+                        assert_eq!(cursor.insert(host, tx, &stick, 1), Ok(1));
+                        assert_eq!(cursor.amount(host), 2);
+                        Ok::<_, ()>(())
+                    });
             }
             TakeScript::ReplacePickAllCursor if heard_count == 1 => {
-                let host = event.subject.host();
-                let tx = host.transaction_current().expect("a take is tentative");
-                let player = host.player(event.player).unwrap();
-                let cursor = player.container_menu(host).unwrap().cursor();
-                assert_eq!(
-                    cursor.extract(host, &tx, &ItemResource::of(event.taken), 4),
-                    4
-                );
-                let pearls = ItemResource::of(&api_item("minecraft:ender_pearl", 1));
-                assert_eq!(cursor.insert(host, &tx, &pearls, 14), 14);
+                assert!(!event.subject.host().transaction_matches(None));
+                let _: Result<(), mod_api::TransactionError<()>> =
+                    event.subject.transaction(|scope, tx| {
+                        let host = scope.host();
+                        let player = host.player(event.player).unwrap();
+                        let cursor = player.container_menu(host).unwrap().cursor();
+                        assert_eq!(
+                            cursor.extract(host, tx, &ItemResource::of(event.taken), 4),
+                            Ok(4)
+                        );
+                        let pearls = ItemResource::of(&api_item("minecraft:ender_pearl", 1));
+                        assert_eq!(cursor.insert(host, tx, &pearls, 14), Ok(14));
+                        Ok::<_, ()>(())
+                    });
             }
             TakeScript::LinkedWriteThenPanic => {
-                let host = event.subject.host();
-                let tx = host.transaction_current().expect("a take is tentative");
-                let level = host.level("minecraft:overworld").unwrap();
-                let items = level
-                    .capability(host, &ITEMS, [LINK.0, LINK.1, LINK.2], None)
-                    .unwrap();
-                LINK_INSERTED.set(items.insert_at(host, &tx, 0, &ItemResource::of(event.taken), 1));
-                panic!("a linked write failed");
+                assert!(!event.subject.host().transaction_matches(None));
+                let _: Result<(), mod_api::TransactionError<()>> =
+                    event.subject.transaction(|scope, tx| {
+                        let host = scope.host();
+                        let level = host.level("minecraft:overworld").unwrap();
+                        let items = level
+                            .capability(host, &ITEMS, [LINK.0, LINK.1, LINK.2], None)
+                            .unwrap();
+                        LINK_INSERTED.set(
+                            items
+                                .insert_at(host, tx, 0, &ItemResource::of(event.taken), 1)
+                                .unwrap(),
+                        );
+                        panic!("a linked write failed");
+                    });
             }
-            TakeScript::RefillGrid | TakeScript::ReplacePickAllCursor => {}
+            TakeScript::RefillGrid
+            | TakeScript::ReplacePickAllCursor
+            | TakeScript::MoveStickToCursor => {}
         }
     }
 }
@@ -254,8 +304,136 @@ impl MenuPart for Rules {
         }
     }
 }
+/// A blockless processing menu (two inputs and one result), for blockless `menu_slot_take` and
+/// `menu_slot_changed` together: the result is one stone while both inputs are filled, and each
+/// take uses up one of each input and plays a sound.
+const OWNED_MENU: &str = "take:processor";
+#[derive(Clone, Copy)]
+enum OwnedScript {
+    Consume,
+    PanicOnFirstTake,
+    PanicOnSecondTake,
+}
+thread_local! {
+    static OWNED_SCRIPT: Cell<OwnedScript> = const { Cell::new(OwnedScript::Consume) };
+    static OWNED_CHANGED_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+struct OwnedProcessor;
+#[mod_api::sunrise_part]
+impl MenuPart for OwnedProcessor {
+    fn menu_slot_changed(
+        &self,
+        _: &mut dyn mod_api::ServerHost,
+        event: &mut MenuSlotChangedEvent<'_>,
+    ) {
+        assert_eq!(event.menu, OWNED_MENU);
+        assert_eq!(event.context.pos, None);
+        assert_eq!(event.context.player, Some(12));
+        OWNED_CHANGED_CALLS.set(OWNED_CHANGED_CALLS.get() + 1);
+        let a = event.context.slot(MenuContainer::Main, 0);
+        let b = event.context.slot(MenuContainer::Main, 1);
+        let result = match (a, b) {
+            (Some(_), Some(_)) => Some(api_item("minecraft:stone", 1)),
+            _ => None,
+        };
+        event
+            .outputs
+            .push(MenuSlotWrite::new(MenuContainer::Main, 2, result));
+    }
+
+    fn menu_slot_take(&self, event: &mut MenuSlotTakeEvent<'_>) {
+        assert_eq!(event.menu, OWNED_MENU);
+        assert!(
+            event.subject.with_view(|_| ()).is_none(),
+            "a blockless menu lends no block entity"
+        );
+        let heard_count = HEARD.with(|h| {
+            let mut h = h.borrow_mut();
+            h.push((
+                event.player,
+                event.menu.to_owned(),
+                event.slot,
+                stack(event.taken),
+                event.left.map(stack),
+            ));
+            h.len()
+        });
+        if event.slot != 2 {
+            return;
+        }
+        let (player, taken) = (event.player, event.taken.clone());
+        let script = OWNED_SCRIPT.get();
+        let _: Result<(), mod_api::TransactionError<()>> =
+            event.subject.transaction(|scope, tx| {
+                let host = scope.host();
+                let menu = host.player(player).unwrap().container_menu(host).unwrap();
+                for slot in [0usize, 1] {
+                    if let Some(held) = menu.slot(host, slot).flatten() {
+                        let place = ItemPlace::MenuSlot { menu, slot };
+                        assert_eq!(place.extract(host, tx, &ItemResource::of(&held), 1), Ok(1));
+                    }
+                }
+                let level = host.level("minecraft:overworld").unwrap();
+                level.play_sound(
+                    host,
+                    "minecraft:block.anvil.use",
+                    [0.5, 64.5, 0.5],
+                    SoundSource::Blocks,
+                    1.0,
+                    1.0,
+                    None,
+                );
+                match script {
+                    OwnedScript::Consume => {}
+                    OwnedScript::PanicOnFirstTake => {
+                        let reward = ItemPlace::PlayerSlot { player, slot: 8 };
+                        assert_eq!(reward.insert(host, tx, &ItemResource::of(&taken), 1), Ok(1));
+                        panic!("owned take failed on first craft");
+                    }
+                    OwnedScript::PanicOnSecondTake if heard_count == 2 => {
+                        panic!("owned take failed on second craft");
+                    }
+                    OwnedScript::PanicOnSecondTake => {}
+                }
+                Ok(())
+            });
+    }
+}
+struct TakeOne;
+#[mod_api::sunrise_part]
+impl mod_api::ItemPart for TakeOne {
+    fn item_stacked_on_other(
+        &self,
+        _: mod_api::HostSide<'_>,
+        event: &mut mod_api::ItemStackedOnOtherEvent<'_, '_>,
+    ) -> mod_api::Flow {
+        assert!(event.click.take_clicked(1).is_some());
+        let clicked = event.click.direction == StackedOnOtherDirection::OtherStackedOnMe;
+        match (SCRIPT.get(), clicked) {
+            (TakeScript::RemoveBackingWithPartCursor, false)
+            | (TakeScript::MoveStickToCursor, true) => {
+                event
+                    .click
+                    .set_carried(Some(api_item("minecraft:stone", 1)));
+            }
+            (TakeScript::RemoveBackingWithPartCursor, true) => {
+                event
+                    .click
+                    .set_carried(Some(api_item("minecraft:stone", 2)));
+            }
+            _ => {}
+        }
+        if clicked {
+            mod_api::Flow::Cancel
+        } else {
+            mod_api::Flow::Continue
+        }
+    }
+}
+
 struct TakeMod {
     menu_slot_take: bool,
+    item_parts_take: bool,
 }
 #[mod_api::__subscriptions]
 impl Hooks for TakeMod {
@@ -265,11 +443,19 @@ impl Hooks for TakeMod {
 
     fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
         r.menu_part(MENU, Rules);
+        if self.item_parts_take {
+            let carried = r.item_key("minecraft:stick");
+            let clicked = r.item_key("minecraft:stone");
+            r.item_part(carried, TakeOne);
+            r.item_part(clicked, TakeOne);
+        }
+        r.menu_part(OWNED_MENU, OwnedProcessor);
         let stone = r.block_key("minecraft:stone");
         r.block_part(stone, Pot);
-        let kind = r.block_entity_type("pot").blocks(&[]).build();
+        // The pot's own block entity type backs the menu; its take listener is on the menu.
+        let _pot = r.block_entity_type("pot").blocks(&[]).build();
         if self.menu_slot_take {
-            r.block_entity_part(&kind, Pot).unwrap();
+            r.menu_part(MENU, Pot);
         }
     }
 }
@@ -309,6 +495,7 @@ fn with_pot(menu_type: &'static ModMenuType, test: impl FnOnce(&mut crate::game:
         menu_type,
         TakeMod {
             menu_slot_take: true,
+            item_parts_take: false,
         },
         test,
     );
@@ -444,6 +631,79 @@ fn a_pickup_hears_what_left_the_slot_and_what_stayed() {
         assert_eq!(menu.carried.as_ref().map(|c| c.count), Some(5));
         assert!(heard().is_empty());
     });
+}
+
+#[test]
+#[ignore = "daily"]
+fn each_part_take_hears_its_live_remainder_before_the_next_take() {
+    crate::game::in_own_process(
+        "game::slot_take_tests::each_part_take_hears_its_live_remainder_before_the_next_take",
+        || {
+            let parts = TakeMod {
+                menu_slot_take: true,
+                item_parts_take: true,
+            };
+            with_pot_parts(pot_type(SLOTS, None), parts, |game| {
+                SCRIPT.set(TakeScript::CheckLiveRemainder);
+                set(game, &[(0, stone(4))], &[], item("minecraft:stick", 1));
+                click(game, 0, 0, sunrise_client::lan::menu::input::PICKUP);
+                assert_eq!(heard(), [took(0, 1, 3), took(0, 1, 2)]);
+                assert_eq!(in_pot(game, 0), 2);
+                assert_eq!(held(game, 0), (0, 1));
+            });
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_pending_part_cursor_write_does_not_overwrite_a_take_listeners_transfer() {
+    crate::game::in_own_process(
+        "game::slot_take_tests::a_pending_part_cursor_write_does_not_overwrite_a_take_listeners_transfer",
+        || {
+            let parts = TakeMod {
+                menu_slot_take: true,
+                item_parts_take: true,
+            };
+            with_pot_parts(pot_type(SLOTS, None), parts, |game| {
+                let stick = item("minecraft:stick", 1);
+                SCRIPT.set(TakeScript::MoveStickToCursor);
+                set(game, &[(0, stone(4))], &[(8, stick.clone())], stick.clone());
+                click(game, 0, 0, sunrise_client::lan::menu::input::PICKUP);
+                assert_eq!(heard(), [took(0, 1, 3)]);
+                assert_eq!(in_pot(game, 0), 4);
+                let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                assert_eq!(guest.inventory[8], stick);
+                assert_eq!(guest.carried, stick);
+            });
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn closing_on_the_first_part_take_returns_only_its_owed_cursor() {
+    crate::game::in_own_process(
+        "game::slot_take_tests::closing_on_the_first_part_take_returns_only_its_owed_cursor",
+        || {
+            let parts = TakeMod {
+                menu_slot_take: true,
+                item_parts_take: true,
+            };
+            with_pot_parts(pot_type(SLOTS, None), parts, |game| {
+                SCRIPT.set(TakeScript::RemoveBackingWithPartCursor);
+                set(game, &[(0, stone(4))], &[], item("minecraft:stick", 1));
+                click(game, 0, 0, sunrise_client::lan::menu::input::PICKUP);
+                assert_eq!(heard(), [took(0, 1, 3)]);
+                assert!(game.world.block_entities.get(&POS).is_none());
+                let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+                assert!(guest.menu.is_none());
+                assert_eq!(guest.carried, None);
+                let returned: Vec<_> = guest.inventory.iter().flatten().cloned().collect();
+                assert_eq!(returned, [stone(1).unwrap()]);
+            });
+        },
+    );
 }
 
 #[test]
@@ -854,6 +1114,7 @@ fn a_click_sends_the_other_slots_written_by_contents_changed() {
             // its changed-slot list, hiding whether the last-sent comparison works.
             let parts = TakeMod {
                 menu_slot_take: false,
+                item_parts_take: false,
             };
             with_pot_parts(pot_type(SLOTS, None), parts, |game| {
                 set(
@@ -1071,6 +1332,7 @@ fn a_partial_mod_craft_keeps_crafting_bookkeeping_but_not_item_crafted() {
                     conditions:
                         serde_json::json!({"recipes": [PLANKS], "ingredients": [{"items": LOG}]})
                             .into(),
+                    player: None,
                 }],
             });
             tree.by_id.insert(ID.into(), 0);
@@ -1124,6 +1386,216 @@ fn a_partial_mod_craft_keeps_crafting_bookkeeping_but_not_item_crafted() {
                 );
                 assert!(heard().is_empty());
             }
+        });
+    }
+}
+
+/// Guest 12 with the blockless processing menu `OWNED_MENU` open and an empty inventory and
+/// cursor; `rx` receives the guest's packets.
+fn with_owned_processor(test: impl FnOnce(&mut crate::game::Game<'_>, mpsc::Receiver<Out>)) {
+    let parts = TakeMod {
+        menu_slot_take: true,
+        item_parts_take: false,
+    };
+    let mods: Mods = vec![ModEntry::new("take", Box::new(parts))].into();
+    mod_platform::testing::with_mods(mods.clone(), || {
+        crate::game::api_values::install_parts(&mods).unwrap();
+        sunrise_client::containers::with_mod_menu_types(
+            [(
+                OWNED_MENU.into(),
+                "take".into(),
+                3,
+                0,
+                vec![2],
+                vec![0, 1],
+                None,
+                None,
+                true,
+                Some(vec![64, 64, 64]),
+            )],
+            || {
+                with_guests(|game| {
+                    let (tx, rx) = mpsc::channel();
+                    let host = game.lan.as_mut().unwrap();
+                    host.hub.guests.update(0, |guest| {
+                        guest.brand = "sunrise".into();
+                        guest.sender = PlayerSender::new(tx, Arc::default());
+                        guest.sender.menu_extra_rev =
+                            sunrise_protocol::menu_extra::LIVE_DATA_REVISION;
+                        guest.inventory.fill(None);
+                        guest.carried = None;
+                        guest.offhand = None;
+                    });
+                    let key =
+                        crate::game::native_guest_turn_tests::register_test_menu(game, OWNED_MENU);
+                    let player = game.player(12).unwrap();
+                    let opened = game
+                        .as_guest(12, |game| {
+                            player.open_mod_menu(
+                                game,
+                                mod_api::ModMenuOpen::new(key, mod_api::Text::literal("processor")),
+                            )
+                        })
+                        .unwrap()
+                        .unwrap();
+                    assert!(opened.is_some());
+                    OWNED_SCRIPT.set(OwnedScript::Consume);
+                    OWNED_CHANGED_CALLS.set(0);
+                    heard();
+                    let _ = rx.try_iter().count();
+                    test(game, rx);
+                });
+            },
+        );
+    });
+}
+
+fn drain_packets(rx: &mpsc::Receiver<Out>) -> Vec<Clientbound> {
+    rx.try_iter()
+        .flat_map(|out| match out {
+            Out::Packet(body) => vec![body],
+            Out::Packets(bodies) => bodies,
+            _ => Vec::new(),
+        })
+        .filter_map(|body| {
+            let mut r = sunrise_protocol::buf::Reader::new(&body);
+            Clientbound::decode(r.varint().ok()?, r.rest()).ok()
+        })
+        .collect()
+}
+
+fn owned_contents(game: &crate::game::Game<'_>) -> Vec<Option<ItemStack>> {
+    game.lan.as_ref().unwrap().hub.guests[0].native_menu.clone()
+}
+
+#[test]
+#[ignore = "daily"]
+fn blockless_owned_take_shrinks_inputs_commits_sound_and_repeats_shift_click() {
+    with_owned_processor(|game, rx| {
+        // Two inputs through ordinary clicks: the result appears once both are in.
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = item(LOG, 2));
+        click(game, 0, 0, 0);
+        assert_eq!(OWNED_CHANGED_CALLS.get(), 1);
+        assert_eq!(owned_contents(game)[2], None);
+        game.lan
+            .as_mut()
+            .unwrap()
+            .hub
+            .guests
+            .update(0, |g| g.carried = item("minecraft:stick", 2));
+        click(game, 1, 0, 0);
+        assert_eq!(
+            OWNED_CHANGED_CALLS.get(),
+            2,
+            "the result write does not fire menu_slot_changed again"
+        );
+        assert_eq!(owned_contents(game)[2], stone(1));
+        let _ = drain_packets(&rx);
+
+        // Taking the result uses up one of each input, plays the sound and makes the next
+        // result in the same click.
+        click(game, 2, 0, 0);
+        assert_eq!(
+            heard(),
+            [(
+                12,
+                OWNED_MENU.into(),
+                2,
+                ("minecraft:stone".into(), 1),
+                None
+            )]
+        );
+        assert_eq!(OWNED_CHANGED_CALLS.get(), 3);
+        assert_eq!(game.lan.as_ref().unwrap().hub.guests[0].carried, stone(1));
+        assert_eq!(
+            owned_contents(game),
+            [item(LOG, 1), item("minecraft:stick", 1), stone(1)]
+        );
+        assert!(
+            drain_packets(&rx)
+                .iter()
+                .any(|p| matches!(p, Clientbound::Sound(_))),
+            "the take listener's sound commits with the click"
+        );
+
+        // Inputs of three each: a shift-click on the result crafts three times in one click.
+        game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+            g.carried = None;
+            g.inventory.fill(None);
+            g.native_menu = vec![item(LOG, 3), item("minecraft:stick", 3), stone(1)];
+        });
+        OWNED_CHANGED_CALLS.set(0);
+        click(game, 2, 0, 1);
+        assert_eq!(heard().len(), 3);
+        assert_eq!(OWNED_CHANGED_CALLS.get(), 3);
+        assert_eq!(owned_contents(game), [None, None, None]);
+        let total_stone: u32 = game.lan.as_ref().unwrap().hub.guests[0]
+            .inventory
+            .iter()
+            .flatten()
+            .filter(|s| &*s.item == "minecraft:stone")
+            .map(|s| s.count)
+            .sum();
+        assert_eq!(total_stone, 3);
+        assert_eq!(
+            drain_packets(&rx)
+                .iter()
+                .filter(|p| matches!(p, Clientbound::Sound(_)))
+                .count(),
+            3
+        );
+        assert!(mod_api::__private::take_hook_panics().is_empty());
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn blockless_owned_take_failure_rolls_back_cursor_inventory_slots_and_effects() {
+    let full = || vec![item(LOG, 2), item("minecraft:stick", 2), stone(1)];
+    // A panicking listener is disabled for the rest of its session, so each case gets its own.
+    for (script, input, heard_takes) in [
+        // A click: the cursor, the reward, the used-up inputs and the sound all roll back.
+        (OwnedScript::PanicOnFirstTake, 0, 1),
+        // A shift-click failing on its second craft rolls back both crafts.
+        (OwnedScript::PanicOnSecondTake, 1, 2),
+    ] {
+        with_owned_processor(|game, rx| {
+            game.lan.as_mut().unwrap().hub.guests.update(0, |g| {
+                g.native_menu = full();
+                g.inventory.fill(None);
+                g.carried = None;
+            });
+            let _ = drain_packets(&rx);
+            OWNED_SCRIPT.set(script);
+            click(game, 2, 0, input);
+            assert_eq!(heard().len(), heard_takes);
+            let guest = &game.lan.as_ref().unwrap().hub.guests[0];
+            assert_eq!(guest.carried, None);
+            assert!(guest.inventory.iter().all(Option::is_none));
+            assert_eq!(owned_contents(game), full());
+            let packets = drain_packets(&rx);
+            assert!(
+                !packets.iter().any(|p| matches!(p, Clientbound::Sound(_))),
+                "an aborted take publishes no sound"
+            );
+            assert!(
+                packets
+                    .iter()
+                    .any(|p| matches!(p, Clientbound::ContainerSetContent(_))),
+                "an aborted click resends the menu"
+            );
+            assert_eq!(
+                mod_api::__private::take_hook_panics(),
+                [mod_api::__private::HookPanicReport {
+                    mod_id: "take",
+                    hook: "menu_slot_take",
+                }]
+            );
         });
     }
 }

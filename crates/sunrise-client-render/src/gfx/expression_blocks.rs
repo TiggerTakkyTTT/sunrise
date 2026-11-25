@@ -7,8 +7,8 @@
 //! with this, and the GUI's, the world's and the see-through text pipelines too, through
 //! [`bindings`] and [`sampler_bindings`]; any other pack core shader pipeline can.
 
-use crate::core_shader::CoreProgram;
 use crate::polytone_post::ExpressionUniform;
+use sunrise_glsl::Translated;
 
 /// The block outline's shader, as a pack's `shader_modifiers` names it.
 pub const LINES: [&str; 1] = ["minecraft:core/rendertype_lines"];
@@ -61,7 +61,7 @@ pub(crate) fn bindings<'a>(
 /// `textures` that a stage of `program` reads, bound only to the stages that read either: their
 /// layout entries and their bind group entries.
 pub(crate) fn sampler_bindings<'a>(
-    program: &CoreProgram,
+    program: &Translated,
     textures: &[(u32, &'a wgpu::TextureView, &'a wgpu::Sampler)],
 ) -> (
     Vec<wgpu::BindGroupLayoutEntry>,
@@ -102,7 +102,7 @@ pub(crate) fn sampler_bindings<'a>(
 }
 
 /// Vanilla's blocks a stage of `program` reads: binding, offset, size and the stages reading it.
-pub(crate) fn vanilla_blocks(program: &CoreProgram) -> Vec<(u32, u64, u64, wgpu::ShaderStages)> {
+pub(crate) fn vanilla_blocks(program: &Translated) -> Vec<(u32, u64, u64, wgpu::ShaderStages)> {
     (0..4u32)
         .map(|b| {
             let i = b as usize;
@@ -240,10 +240,10 @@ pub(crate) struct ExpressionBlocks {
 impl ExpressionBlocks {
     /// The Polytone blocks `program`'s stages read: `PolyGlobals`, when a stage reads it, and
     /// `uniforms` (resolved when it loaded), from `base` in the pipeline's buffer.
-    pub(crate) fn new(program: &CoreProgram, uniforms: &[ExpressionUniform], base: u64) -> Self {
+    pub(crate) fn new(program: &Translated, uniforms: &[ExpressionUniform], base: u64) -> Self {
         let globals = (program.other.iter())
             .position(|name| name == sunrise_polytone::globals::BLOCK)
-            .map(crate::core_shader::other_binding)
+            .map(|i| program.other_binding(i))
             .map(|binding| {
                 (
                     binding,
@@ -448,7 +448,7 @@ mod tests {
 
     /// A program whose fragment stage reads `Tint`, and `PolyGlobals` when `globals` (which it
     /// otherwise imports without reading).
-    fn program(globals: bool) -> CoreProgram {
+    fn program(globals: bool) -> Translated {
         let include = |id: &str| {
             sunrise_polytone::globals::is_include(id)
                 .then(|| sunrise_polytone::globals::GLSL.to_owned())
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(values, [0.25, 1.5]);
         // `PolyGlobals` read: its 176 bytes at `base`, the uniforms after it.
         let reading = program(true);
-        let globals = crate::core_shader::other_binding(
+        let globals = reading.other_binding(
             reading
                 .other
                 .iter()
@@ -524,7 +524,7 @@ mod tests {
 
     /// A program whose fragment stage declares `PolyGlobals` with `members` (GLSL lines) and
     /// reads `read`, with `include` answering its imports.
-    fn declaring(members: &str, read: &str) -> CoreProgram {
+    fn declaring(members: &str, read: &str) -> Translated {
         let fsh = format!(
             "#version 330\nlayout(std140) uniform PolyGlobals {{\n{members}}};\n\
              layout(location = 0) out vec4 fragColor;\n\
@@ -547,7 +547,7 @@ mod tests {
     /// is refused by name.
     #[test]
     fn poly_globals_must_be_declared_as_the_game_lays_it_out() {
-        let check = |program: &CoreProgram| {
+        let check = |program: &Translated| {
             let i = program
                 .other
                 .iter()
@@ -555,7 +555,7 @@ mod tests {
                 .unwrap();
             check_poly_globals(
                 [&program.vertex, &program.fragment],
-                crate::core_shader::other_binding(i),
+                program.other_binding(i),
             )
         };
         assert_eq!(check(&program(true)), Ok(()));
@@ -595,7 +595,7 @@ mod tests {
                 .iter()
                 .position(|n| n == "PolyGlobals")
                 .unwrap();
-            let binding = crate::core_shader::other_binding(i);
+            let binding = program.other_binding(i);
             let mut fragment = program.fragment;
             let (handle, ty) = (fragment.global_variables.iter())
                 .find(|(_, g)| g.binding.as_ref().is_some_and(|b| b.binding == binding))
@@ -645,7 +645,7 @@ mod tests {
             ShaderModifiers::read(&pack, Default::default())
         };
         let own = [sunrise_polytone::globals::BLOCK];
-        let resolve = |file: &str, program: &CoreProgram| {
+        let resolve = |file: &str, program: &Translated| {
             modifiers(file)
                 .resolve((SKY[0], SKY[0]), program, &own)
                 .map(|u| u.len())
@@ -681,10 +681,13 @@ mod tests {
         let wrong = declaring("    float PolySunAngle;\n", "PolySunAngle");
         assert!(matches!(
             resolve("{}", &wrong),
-            Err(ExpressionRefusal::Globals(GlobalsRefusal::Member {
+            Err(ExpressionRefusal::Globals(at, GlobalsRefusal::Member {
                 index: 0,
                 ..
-            }))
+            })) if at == sunrise_glsl::Location {
+                file: "minecraft:shaders/core/core.fsh".into(),
+                line: 2,
+            }
         ));
     }
 }

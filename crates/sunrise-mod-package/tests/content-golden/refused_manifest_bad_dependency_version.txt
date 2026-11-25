@@ -1,5 +1,5 @@
 manifest:
-refused: sunrise-mod.toml: data did not match any variant of untagged enum Dependency (line 5)
+refused: sunrise-mod.toml: unexpected character 'n' while parsing major version number (line 5, column 9)
 
 icon:
 unavailable

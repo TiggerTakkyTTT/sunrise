@@ -13,7 +13,7 @@ Sunrise's own format.
 | Authoring tool | `sunrise-shader` (same crate) | `new`, `check`, `pack` |
 | Templates | `crates/sunrise-shader-api/templates/` | post, sky, material |
 | Example pack | `crates/sunrise-shader-api/packs/golden_hour` | a warm sky and two post passes |
-| In the game: every stage | Options > Video Settings > Shaders > Shader Packs | sky, material, post passes, hot reload |
+| In the game: every stage | Options > Sunrise Settings > Extras > Sunrise Graphics > Shaders > Shader Packs | sky, material, post passes, hot reload |
 | The registry and the launcher | `shader` kind ([modding/src/reference/registry-index.md](modding/src/reference/registry-index.md)); the Mods page's Shader packs tab | checked, then installed into `shaderpacks/` |
 
 ## Quick start
@@ -47,7 +47,7 @@ my_pack 0.1.0 (shader API 0.1): FAILED
 ## Trying a pack in the game
 
 Put the pack folder (or its `.sshader`) in `shaderpacks/` beside `options.txt` (Open Pack Folder opens it) and pick
-it on Options > Video Settings > Shaders > Shader Packs..., which lists Sunrise's packs, marked (Sunrise), beside packs in the
+it on Options > Sunrise Settings > Extras > Sunrise Graphics > Shaders > Shader Packs..., which lists Sunrise's packs, marked (Sunrise), beside packs in the
 `shaders/` format; one runs at a time, and clicking it again turns it off. `SUNRISE_SHADER_PACK=<its folder or file
 name>` runs a pack whatever the page says, for development. The game checks the pack first, and refuses one that
 fails, with its problems in the chat. While it runs, the game looks at the pack twice a second: save a file

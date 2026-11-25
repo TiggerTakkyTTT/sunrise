@@ -74,9 +74,9 @@ carry over, so add them each time. The event also tells what renderers this load
 
 | Method | Tells |
 | --- | --- |
-| `entity_types()` | every entity type with a renderer, vanilla's and the mods', sorted (not `minecraft:player`: a player's renderers are its models') |
+| `entity_types()` | borrows the sorted slice of every entity type with a renderer, vanilla's and the mods' (not `minecraft:player`: a player's renderers are its models') |
 | `is_living(type)` | whether the type's renderer is a living entity's, the only kind that takes layers |
-| `player_models()` | `Wide` and `Slim` |
+| `player_models()` | borrows `[Wide, Slim]` |
 | `has_mod_renderer(type)` | whether a mod registered the type's renderer ([entity renderers](entity-renderers.md)) |
 
 - A layer attaches only to a living renderer, a mod's own included. `add` refuses a target that is no
@@ -91,8 +91,12 @@ carry over, so add them each time. The event also tells what renderers this load
   and the vanilla layers. They receive `model: None` when the replacement renderer succeeds.
 - An entity whose `render_living_pre` or `render_player_pre` a mod canceled draws none of its layers,
   as NeoForge's canceled `RenderLivingEvent.Pre` skips them.
-- `submit` returns `Ok(())` to keep what it drew. A layer that returns an `Err` or panics is logged once and asked no more until the next resource load
-  adds it again; what it drew that frame is dropped.
+- `submit` returns `Ok(())` to keep what it drew. A layer that returns an `Err` rolls back what it
+  drew that frame, logs a warning, and stays active for later draws while the other layers still
+  run. A layer that panics rolls back what it drew that frame and disables the mod's layer
+  instance for the rest of the session, with an error log and an in-game error toast naming the
+  mod. Re-adding the same `Arc` on reload leaves it disabled, even on another target or at
+  another position. A fresh instance does not inherit the old layer's failure.
 
 ## Where layers draw
 

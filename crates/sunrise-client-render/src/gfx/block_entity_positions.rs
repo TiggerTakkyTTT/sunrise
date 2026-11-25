@@ -4,6 +4,7 @@ impl Renderer {
     /// What goes with section `key`'s new mesh, before its quads go in: its old mesh is
     /// released. The fade it keeps.
     pub(super) fn before_mesh(&mut self, key: SectionKey, mesh: &MeshFacts) -> Option<Instant> {
+        self.occlusion.load_column(key.0, key.2);
         self.occlusion.set(key, mesh.visibility);
         let changed = self.block_entities.update(key, mesh.block_entities);
         if changed {

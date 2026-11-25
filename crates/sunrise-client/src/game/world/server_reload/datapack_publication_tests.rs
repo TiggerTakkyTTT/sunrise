@@ -141,8 +141,13 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
     let winning = root.join("datapacks/override/data/registry_test/registry_test/spell/fire.json");
     let tag = root.join("datapacks/base/data/registry_test/tags/block/publication.json");
     write(&tag, r#"{"values":["minecraft:stone"]}"#);
+    let conditioned = "data/registry_test/registry_test/spell/conditioned.json";
     write(
-        &root.join("datapacks/base/data/registry_test/registry_test/spell/conditioned.json"),
+        &root.join("datapacks/base").join(conditioned),
+        r#"{"power":3}"#,
+    );
+    write(
+        &root.join("datapacks/override").join(conditioned),
         r#"{"neoforge:conditions":[{"type":"neoforge:mod_loaded","modid":"missing_condition_fixture"}],"power":"invalid"}"#,
     );
     mod_platform::testing::with_mods(
@@ -175,7 +180,8 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
                         .as_ref()
                         .unwrap()
                         .entries("registry_test:spell")
-                        .unwrap(),
+                        .unwrap()
+                        .collect::<Vec<_>>(),
                     ["registry_test:fire"]
                 );
                 let old = game.mods.datapack_registries.as_ref().unwrap().clone();
@@ -277,8 +283,17 @@ fn datapack_game_open_reload_and_exhaustion_are_atomic() {
 #[test]
 #[ignore = "daily"]
 fn world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file() {
-    use crate::game::native_entity_refs::tests::{fixture_root, with_game_at};
+    use crate::game::native_entity_refs::tests::{fixture_root, run_fresh_cases, with_game_at};
     use sunrise_client::lan::data::BIOME_REGISTRY;
+
+    // World open replaces the process-wide wire snapshot for the session.
+    if run_fresh_cases(
+        "game::server_reload::tests::datapack_publication_tests::world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file",
+        "SUNRISE_PACK_BIOME_WIRE_CASE",
+        &["world-open"],
+    ) {
+        return;
+    }
 
     fn copy_tree(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
@@ -340,10 +355,14 @@ fn world_open_and_wire_use_the_pack_biome_instead_of_the_bundled_file() {
             .into_iter()
             .find(|entry| entry.id == id)
             .unwrap();
+        use sunrise_core::nbt::Tag;
+        let data = biome.data.expect("missing encoded biome winner");
         assert_eq!(
-            biome.data,
-            Some(sunrise_client::lan::data::json_to_nbt(&winner))
+            data.get("temperature"),
+            Some(&Tag::Float(0.125_f32.to_bits()))
         );
+        assert!(data.get("carvers").is_none());
+        assert!(data.get("features").is_none());
     });
 }
 
@@ -377,8 +396,8 @@ fn remote_reload_never_decodes_local_registry_files() {
         },
     );
 }
-/// A reload over a decode limit, or with a bad winning file, is refused naming the pack and
-/// file; the old generation stays live and the next valid reload publishes.
+/// A wide valid winner publishes; a malformed winner is refused naming the pack and file
+/// without replacing the published generation.
 #[test]
 #[ignore = "daily"]
 fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
@@ -404,36 +423,42 @@ fn refused_reload_names_the_pack_and_keeps_the_old_generation() {
                 let features = game.level.enabled_features.clone();
                 let initial = game.mods.datapack_registries.as_ref().unwrap().clone();
                 assert_eq!(power(game), DatapackValue::Int(7));
-                let over = format!(
-                    r#"{{"power":7{}}}"#,
-                    " ".repeat(mod_api::MAX_DATAPACK_ENTRY_BYTES)
-                );
-                for (text, reason) in [(over.as_str(), "EntryTooLarge"), ("{bad", "Malformed")] {
-                    write(&winning, text);
-                    let Err(mod_api::__private::reload::ReloadStageError::DataSource(message)) =
-                        game.reload_datapacks(true, &features)
-                    else {
-                        panic!("the reload is refused");
-                    };
-                    assert!(
-                        message.contains(
-                            "pack file/override, file data/registry_test/registry_test/spell/fire.json"
-                        ) && message.contains(reason),
-                        "{message}"
-                    );
-                    assert_eq!(power(game), DatapackValue::Int(7));
-                    assert!(std::sync::Arc::ptr_eq(
-                        game.mods.datapack_registries.as_ref().unwrap(),
-                        &initial
-                    ));
-                    assert_eq!(
-                        sunrise_client::datapack_net::served(),
-                        game.mods.datapack_registries
-                    );
-                }
-                write(&winning, r#"{"power":9}"#);
-                assert!(game.run_command("reload"));
+                let wide = format!(r#"{{"power":9{}}}"#, " ".repeat(1 << 20));
+                write(&winning, &wide);
+                game.reload_datapacks(true, &features).unwrap();
                 assert_eq!(power(game), DatapackValue::Int(9));
+                let published = game.mods.datapack_registries.as_ref().unwrap().clone();
+                assert!(!std::sync::Arc::ptr_eq(&published, &initial));
+                assert!(std::sync::Arc::ptr_eq(
+                    sunrise_client::datapack_net::served().as_ref().unwrap(),
+                    &published
+                ));
+
+                write(&winning, "{bad");
+                let Err(mod_api::__private::reload::ReloadStageError::DataSource(message)) =
+                    game.reload_datapacks(true, &features)
+                else {
+                    panic!("the reload is refused");
+                };
+                assert!(
+                    message.contains(
+                        "pack file/override, file data/registry_test/registry_test/spell/fire.json"
+                    ) && message.contains("Malformed"),
+                    "{message}"
+                );
+                assert_eq!(power(game), DatapackValue::Int(9));
+                assert!(std::sync::Arc::ptr_eq(
+                    game.mods.datapack_registries.as_ref().unwrap(),
+                    &published
+                ));
+                assert!(std::sync::Arc::ptr_eq(
+                    sunrise_client::datapack_net::served().as_ref().unwrap(),
+                    &published
+                ));
+
+                write(&winning, r#"{"power":11}"#);
+                assert!(game.run_command("reload"));
+                assert_eq!(power(game), DatapackValue::Int(11));
             });
         },
     );

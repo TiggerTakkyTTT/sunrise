@@ -6,14 +6,17 @@
     python3 tools/pr_ready.py --host macmini        # builds and harnesses on a fleet machine (~/fleet/rbuild)
     python3 tools/pr_ready.py --harnesses           # also run the affected vanilla harnesses here
     python3 tools/pr_ready.py --quick               # never run the vanilla harnesses
+    python3 tools/pr_ready.py --serial-python       # the Python tests in one process, as CI runs them
 
 From the files the branch changes since its merge base with --base (committed or not) it decides what to run:
 rustfmt, and clippy with warnings denied exactly as CI's verify job runs it (the whole workspace with the game's code
 mods, plus the server build when sunrise-client is affected); the tests of the touched crates, with the features
 CI's workspace-wide run gives them; crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
-only with a Cargo.toml; the Python tests (always, as in CI) and the public-tree check; and the vanilla harnesses the
-changes can affect (tools/parity.py --changed). Locally, the harnesses run only when the branch changes a
-harness, an oracle, a probe or the runner; otherwise they are listed and left to the daily on main. --harnesses runs them anyway.
+only with a Cargo.toml; the Python tests (always, as in CI; here one test file per worker, tools/parallel_unittest.py,
+with the same outcome in a fraction of the time, and --serial-python runs them in one process as CI does) and the
+public-tree check; and the vanilla harnesses the changes can affect (tools/parity.py --changed). Locally, the
+harnesses run only when the branch changes a harness, an oracle, a probe or the runner; otherwise they are listed
+and left to the daily on main. --harnesses runs them anyway.
 Harnesses run where the vanilla data is (a prepared .local/ here, or the Mac mini); elsewhere they are listed for CI.
 Tests select library, binary and integration targets explicitly, followed by doc tests, so unrelated example
 executables are not built and linked again.
@@ -391,8 +394,10 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
         Step("Export lists", "python3 tools/hotspots/check_lists.py", where="here"),
         # tools/hotspots/check_stand_ins.py: test stand-ins keep up with the hooks and traits they mirror.
         Step("Test stand-ins", "python3 tools/hotspots/check_stand_ins.py", where="here"),
-        # Always, as in CI: some read the crates, the roadmap or the workflows.
-        Step("Python tests", "python3 -m unittest discover -s tests", where="here", summary=unittest_passed),
+        # Always, as in CI: some read the crates, the roadmap or the workflows. One file per worker here, with
+        # unittest's own summary (#5043); CI and --serial-python run them in one process.
+        Step("Python tests", "python3 -m unittest discover -s tests" if getattr(args, "serial_python", False)
+             else "python3 tools/parallel_unittest.py", where="here", summary=unittest_passed),
         # CI's own scan (tools/ci/format_scan.py): cargo fmt, then the files no `mod` line reaches, by path.
         Step("rustfmt", "python3 tools/ci/format_scan.py", skip=None if rust else no_rust),
         Step("clippy", clippy, skip=None if rust else no_rust),
@@ -554,7 +559,7 @@ def run_windows(steps, verbose, environment=None):
         elif step.name == "Test stand-ins":
             command = [sys.executable, "tools/hotspots/check_stand_ins.py"]
         elif step.name == "Python tests":
-            command = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+            command = [sys.executable, *command[1:]]
         elif step.name == "rustfmt":
             command = [sys.executable, "tools/ci/format_scan.py"]
         elif step.name == "clippy":
@@ -664,6 +669,7 @@ def block(args, base, merge_base, changed, counts, steps, label, elapsed, revisi
     head, status, _ = revision
     dirty = bool(status)
     flags = "".join(f" --{flag}" for flag in ("quick", "harnesses") if getattr(args, flag)) + \
+        (" --serial-python" if getattr(args, "serial_python", False) else "") + \
         ("" if args.host == "local" else f" --host {args.host}") + ("" if base == "origin/main" else f" --base {base}")
     added, removed = (sum(count[i] for count in counts.values()) for i in (0, 1))
     warnings = scope_warnings(changed)
@@ -701,6 +707,8 @@ def main():
     parser.add_argument("--harnesses", action="store_true",
                         help="run the affected harnesses even when the branch changes no harness, oracle, probe or runner")
     parser.add_argument("--verbose", action="store_true", help="show every check's output")
+    parser.add_argument("--serial-python", action="store_true",
+                        help="run the Python tests in one process, as CI does, instead of one test file per worker")
     parser.add_argument('--datafix', action='store_true', help='opt in to datafix parity downloads in a private SUNRISE_DATAFIX_ROOT')
     args = parser.parse_args()
     if args.host != "local" and not RBUILD.exists():

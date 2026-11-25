@@ -16,6 +16,7 @@ from tests.test_ci_concurrency import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 GAME = ROOT / ".github/workflows/game-build.yml"
+EXPORTERS = ROOT / ".github/workflows/exporters.yml"
 NIGHTLY = ROOT / ".github/workflows/nightly-build.yml"
 SMOKE = ROOT / "tools/ci/game_smoke.sh"
 
@@ -23,11 +24,8 @@ SMOKE = ROOT / "tools/ci/game_smoke.sh"
 # Each build leg's runner: (Blacksmith's, GitHub's with BLACKSMITH=off).
 RUNNERS = {
     "linux": ("blacksmith-16vcpu-ubuntu-2204", "ubuntu-22.04"),
-    "linux-musl": ("blacksmith-16vcpu-ubuntu-2204", "ubuntu-22.04"),
     "windows": ("blacksmith-16vcpu-windows-2025", "windows-latest"),
-    "windows-arm64": ("blacksmith-16vcpu-windows-2025", "windows-11-vs2026-arm"),
     "macos": ("blacksmith-12vcpu-macos-15", "macos-15"),
-    "macos-x64": ("blacksmith-12vcpu-macos-15", "macos-15"),
 }
 
 
@@ -35,10 +33,11 @@ class NightlyRoutingTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node evaluates GitHub's JavaScript-style expressions")
     def test_real_matrix_routes_both_trust_levels(self):
         game = yaml.safe_load(GAME.read_text())["jobs"]
-        expressions = {name: game[name]["runs-on"][3:-2] for name in ("exporters", "build", "musl", "linux-smoke")}
+        expressions = {name: game[name]["runs-on"][3:-2] for name in ("build", "linux-smoke")}
+        expressions["exporters"] = yaml.safe_load(EXPORTERS.read_text())["jobs"]["exporters"]["runs-on"][3:-2]
         smoke = game["linux-smoke"]
         smoke_if = smoke["if"][3:-2]
-        rows = [row for job in ("build", "musl") for row in game[job]["strategy"]["matrix"]["include"]]
+        rows = game["build"]["strategy"]["matrix"]["include"]
         self.assertEqual({row["name"] for row in rows}, RUNNERS.keys())
         linux = next(row for row in rows if row["name"] == "linux")
         download = next(step for step in smoke["steps"] if step.get("uses", "").startswith("actions/download-artifact@"))
@@ -80,81 +79,59 @@ console.log(JSON.stringify(eval(expression)));
                 if not trusted and override:
                     self.assertEqual(evaluate(expressions["linux-smoke"], {}, trusted), "dyna-large")
                 for row in rows:
-                    if row["name"] in {"linux", "linux-musl"}:
+                    if row["name"] == "linux":
                         self.assertEqual(row["os"], "ubuntu-22.04", "shipped Linux binaries keep the documented libc baseline")
                     # Every leg on its Blacksmith machine, or with BLACKSMITH=off on GitHub's.
                     expected = RUNNERS[row["name"]][blacksmith == "off"]
                     with self.subTest(entry=row["name"]):
-                        job = "musl" if row.get("musl") else "build"
-                        self.assertEqual(evaluate(expressions[job], row, trusted), expected)
-        # A leg built for another CPU is started there, by a job on that CPU's runner that downloads its untested
-        # archive and uploads it under its own name with the leg's marker; legs waits for that job.
-        started = {"macos-x64": ("macos-x64-intel", "macos-15-intel"),
-                   "windows-arm64": ("windows-arm64-native", "windows-11-vs2026-arm")}
-        self.assertEqual({row["name"] for row in rows if row.get("started_elsewhere")}, set(started))
-        self.assertEqual(set(game["legs"]["needs"]), {"build", *(job for job, _ in started.values())})
-        folders = {"macos-x64": "intel", "windows-arm64": "arm64"}
-        for row in rows:
-            if row["name"] in started:
-                job, runner = started[row["name"]]
-                with self.subTest(started_elsewhere=row["name"]):
-                    self.assertEqual(game[job]["runs-on"], runner)
-                    steps = game[job]["steps"]
-                    artifacts = [(s["uses"].split("@")[0], s["with"]["name"], s["with"]["path"]) for s in steps
-                                 if s.get("uses", "").startswith(("actions/download-artifact@", "actions/upload-artifact@"))]
-                    temp = "${{ runner.temp }}"
-                    self.assertEqual(artifacts, [
-                        ("actions/download-artifact", f"untested-{row['asset']}", f"{temp}/{folders[row['name']]}"),
-                        ("actions/upload-artifact", row["asset"], f"{temp}/ship/{row['asset']}"),
-                        ("actions/upload-artifact", f"leg-{row['name']}", f"{temp}/leg-{row['name']}"),
-                    ])
-                    # The programs start between the download and the first upload: nothing ships unstarted.
-                    names = [s.get("name", "") for s in steps]
-                    start = next(i for i, name in enumerate(names) if name.startswith("Every program starts"))
-                    download = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/download-artifact@"))
-                    upload = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/upload-artifact@"))
-                    self.assertLess(download, start)
-                    self.assertLess(start, upload)
-
+                        self.assertEqual(evaluate(expressions["build"], row, trusted), expected)
         for repository, trusted, row in itertools.product(["sunrise-org/sunrise", "horizon-rust/horizon"], [False, True], rows):
             with self.subTest(repository=repository, trusted=trusted, entry=row["name"]):
                 if repository == "sunrise-org/sunrise":
-                    expected = 100 if row.get("mac") or row.get("musl") else 60
+                    expected = 100 if row.get("mac") else 60
                 else:
                     expected = 60 if row.get("mac") else 40
-                timeout = game["musl" if row.get("musl") else "build"]["timeout-minutes"][3:-2]
+                timeout = game["build"]["timeout-minutes"][3:-2]
                 self.assertEqual(evaluate(timeout, row, trusted, repository), expected)
 
     @unittest.skipUnless(shutil.which("node"), "Node evaluates GitHub's JavaScript-style expressions")
-    def test_a_missing_leg_holds_the_build_only_when_it_is_required(self):
+    def test_only_a_dev_releases_macos_legs_follow_the_owners_blacksmith_switch(self):
+        script = """const state = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const context = values => new Proxy(values, {get: (values, key) => values[key] ?? ''});
+const matrix = context(state.matrix), vars = context(state.vars), inputs = context(state.inputs);
+console.log(JSON.stringify(eval(state.expression)));
+"""
+        prebuilt = yaml.safe_load((ROOT / ".github/workflows/prebuilt-game-build.yml").read_text())
+        legs = json.loads(prebuilt["jobs"]["fresh"]["steps"][1]["env"]["ALL"])
+        game = yaml.safe_load(GAME.read_text())["jobs"]["build"]
+        builds = {"game": (game, game["strategy"]["matrix"]["include"]), "sdk": (prebuilt["jobs"]["build"], legs)}
+        for (what, (job, rows)), switch, dev in itertools.product(builds.items(), [None, "off", "on", "true"], [False, True]):
+            variables = {"BLACKSMITH": "off"}
+            if switch is not None:
+                variables["BLACKSMITH_DEV_MACOS"] = switch
+            for row in rows:
+                with self.subTest(build=what, switch=switch, dev=dev, leg=row["name"]):
+                    state = {"expression": job["runs-on"][3:-2], "matrix": row, "vars": variables, "inputs": {"dev": dev}}
+                    result = subprocess.run(["node", "-e", script], input=json.dumps(state), text=True,
+                                            capture_output=True, check=True)
+                    blacksmith = switch == "on" and dev and row["os"] == "macos-15"
+                    self.assertEqual(json.loads(result.stdout), row["blacksmith"] if blacksmith else row["os"])
+
+    def test_any_missing_leg_holds_the_build(self):
         workflow_jobs = dict(jobs(GAME.read_text()))
-        optional = re.search(r"^\s*continue-on-error:\s*\$\{\{(.*?)\}\}", workflow_jobs["build"], re.M).group(1)
         decide = workflow_jobs["legs"].split("        run: |\n", 1)[1].split("\n      # ", 1)[0].split("\n      - ", 1)[0]
         decide = textwrap.dedent(decide)
-        script = """const s = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const matrix = s.matrix, inputs = s.inputs, github = s.github;
-console.log(JSON.stringify(Boolean(eval(s.expression))));
-"""
-        legs = {"linux": {}, "windows": {}, "windows-arm64": {}, "macos": {"mac": True}, "macos-x64": {"mac": True}}
-        for repository, kind in itertools.product(
-            ["sunrise-org/sunrise", "horizon-rust/horizon"], ["nightly", "dev", "release"]
-        ):
-            for absent in [None, *legs]:
-                if absent is None:
-                    expected = True
-                else:
-                    state = {"expression": optional, "matrix": {"name": absent, **legs[absent]}, "inputs": {"kind": kind}, "github": {"repository": repository}}
-                    expected = json.loads(subprocess.run(["node", "-e", script], input=json.dumps(state), text=True, capture_output=True, check=True).stdout)
-                with self.subTest(repository=repository, kind=kind, absent=absent), tempfile.TemporaryDirectory() as folder:
-                    for leg in legs:
-                        if leg != absent:
-                            os.makedirs(f"{folder}/legs/leg-{leg}")
-                    output = Path(folder, "output")
-                    ran = subprocess.run(["bash", "-c", decide], cwd=folder, capture_output=True, text=True,
-                                         env={**os.environ, "REPOSITORY": repository, "KIND": kind, "GITHUB_OUTPUT": str(output)})
-                    self.assertEqual(ran.returncode == 0, expected, ran.stdout)
-                    self.assertNotIn("linux-musl", ran.stdout)
-                    self.assertEqual(output.exists() and output.read_text() == "complete=true\n", expected)
+        legs = ("linux", "windows", "macos")
+        for absent in [None, *legs]:
+            with self.subTest(absent=absent), tempfile.TemporaryDirectory() as folder:
+                for leg in legs:
+                    if leg != absent:
+                        os.makedirs(f"{folder}/legs/leg-{leg}")
+                output = Path(folder, "output")
+                ran = subprocess.run(["bash", "-c", decide], cwd=folder, capture_output=True, text=True,
+                                     env={**os.environ, "GITHUB_OUTPUT": str(output)})
+                self.assertEqual(ran.returncode == 0, absent is None, ran.stdout)
+                self.assertEqual(output.exists() and output.read_text() == "complete=true\n", absent is None)
 
     def test_build_timings_are_a_report_and_never_a_signed_or_released_asset(self):
         game = yaml.safe_load(GAME.read_text())
@@ -183,38 +160,6 @@ console.log(JSON.stringify(Boolean(eval(s.expression))));
         self.assertEqual([step["with"]["pattern"] for step in download],
                          ["@(sunrise-*|signature|ephemeral.pub|nightly-notes|smoke-test.json)"])
 
-    def test_musl_is_checked_after_packaging_and_before_upload(self):
-        # The musl job of its own (game-build.yml's `musl` part), sharing the platform legs' env and steps.
-        build = yaml.load(GAME.read_text(), Loader=yaml.BaseLoader)["jobs"]["musl"]
-        self.assertRegex(build["env"]["MUSL_IMAGE"], r"^alpine:3\.22@sha256:[0-9a-f]{64}$")
-        musl, = [row for row in build["strategy"]["matrix"]["include"] if row.get("musl") == "true"]
-        self.assertEqual(musl["target"], "x86_64-unknown-linux-musl")
-        self.assertEqual(musl["asset"], "sunrise-linux-musl-x86_64.tar.gz")
-        steps = build["steps"]
-        cross = next(i for i, s in enumerate(steps) if s.get("name") == "Cross-build for musl with glibc-hosted Rust")
-        validate = next(i for i, s in enumerate(steps) if s.get("name") == "Check the packaged musl programs")
-        package = next(i for i, s in enumerate(steps) if s.get("name") == "Package")
-        archive = next(i for i, s in enumerate(steps) if s.get("with", {}).get("if-no-files-found") == "error"
-                       and s["with"]["path"].startswith("dist/") and "matrix.asset" in s["with"]["path"])
-        marker = next(i for i, s in enumerate(steps) if s.get("name") == "This leg built")
-        self.assertLess(cross, package)
-        self.assertLess(package, validate)
-        self.assertLess(validate, archive)
-        self.assertLess(archive, marker)
-        # The checks read the uploaded archive, unpacked, not the folder it was made from.
-        self.assertIn('tar -xzf "dist/${{ matrix.asset }}"', steps[validate]["run"])
-        for step in (steps[cross], steps[validate]):
-            self.assertEqual(step["if"], "matrix.musl")
-            self.assertIn('"$MUSL_IMAGE"', step["run"])
-            # Every package the build links against, or the programs load, is held to the proven upstream version.
-            installs = " ".join(re.findall(r"apk add --no-cache ([^\n]+)", step["run"].replace("\\\n", " "))).split()
-            held = {spec.strip('"') for spec in installs if "~" in spec}
-            runtime = {"musl~1.2.5", "libgcc~14.2.0", "alsa-lib~1.2.14", "eudev-libs~3.2.14"}
-            build_only = {"gcc~14.2.0", "binutils~2.44", "musl-dev~1.2.5", "linux-headers~6.14.2", "alsa-lib-dev~1.2.14",
-                          "eudev-dev~3.2.14"}
-            # The sysroot holds the same runtime libraries the startup check loads.
-            self.assertEqual(held, runtime | build_only if step is steps[cross] else runtime)
-
     def test_every_shipped_glibc_program_is_checked_by_workflow_owned_tools(self):
         text = GAME.read_text()
         commands = re.findall(r"check_glibc.py ([^\n]+)", text.replace("\\\n", " "))
@@ -230,23 +175,19 @@ console.log(JSON.stringify(Boolean(eval(s.expression))));
             self.assertIn("ref: ${{ github.workflow_sha }}", checkout,
                           "older build candidates may lack the new workflow's validator/smoke helpers")
 
-    def test_build_and_musl_stage_the_workflows_rust_pin(self):
+    def test_build_stages_the_workflows_rust_pin(self):
         game = yaml.safe_load(GAME.read_text())["jobs"]
-        for job in ("build", "musl"):
-            with self.subTest(job=job):
-                tools, = [step for step in game[job]["steps"]
-                          if step.get("name") == "Workflow-owned validation tools"]
-                self.assertTrue(tools["uses"].startswith("actions/checkout@"))
-                self.assertNotIn("if", tools)
-                self.assertEqual(tools["with"]["ref"], "${{ github.workflow_sha }}")
-                self.assertEqual(tools["with"]["path"], ".workflow-tools")
-                self.assertIn("tools/ci/rust-version", tools["with"]["sparse-checkout"].splitlines())
+        tools, = [step for step in game["build"]["steps"] if step.get("name") == "Workflow-owned validation tools"]
+        self.assertTrue(tools["uses"].startswith("actions/checkout@"))
+        self.assertNotIn("if", tools)
+        self.assertEqual(tools["with"]["ref"], "${{ github.workflow_sha }}")
+        self.assertEqual(tools["with"]["path"], ".workflow-tools")
+        self.assertIn("tools/ci/rust-version", tools["with"]["sparse-checkout"].splitlines())
 
     def test_hosted_runners_never_use_machine_specific_tool_setup(self):
         # Only the exporters can run on a self-hosted (Dyna) runner; the build legs are fresh machines and take none.
-        workflow_jobs = dict(jobs(GAME.read_text()))
-        self.assertNotIn("runner-env.sh", workflow_jobs["build"])
-        steps = [block for block in workflow_jobs["exporters"].split("\n      - ") if "bash tools/ci/runner-env.sh" in block]
+        self.assertNotIn("runner-env.sh", GAME.read_text())
+        steps = [block for block in dict(jobs(EXPORTERS.read_text()))["exporters"].split("\n      - ") if "bash tools/ci/runner-env.sh" in block]
         self.assertEqual(len(steps), 1)
         condition = re.search(r"^\s*if:\s*(.*)$", steps[0], re.M).group(1)
         for environment in ["github-hosted", "self-hosted"]:

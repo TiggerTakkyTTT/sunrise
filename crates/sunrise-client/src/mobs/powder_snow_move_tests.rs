@@ -107,7 +107,7 @@ fn powder_snow_move_main_hand_scaffolding() {
         }
         assert_eq!(mob.position.y, 65.0);
         assert!(
-            mob.collision_subject()
+            mob.collision_subject(w.items.map(|items| items.entity_type_tags.as_ref()))
                 .main_hand
                 .unwrap()
                 .is_item("minecraft:scaffolding")

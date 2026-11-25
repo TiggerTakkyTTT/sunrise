@@ -557,7 +557,7 @@ fn a_command_cart_saves_its_base_command_block() {
     assert_eq!(cart.command.success_count, 0);
     // readAdditionalSaveData syncs both values.
     assert_eq!(cart.synced_command, "say hi");
-    assert_eq!(cart.synced_output, "[12:00:00] hi");
+    assert_eq!(cart.synced_output.as_ref(), saved.get("LastOutput"));
     let out = cart.to_nbt([0; 4], Some(&saved), &Default::default());
     assert_eq!(out.get("SuccessCount"), Some(&Tag::Int(0)));
     for key in ["Command", "TrackOutput", "LastOutput", "LastExecution"] {

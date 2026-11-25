@@ -21,7 +21,6 @@ use sunrise_client::{
     pad_glyph::{Glyph, Glyphs},
 };
 use sunrise_client_input::radial;
-use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
 pub(super) const HELP: &[&str] = &[
@@ -640,14 +639,6 @@ impl Game<'_> {
             }
             Route::Mouse(button) => {
                 let playing = self.title.is_none() && self.screen == Screen::Playing;
-                // What the window path tells mods and the click counters. Pick block isn't one
-                // they count.
-                if playing
-                    && matches!(button, MouseButton::Left | MouseButton::Right)
-                    && (down || !self.mouse_mapping_held_elsewhere(button, Source::Pad))
-                {
-                    self.extras_mouse(button, down);
-                }
                 if !down || playing {
                     self.mouse_mapping(button, down, Source::Pad)?;
                 }
@@ -701,7 +692,7 @@ impl Game<'_> {
         // The options open over the title screen too: they come first, as
         // for the keyboard's Escape.
         if self.screen == Screen::Options {
-            return self.options_key(KeyCode::Escape, None);
+            return self.options_key(KeyCode::Escape, None).map(|_| ());
         }
         // A mod's screen in front of the title takes the Escape itself.
         if self.title_input_active()

@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use sunrise_core::random::LegacyRandom;
 
-/// The level's random (`ClientLevel.random`) while a part's `animate_tick` holds it as
+/// The level's random (`ClientLevel.random`) while a client Part holds it as
 /// `event.random`: one stream for the part's draws and the game's own draws during the call
 /// (`add_particle`'s limiter roll, `Game::with_lent_level_random`), in call order.
 pub(in crate::game) type LentRandom = Rc<RefCell<mod_api::LegacyRandomSource>>;
@@ -58,28 +58,42 @@ impl Game<'_> {
         let Some(level) = self.native_client_level() else {
             return;
         };
+        self.lend_client_level_random(|game, random| {
+            game.native_animate_tick(super::fire::AnimateTickCall {
+                level,
+                pos: BlockPos::new(pos[0], pos[1], pos[2]),
+                state,
+                random,
+            });
+        });
+    }
+
+    /// Lend `ClientLevel.random` to a client Part, sharing the stream with any callbacks
+    /// and host effects it calls before returning.
+    pub(in crate::game) fn lend_client_level_random<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &mut dyn mod_api::RandomSource) -> R,
+    ) -> R {
+        if let Some(lent) = self.lent_level_random.clone() {
+            return f(self, &mut LevelRandom(lent));
+        }
         let lent: LentRandom = Rc::new(RefCell::new(mod_api::LegacyRandomSource::from(<(
             u64,
             Option<f64>,
         )>::from(
             &*self.particles.level_random(),
         ))));
-        let mut random = LevelRandom(lent.clone());
-        let outer = self.lent_level_random.replace(lent.clone());
-        self.native_animate_tick(super::fire::AnimateTickCall {
-            level,
-            pos: BlockPos::new(pos[0], pos[1], pos[2]),
-            state,
-            random: &mut random,
-        });
-        self.lent_level_random = outer;
+        self.lent_level_random = Some(lent.clone());
+        let out = f(self, &mut LevelRandom(lent.clone()));
+        self.lent_level_random = None;
         *self.particles.level_random() =
             LegacyRandom::from(<(u64, Option<f64>)>::from(&*lent.borrow()));
+        out
     }
 
-    /// Runs `f`, which draws from the particle engine's level random (the limiter's roll of
-    /// `add_particle` and of `create_fireworks`' poofs), on the stream a part's `animate_tick`
-    /// holds as `event.random` while one does: the engine's random is that stream for `f`, and
+    /// Runs `f`, which draws from the level random (breaking-particle position, `add_particle`'s limiter or
+    /// the poofs from `create_fireworks`), on the stream a client Part
+    /// holds as `event.random`: the engine's random is that stream for `f`, and
     /// `f`'s draws stay in it.
     pub(in crate::game) fn with_lent_level_random<R>(
         &mut self,

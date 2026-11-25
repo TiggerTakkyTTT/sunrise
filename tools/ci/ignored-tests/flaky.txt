@@ -1,2 +1,0 @@
-# Known failures on main that may pass or fail.
-sunrise-client-render gfx::frame_gen::optical_flow::tests::finds_a_shift_and_a_scene_change horizon-rust/horizon#8627 flaky # llvmpipe/lavapipe scene-change threshold; horizon-rust/horizon#9138 fixes the race

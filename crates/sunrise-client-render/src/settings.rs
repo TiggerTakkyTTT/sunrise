@@ -557,6 +557,14 @@ impl Settings {
             file: f,
         }
     }
+    /// Validated live `(textureFiltering, maxAnisotropyBit, mipmapLevels)` for atlas stitching.
+    pub fn texture_atlas_settings(&self) -> (i32, i32, i32) {
+        (
+            self.file.int("textureFiltering").clamp(0, 2),
+            self.file.int("maxAnisotropyBit").clamp(1, 3),
+            self.mipmap_levels.clamp(0, 4),
+        )
+    }
     /// `Options.createInformation`: what the server learns about this player.
     pub fn client_information(&self, view_distance: i8) -> ClientInformation {
         ClientInformation {
@@ -799,6 +807,8 @@ impl Settings {
 pub enum Opt {
     Fov,
     RenderDistance,
+    /// `RenderDistance` on the classic Video Settings page: vanilla's range (2..=32), same saved value.
+    VanillaRenderDistance,
     SimulationDistance,
     Sensitivity,
     WheelSensitivity,
@@ -1123,5 +1133,21 @@ mod tests {
         assert_eq!(again.sound_device, "Headphones");
         let empty = Settings::parse("");
         assert_eq!(empty.sound_device, "");
+    }
+    #[test]
+    fn texture_atlas_settings_uses_live_validated_mipmap_and_filtering() {
+        let mut s = Settings::default();
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 4));
+        // Live `mipmap_levels` wins even before `file` is rewritten.
+        s.mipmap_levels = 0;
+        assert_eq!(s.file.int("mipmapLevels"), 4);
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 0));
+        // Out-of-range stored values fail `OptionInstance` validation and keep the defaults.
+        s.mipmap_levels = 4;
+        s.file
+            .set("textureFiltering", crate::options_file::V::Int(9));
+        s.file
+            .set("maxAnisotropyBit", crate::options_file::V::Int(0));
+        assert_eq!(s.texture_atlas_settings(), (0, 2, 4));
     }
 }

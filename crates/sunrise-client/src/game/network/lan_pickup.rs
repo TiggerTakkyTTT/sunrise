@@ -65,7 +65,9 @@ impl Game<'_> {
             Option<&sunrise_client::menu::StackedOutcome>,
         ) -> Option<R>,
     ) -> Option<R> {
-        let Some((slot, button, mode)) = click.filter(|c| c.2 == Input::Pickup) else {
+        let Some((slot, button, mode)) =
+            click.filter(|c| matches!(c.2, Input::Pickup | Input::QuickCraft))
+        else {
             return action(self, menu, None);
         };
         if !Self::stacked_listened() {
@@ -79,19 +81,37 @@ impl Game<'_> {
             }
             found = menu.stacked_click(env, slot, button, mode);
         });
-        let (Some(frozen), Some(())) = (found, planned) else {
+        let (Some(frozen), Some(())) = (found.filter(Self::stacked_listens_for), planned) else {
             return action(self, menu, None);
         };
         let conn = self.lan.as_ref()?.hub.guests[gi].conn;
         let route = self.lan.as_mut()?.menus.entry(conn).or_default().hub.id();
         let mut ran = None;
-        let (carried, same) = (frozen.carried.clone(), frozen.clone());
+        let (carried, same, resolved_slot, primary) = (
+            frozen.carried.clone(),
+            frozen.clone(),
+            frozen.slot,
+            frozen.primary,
+        );
+        let mut probe = copy.clone();
         let pickup = self.stacked_pickup(
             route,
             frozen,
             move |game| {
                 let now = game.lan.as_ref()?.hub.guests.get(gi)?.carried.clone();
                 (now == carried).then(|| same.clone())
+            },
+            move |game, carried, clicked| {
+                game.guest_menu_op(gi, &mut probe, |menu, env| {
+                    menu.probe_carried_vanilla_override(
+                        env,
+                        resolved_slot,
+                        primary,
+                        carried,
+                        clicked,
+                    )
+                })
+                .unwrap_or(false)
             },
             |game, answer| {
                 game.journal_guest_click(conn);

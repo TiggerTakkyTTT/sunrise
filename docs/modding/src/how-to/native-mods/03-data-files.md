@@ -45,11 +45,15 @@ running them. This work does not run on the tick. Server world tables, including
 Contributions share a list, so a failed contributed file cannot be attributed to a particular mod.
 The original pack trees remain separate from the launcher's code-only horizon-mixins input.
 
-Client-side asset reads use [client asset reload listeners](https://github.com/sunrise-org/sunrise/blob/main/crates/sunrise-mod-vocab/src/client/client_reload.rs); server
-listeners cannot read `assets/`. Client listeners return the same once-only action, which runs on
-the game thread, on the declared side of model publication. With no dependency linking
-it to the vanilla anchor, a mod listener runs after model publication by default.
-Packaged assets also participate in the game's normal resource packs.
+Client-side asset reads use [client asset reload listeners](https://github.com/sunrise-org/sunrise/blob/main/crates/sunrise-mod-vocab/src/client/client_reload.rs)
+through `Hooks::add_client_reload_listeners`; server listeners cannot read `assets/`. During
+registration, `event.listeners.get_registry().iter()`, `event.listeners.get_graph().iter()` and
+`event.listeners.get_last_vanilla_listener()` borrow the live names, explicit dependency edges and
+client vanilla anchor (`VanillaClientListeners::model_manager()`) in the same way as the server
+registry. Client listeners return the same once-only action, which runs on the game thread, on the
+declared side of model publication. With no dependency linking it to the vanilla anchor, a mod
+listener runs after model publication by default. Packaged assets also participate in the game's
+normal resource packs.
 
 When registering a listener on either side, construct its converter with
 `FileToIdConverter::json("machines")` for JSON or `FileToIdConverter::new("machines", ".bin")`
@@ -71,14 +75,31 @@ succeeds. A [failed registration callback](../../concepts/load-phases.md#reloadi
 of its listeners, edges or retained entries; later mods can still register. This applies to the
 initial client load as well as later client and server reloads.
 
-Outside a listener, `host.resource(pack_type, &identifier)` reads one file from the selected
-stack: `PackType::ServerData` takes `mymod:machines/furnace.json` from `data/`, and
+Use `host.open_resource(pack_type, &identifier)` on a `Host` or `ReloadContext` to open one file
+from the published stack: `PackType::ServerData` takes `mymod:machines/furnace.json` from `data/`, and
 `PackType::ClientResources` takes `mymod:models/block/furnace.json` from `assets/`. As with
-`ResourceManager.getResource`, the highest selected pack that supplies the file wins; filters,
-a world's datapacks and a mod's own root data all apply. The answer is the winning bytes, or
-`None` for a missing, unreadable or over-64-MiB file. Use a reload listener for a whole folder
-or for parsing at reload time; a single read does not reload packs. Directory-pack
-symlinks follow vanilla pack behavior: linked resource files are read through the pack.
+`ResourceManager.getResource`, each selected pack in priority order first gets to supply its own
+file, then its `filter.block` can hide lower files. Opening reads the original file, not a merged
+file such as the language table. It never reloads packs or substitutes a lower pack's file if
+the winner fails.
+
+- `Ok(Some(reader))` gives a `std::io::Read` scoped to the host's published pack generation. Pass it
+  to a streaming decoder, or call `reader.read_to_end(&mut bytes)` to fill a `Vec<u8>` when you need owned bytes.
+  Opening does not load the whole resource or set a file-size limit; apply your codec's own limits
+  when reading. The reader can report I/O or archive decoding errors, and the consumer reports its
+  own format errors.
+- `Ok(None)` means no matching resource or pack stack, including a resource hidden by a pack filter.
+- `Err(error)` means lookup or opening failed. `ResourceOpenError::Io` preserves the original error.
+
+`host.resource_stack(pack_type, &identifier)` gives every selected pack's copy of a file instead,
+lowest first and the highest pack's last (`ResourceManager.getResourceStack`), as bytes: a copy that
+cannot be read or is over 64 MiB is left out. `host.list_resources(pack_type, "textures/item", ".png")`
+names the files under that folder of every namespace that end in the suffix, in identifier order
+(`ResourceManager.listResources`); metadata files (`.mcmeta`) are never listed. Use a reload
+listener for parsing at reload time; these reads never reload packs.
+
+Use a reload listener to process a whole folder or parse resources when the packs change. Directory
+packs follow vanilla's symlink behavior: linked resource files are read through the pack.
 
 ## Embedded data
 
@@ -135,14 +156,7 @@ A mod that turns other packages' files into what it registers (a script host who
 package, your own included, and gives a handle you may keep and use from any thread:
 
 ```rust
-fn scripts(cx: &mod_api::RegistrationContext) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-    let files = cx.package_files("lumen_demo")?;
-    let mut scripts = Vec::new();
-    for path in files.list("data/lumen_demo/lumen/") {
-        scripts.push(files.read(path)?);
-    }
-    Ok(scripts)
-}
+{{#include ../../../examples/src/entity_and_native.rs:read_scripts}}
 ```
 
 The file list is fixed when startup admits the package. Declaration and resource loading use that same list and reader.

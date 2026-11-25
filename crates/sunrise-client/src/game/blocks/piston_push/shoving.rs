@@ -86,7 +86,6 @@ impl Game<'_> {
                         let _shove = Shove::enter(selected.id, source);
                         self.move_pushed_body(
                             MoverType::Carried,
-                            None,
                             target,
                             body,
                             movement,

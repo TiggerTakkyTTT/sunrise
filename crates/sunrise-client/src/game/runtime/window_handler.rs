@@ -1,5 +1,6 @@
 //! winit's `ApplicationHandler` for the game window: window and device events, shutting down,
 //! and the idle step (`about_to_wait`).
+use super::saving::ClientQuit;
 use super::*;
 use sunrise_client::window::PointerSample;
 
@@ -277,6 +278,7 @@ impl Game<'_> {
 
     /// The loop ended: close the pads' output, save the world.
     pub(super) fn shut_down(&mut self) {
+        self.client_quit.set(ClientQuit::Stopping);
         self.close_client_tasks();
         if self.error.is_none()
             && let Some(renderer) = &mut self.renderer
@@ -299,10 +301,13 @@ impl Game<'_> {
     /// winit's `about_to_wait`: what happens between frames (stop requests, the closing
     /// save, world entry, the control socket, pads), then the next frame.
     pub(super) fn idle(&mut self, event_loop: &dyn EventLoopCtl) {
-        if sunrise_threads::stop_requests() > 0
-            && self.pending_save.as_ref().is_none_or(|save| !save.quit)
-        {
-            // SIGTERM, SIGINT or SIGHUP: the shutdown hook's server halt, as a window close.
+        let quit_requested = match self.client_quit.get() {
+            ClientQuit::Running => sunrise_threads::stop_requests() > 0,
+            ClientQuit::Requested => true,
+            ClientQuit::Stopping => false,
+        };
+        if quit_requested {
+            // Mod requests and stop signals take the same path as a window close.
             if let Err(error) = self.begin_closing_save(true) {
                 self.error = Some(error);
                 event_loop.exit();
@@ -444,11 +449,31 @@ impl ApplicationHandler for Game<'_> {
             sunrise_threads::system_menu::suppress(hwnd);
         }
         drop(window_step);
-        let pending = self.pending_initial_models.take();
-        let renderer = match &pending {
-            Some(start) => self.renderer_for(window.clone(), &start.models.pack, &start.models.gui),
-            None => self.new_renderer(window.clone()),
-        };
+        let mut pending = self.pending_initial_models.take();
+        let renderer = (|| {
+            let Some(start) = &mut pending else {
+                return self.new_renderer(window.clone());
+            };
+            let models = &mut start.models;
+            let device = pollster::block_on(sunrise_client::gfx::Opened::for_window(
+                &window,
+                self.options.offscreen,
+                self.settings.sunrise.api,
+                models.pack.render.texture_layers,
+            ))?;
+            if models.gui.stitch_for_device(
+                &models.pack.source,
+                &self.vanilla_root(),
+                device.max_atlas_size(),
+            )? {
+                self.particles.reload(
+                    &models.pack.source,
+                    &models.gui.atlas.sprites,
+                    &models.gui.atlas.translucent,
+                );
+            }
+            self.renderer_for(window.clone(), &models.pack, &models.gui, Some(device))
+        })();
         self.resize_state = Some(self.resize_state_of(window.inner_size()));
         self.window = Some(window);
         if let Some(pending) = pending {

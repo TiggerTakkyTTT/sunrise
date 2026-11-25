@@ -375,9 +375,11 @@ pub fn anim(m: &Mob, s: &State, p: &mut Poses) {
 struct FreezeWhenLookedAt;
 impl Goal for FreezeWhenLookedAt {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         JUMP | MOVE
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         if m.ai.target != Some(Who::Player) {
             return false;
@@ -387,9 +389,11 @@ impl Goal for FreezeWhenLookedAt {
         };
         m.distance_sqr(p.position) <= 256.0 && stared_at(m, cx.w)
     }
+    #[inline]
     fn start(&mut self, m: &mut Mob, _: &mut Cx) {
         m.nav_stop();
     }
+    #[inline]
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
         if let Some(p) = cx.w.selected_player() {
             let at = [p.position.x, p.eye[1], p.position.z];
@@ -407,9 +411,11 @@ struct LookForPlayer {
 }
 impl Goal for LookForPlayer {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         TARGET
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         let Some(p) = cx.w.selected_player() else {
             return false;
@@ -423,6 +429,7 @@ impl Goal for LookForPlayer {
             && m.sees(cx.w, Who::Player);
         self.pending
     }
+    #[inline]
     fn start(&mut self, m: &mut Mob, _: &mut Cx) {
         self.aggro = reduced(5);
         self.teleport = 0;
@@ -430,10 +437,12 @@ impl Goal for LookForPlayer {
         // only when a target is assigned.
         m.extra.flag2 = true;
     }
+    #[inline]
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.pending = false;
         m.set_ai_target(cx.w, None);
     }
+    #[inline]
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         let Some(p) = cx.w.selected_player().cloned() else {
             return false;
@@ -449,6 +458,7 @@ impl Goal for LookForPlayer {
         // which has no range: the target is kept however far it goes.
         p.alive && !p.creative && !p.spectator && m.ai.target == Some(Who::Player)
     }
+    #[inline]
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
         let Some(p) = cx.w.selected_player().cloned() else {
             return;
@@ -486,15 +496,18 @@ impl Goal for LookForPlayer {
 struct TakeBlock;
 impl Goal for TakeBlock {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         0
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         // EndermanTakeBlockGoal.canUse: needs mobGriefing, checked before the draw.
         m.extra.carried.is_none()
             && cx.w.can_grief(m.id)
             && m.random.next_int_bound(reduced(20)).unwrap_or(1) == 0
     }
+    #[inline]
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
         let x = (m.position.x - 2.0 + m.random.next_double() * 4.0).floor() as i32;
         let y = (m.position.y + m.random.next_double() * 3.0).floor() as i32;
@@ -540,15 +553,18 @@ impl Goal for TakeBlock {
 struct LeaveBlock;
 impl Goal for LeaveBlock {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         0
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         // EndermanLeaveBlockGoal.canUse: needs mobGriefing, checked before the draw.
         m.extra.carried.is_some()
             && cx.w.can_grief(m.id)
             && m.random.next_int_bound(reduced(2000)).unwrap_or(1) == 0
     }
+    #[inline]
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
         let Some(carried) = m.extra.carried else {
             return;

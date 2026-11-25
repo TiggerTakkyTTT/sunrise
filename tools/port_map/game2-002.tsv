@@ -89,7 +89,7 @@ Guardian.getActiveAttackTarget	inline	crates/sunrise-client/src/mobs/guardian.rs
 Guardian.checkGuardianSpawnRules	port	crates/sunrise-client/src/mobs/spawn_rules.rs::check_spawn_rules	the Guardian and ElderGuardian arm
 Guardian.GuardianAttackGoal.canContinueToUse	port	crates/sunrise-client/src/mobs/guardian.rs::GuardianAttack::can_continue
 Guardian.GuardianAttackSelector.test	inline	crates/sunrise-client/src/mobs/guardian.rs::register	the selector is the player, squid and axolotl beyond 9 filters in register
-Monster.updateNoActionTime	port	crates/sunrise-client/src/mobs/ai.rs::server_ai_step	the idle counter is counted up there and read by the despawn path in raids.rs
+Monster.updateNoActionTime	port	crates/sunrise-client/src/mobs/ai.rs::ai_step	the outer +2 in brightness (always for raiders), not the +1 at the start of server_ai_step; the despawn path in raids.rs reads the counter
 Monster.getProjectile	port	crates/sunrise-client/src/game/items/crossbow.rs::Game::mob_vanilla_ammo	the weapon's supported stack from the off hand then the main hand, else a new arrow; the ProjectileWeaponItem guard and the per-weapon supported set are not kept (an arrow or a firework rocket for a crossbow)
 PatrollingMonster.addAdditionalSaveData	port	crates/sunrise-client/src/mobs/raider.rs::write_nbt
 PatrollingMonster.readAdditionalSaveData	port	crates/sunrise-client/src/mobs/raider.rs::read_nbt

@@ -4,7 +4,7 @@ mod evaluation;
 
 pub use evaluation::{ConditionContext, Evaluation};
 use serde_json::Value;
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 
 pub(crate) const NUMBER_PROVIDER_KINDS: [&str; 2] =
     ["context_int_provider", "context_float_provider"];
@@ -15,15 +15,16 @@ pub struct Providers(Arc<Definitions>);
 
 #[derive(Default)]
 struct Definitions {
-    ints: HashMap<String, Value>,
-    floats: HashMap<String, Value>,
+    ints: BTreeMap<String, Value>,
+    floats: BTreeMap<String, Value>,
 }
-fn load_dir(dir: &Path, namespace: &str, out: &mut HashMap<String, Value>) {
+fn load_dir(dir: &Path, namespace: &str, out: &mut BTreeMap<String, Value>) {
     let Ok(folder) = sunrise_world::json_folder::read(dir) else {
         return;
     };
     for file in &folder.files {
-        if let Ok(bytes) = file.bytes()
+        if sunrise_world::json_folder::valid_resource_path(namespace, &file.name)
+            && let Ok(bytes) = file.bytes()
             && let Ok(value) = serde_json::from_slice(bytes)
         {
             out.insert(format!("{namespace}:{}", file.name), value);
@@ -32,8 +33,8 @@ fn load_dir(dir: &Path, namespace: &str, out: &mut HashMap<String, Value>) {
 }
 impl Definitions {
     fn load(root: &Path) -> Self {
-        let mut ints = HashMap::new();
-        let mut floats = HashMap::new();
+        let mut ints = BTreeMap::new();
+        let mut floats = BTreeMap::new();
         let mut namespaces: std::collections::BTreeSet<String> =
             std::iter::once("minecraft".to_owned())
                 .chain(sunrise_items::content_namespaces::namespaces(root))
@@ -87,14 +88,14 @@ impl Providers {
         Ok(Self(Arc::new(providers)))
     }
     /// The accepted definitions used by provider evaluation, never a resource-file inventory.
-    pub fn registry(&self, registry: &str) -> Option<&HashMap<String, Value>> {
+    pub fn registry(&self, registry: &str) -> Option<&BTreeMap<String, Value>> {
         match registry {
             "minecraft:context_int_provider" => Some(&self.0.ints),
             "minecraft:context_float_provider" => Some(&self.0.floats),
             _ => None,
         }
     }
-    fn eval(v: &Value, fast: bool, table: &HashMap<String, Value>, depth: u32) -> f64 {
+    fn eval(v: &Value, fast: bool, table: &BTreeMap<String, Value>, depth: u32) -> f64 {
         if depth > 16 {
             return 0.0;
         }
@@ -221,6 +222,7 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("value.json"), "17").unwrap();
         std::fs::write(folder.join("invalid.json"), "{").unwrap();
+        std::fs::write(folder.join("Invalid_Name.json"), "19").unwrap();
         let providers = Providers::load(&root);
         let table = providers
             .registry("minecraft:context_int_provider")
@@ -228,6 +230,7 @@ mod tests {
         assert_eq!(table.len(), 1);
         assert_eq!(table.get("example:sub/value"), Some(&json!(17)));
         assert!(!table.contains_key("example:sub/invalid"));
+        assert_eq!(providers.int_value(&json!("example:sub/Invalid_Name")), 0);
         assert_eq!(providers.int_value(&json!("example:sub/value")), 17);
         assert!(providers.registry("example:unknown").is_none());
         std::fs::remove_dir_all(root).unwrap();

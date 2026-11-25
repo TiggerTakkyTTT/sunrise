@@ -7,8 +7,8 @@ use std::hash::Hasher;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
-use sunrise_render_shaderpack::pack_atlas::{PackAtlas, game_inputs};
-use sunrise_shaders::{Macros, Pack, Post, PostProgram};
+use sunrise_render_shaderpack::pack_atlas::{TerrainDraws, deviceless_game_inputs};
+use sunrise_shaders::{Macros, Pack, Post, PostProgram, Properties};
 
 use crate::cases::DIMENSIONS;
 
@@ -104,7 +104,7 @@ pub fn load(dir: &Path, request: &Request) -> Observed {
         &folder,
         &properties,
         &macros,
-        &inputs(request.flat),
+        &inputs(&properties, request.flat),
     );
     let property_keys: BTreeMap<&str, &str> = properties
         .entries
@@ -301,11 +301,20 @@ fn custom_note_has_subject(note: &str, property_keys: &BTreeMap<&str, &str>) -> 
     })
 }
 
-/// The game's inputs with a terrain atlas of 1024 x 1024 pixels in 16-pixel sprites: the
-/// atlas's size only reaches the GLSL as constants. `flat` picks the game's flat draws.
-pub fn inputs(flat: bool) -> sunrise_shaders::GameInputs {
-    let terrain = PackAtlas::terrain_inputs_sized([1024, 1024], 64, 16, false, flat);
-    game_inputs(Some(terrain), flat, &[3, 4])
+/// The pack's `shaders.properties` and the macros its programs are read with, as the game reads
+/// them (`shader_packs.rs`): the standard macros and the renderer's at Mipmap Levels 4, then
+/// `shaders.properties` with the features it turns on.
+pub fn pack_macros(pack: &Pack) -> (Properties, Macros) {
+    let mut macros = Macros::standard();
+    macros.define_renderer(4);
+    let (properties, _) = sunrise_shaders::read_properties(pack, &mut macros);
+    (properties, macros)
+}
+
+/// The game's inputs without a device ([`deviceless_game_inputs`]): `flat` picks the game's flat
+/// draws, the others per-section ones as attributes alone.
+pub fn inputs(properties: &Properties, flat: bool) -> sunrise_shaders::GameInputs {
+    deviceless_game_inputs(properties.separate_ao(), TerrainDraws::flat(flat))
 }
 
 /// Every program of `post` with a slot, by slot.

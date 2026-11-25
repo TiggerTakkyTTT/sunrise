@@ -14,11 +14,16 @@ pub use jar::{
 };
 pub use runtime_files::{RUNTIME_DIR, RuntimeData, RuntimeTable};
 
-use mod_surface::uses::USES_FILE;
-use serde::{Deserialize, Serialize};
+use mod_surface::uses::{ManifestFacts, USES_FILE};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, Visitor, value::MapAccessDeserializer},
+};
 use std::{
+    collections::BTreeMap,
     fmt,
     io::Read,
+    marker::PhantomData,
     path::{Path, PathBuf},
 };
 
@@ -51,7 +56,7 @@ pub const RESERVED_IDS: [&str; 7] = [
 /// A mod's saved settings, shared by native mods and modpack overrides.
 pub const STORAGE_DIR: &str = ".sunrise-mod-data";
 
-/// Maximum manifest bytes accepted by package readers and developer tools.
+/// Maximum bytes in the complete manifest, including properties and dependency explanations.
 pub const MAX_MANIFEST: u64 = 32 << 20;
 
 /// The most source files (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/**`, the root notices) a
@@ -148,18 +153,18 @@ pub struct Manifest {
     #[serde(default)]
     pub served_by: Option<String>,
     /// Other native mods whose hooks must be available before this one.
-    #[serde(default)]
-    pub dependencies: std::collections::BTreeMap<String, Dependency>,
+    #[serde(default, deserialize_with = "policy_map")]
+    pub dependencies: BTreeMap<String, Dependency>,
     /// Mods this one breaks with: the game refuses to start while one of them is loaded at a
     /// version the rule matches (NeoForge's `DependencyType.INCOMPATIBLE`).
-    #[serde(default)]
-    pub incompatible: std::collections::BTreeMap<String, Rule>,
+    #[serde(default, deserialize_with = "policy_map")]
+    pub incompatible: BTreeMap<String, Rule>,
     /// Mods this one works badly with: they load, with a warning (`DependencyType.DISCOURAGED`).
-    #[serde(default)]
-    pub discouraged: std::collections::BTreeMap<String, Rule>,
+    #[serde(default, deserialize_with = "policy_map")]
+    pub discouraged: BTreeMap<String, Rule>,
     /// Mods whose hooks run after this one's when they are loaded, without depending on them
     /// (`Ordering.BEFORE`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "load_before_ids")]
     pub load_before: Vec<String>,
     /// Original Java jars, layered in list order below this mod's own files.
     #[serde(default)]
@@ -172,19 +177,18 @@ pub struct Manifest {
     /// Game internals used by this mod, fingerprinted against its pinned build.
     #[serde(default)]
     pub internals: Vec<Internal>,
-    /// Free-form values other mods read through `PackageInfo::property`.
+    /// Free-form scalar values other mods read through `PackageInfo::property`, with no limit
+    /// separate from the complete manifest's byte limit.
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Property>,
 }
 
-/// The most `[properties]` keys a manifest may declare.
-pub const MAX_PROPERTIES: usize = 64;
-/// The most `[properties]` bytes: keys and strings by length, 8 per number, 1 per boolean.
-pub const MAX_PROPERTY_BYTES: usize = 8 << 10;
-
-/// One `[properties]` value: a table or array is refused.
+/// One `[properties]` value: a string, integer, float or boolean.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "expected a string, integer, float or boolean for [properties]"
+)]
 pub enum Property {
     Boolean(bool),
     Integer(i64),
@@ -192,11 +196,17 @@ pub enum Property {
     String(String),
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
+/// A `[dependencies]` entry: a semver requirement or a detailed table.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Dependency {
     Version(semver::VersionReq),
     Detailed(DependencyDetails),
+}
+
+impl<'de> Deserialize<'de> for Dependency {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        version_or_details(deserializer, Self::Version, Self::Detailed)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -208,15 +218,23 @@ pub struct DependencyDetails {
     /// The installation on which this dependency declaration applies.
     #[serde(default = "both_sides")]
     pub side: Side,
-    /// A mod-provided explanation, at most 512 bytes.
+    /// A mod-provided explanation, bound only by the complete manifest's byte limit.
     #[serde(default)]
     pub reason: Option<String>,
     /// An HTTPS link with more information.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "DependencyDetails::deserialize_url")]
     pub url: Option<String>,
     /// Dispatch ordering only; `none` does not remove a code link requirement.
     #[serde(default)]
     pub order: mod_vocab::DependencyOrder,
+}
+
+impl DependencyDetails {
+    fn deserialize_url<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        deserialize_https_url(deserializer)
+    }
 }
 
 impl Dependency {
@@ -238,11 +256,16 @@ impl Dependency {
 
 /// An `[incompatible]` or `[discouraged]` entry: the versions of the other mod it matches
 /// (`"<2"`), or a table that also gives the player a reason and a link.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Rule {
     Version(semver::VersionReq),
     Detailed(RuleDetails),
+}
+
+impl<'de> Deserialize<'de> for Rule {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        version_or_details(deserializer, Self::Version, Self::Detailed)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -251,15 +274,162 @@ pub struct RuleDetails {
     /// Every version when left out.
     #[serde(default = "any_version")]
     pub version: semver::VersionReq,
-    /// Why, shown when the rule fails: at most 512 bytes.
+    /// Why, shown when the rule fails: bound only by the complete manifest's byte limit.
     #[serde(default)]
     pub reason: Option<String>,
     /// Where to read more, shown with the reason: an `https://` link.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "RuleDetails::deserialize_url")]
     pub url: Option<String>,
     /// Where the rule holds: both sides, or only the client or the dedicated server.
     #[serde(default = "both_sides")]
     pub side: Side,
+}
+
+impl RuleDetails {
+    fn deserialize_url<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        deserialize_https_url(deserializer)
+    }
+}
+
+fn deserialize_https_url<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    struct OptionalUrl;
+
+    impl<'de> Visitor<'de> for OptionalUrl {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an https:// URL string")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Self::Value, D::Error> {
+            let url = String::deserialize(deserializer)?;
+            if !url.starts_with("https://") {
+                return Err(de::Error::custom("url is not https://"));
+            }
+            Ok(Some(url))
+        }
+    }
+
+    deserializer.deserialize_option(OptionalUrl)
+}
+
+// Choose the form by its TOML type so mistakes in a detailed table retain their own errors.
+fn version_or_details<'de, D, T, V>(
+    deserializer: D,
+    version: fn(semver::VersionReq) -> V,
+    details: fn(T) -> V,
+) -> Result<V, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct VersionOrDetails<T, V> {
+        version: fn(semver::VersionReq) -> V,
+        details: fn(T) -> V,
+    }
+
+    impl<'de, T: Deserialize<'de>, V> Visitor<'de> for VersionOrDetails<T, V> {
+        type Value = V;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a semver requirement string or a dependency policy table")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<V, E> {
+            value.parse().map(self.version).map_err(E::custom)
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<V, M::Error> {
+            T::deserialize(MapAccessDeserializer::new(map)).map(self.details)
+        }
+    }
+
+    deserializer.deserialize_any(VersionOrDetails { version, details })
+}
+
+/// Validate an ID while Serde still has the key or array item's span.
+struct DependencyId;
+
+impl<'de> de::DeserializeSeed<'de> for DependencyId {
+    type Value = String;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<String, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl Visitor<'_> for DependencyId {
+    type Value = String;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a dependency mod ID")
+    }
+
+    fn visit_str<E: de::Error>(self, id: &str) -> Result<String, E> {
+        if !valid_mod_id(id) {
+            return Err(E::custom(format!("invalid dependency id {id:?}")));
+        }
+        Ok(id.to_owned())
+    }
+}
+
+fn policy_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct PolicyMap<T>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> Visitor<'de> for PolicyMap<T> {
+        type Value = BTreeMap<String, T>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a table keyed by dependency mod IDs")
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+            let mut entries = BTreeMap::new();
+            while let Some(id) = map.next_key_seed(DependencyId)? {
+                entries.insert(id, map.next_value()?);
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_map(PolicyMap(PhantomData))
+}
+
+fn load_before_ids<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    struct LoadBeforeIds;
+
+    impl<'de> Visitor<'de> for LoadBeforeIds {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a list of dependency mod IDs")
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut ids = Vec::new();
+            while let Some(id) = seq.next_element_seed(DependencyId)? {
+                ids.push(id);
+            }
+            Ok(ids)
+        }
+    }
+
+    deserializer.deserialize_seq(LoadBeforeIds)
 }
 
 fn both_sides() -> Side {
@@ -285,6 +455,7 @@ impl Rule {
     }
 }
 
+/// The build pins and supported `[[native.*]]` tables of a native mod.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Native {
@@ -305,9 +476,6 @@ pub struct Native {
     /// Accessor and invoker bridges, forwarded as horizon-mixins' `[[bridge]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bridge: Vec<mixin::Forwarded>,
-    /// State fields added to game types, forwarded as horizon-mixins' `[[state]]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub state: Vec<mixin::Forwarded>,
     /// Slots of published game loops, native only (`mod_api::loops`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub r#loop: Vec<loops::Loop>,
@@ -393,7 +561,8 @@ pub fn revision(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-pub(super) fn valid_mod_id(id: &str) -> bool {
+/// Whether an in-game mod ID has the manifest's syntax and is not a reserved device name.
+pub fn valid_mod_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && !reserved_mod_id(id)
         && id
@@ -436,24 +605,34 @@ impl Internal {
 /// an unknown field with the nearest valid key when one is a few edits away.
 fn toml_error(text: &str, e: &toml::de::Error) -> String {
     let message = e.message();
-    let line = e
-        .span()
-        .map(|span| text[..span.start.min(text.len())].matches('\n').count() + 1);
-    let at = line.map_or(String::new(), |line| format!(" (line {line})"));
+    let at = e.span().map_or_else(String::new, |span| {
+        let before = &text[..text.floor_char_boundary(span.start.min(text.len()))];
+        let line = before.bytes().filter(|&byte| byte == b'\n').count() + 1;
+        let column = before
+            .rsplit('\n')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .count()
+            + 1;
+        format!(" (line {line}, column {column})")
+    });
     let quoted = |after: &str| -> Option<String> {
         let rest = message.strip_prefix(after)?;
         Some(rest.split('`').next()?.to_owned())
     };
     if let Some(field) = quoted("missing field `") {
-        let example = match field.as_str() {
-            "id" => "id = \"my_mod\"".to_owned(),
-            "name" => "name = \"My Mod\"".to_owned(),
-            "version" => "version = \"0.1.0\"".to_owned(),
-            "game" => "game = \"26.3\"".to_owned(),
-            "sunrise" => "sunrise = \"<the 40-character game build commit>\"".to_owned(),
-            other => format!("{other} = …"),
+        let root_table = e.span().is_none_or(|span| span.is_empty());
+        let at = if root_table { "" } else { at.as_str() };
+        let example = match (root_table, field.as_str()) {
+            (true, "id") => "id = \"my_mod\"".to_owned(),
+            (true, "name") => "name = \"My Mod\"".to_owned(),
+            (true, "version") => "version = \"0.1.0\"".to_owned(),
+            (_, "game") => "game = \"26.3\"".to_owned(),
+            (_, "sunrise") => "sunrise = \"<the 40-character game build commit>\"".to_owned(),
+            (_, other) => format!("{other} = …"),
         };
-        return format!("{MANIFEST}: the field {field} is missing; add {example}");
+        return format!("{MANIFEST}: the field {field} is missing{at}; add {example}");
     }
     if let Some(field) = quoted("unknown field `") {
         let nearest = message
@@ -488,9 +667,137 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
+impl From<&Manifest> for ManifestFacts {
+    fn from(manifest: &Manifest) -> Self {
+        Self {
+            names: manifest
+                .capabilities
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
+    }
+}
+
+/// Stable diagnostic code for refused `[[native.state]]` declarations.
+pub const E_MIXIN_STATE_LAYOUT: &str = "E_MIXIN_STATE_LAYOUT";
+
+/// Why reading a manifest or package failed, carrying structured refusals so callers can inspect
+/// or localize them at their presentation boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PackageReadError {
+    /// A manifest declared `[[native.state]]` (or `[native] state = ...`), refused because adding
+    /// fields changes the prebuilt game's layout.
+    NativeStateLayout { mod_id: String, row: String },
+    /// Any other manifest or package refusal.
+    Message(String),
+}
+
+impl PackageReadError {
+    /// The stable diagnostic code when this refusal has one.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::NativeStateLayout { .. } => Some(E_MIXIN_STATE_LAYOUT),
+            Self::Message(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for PackageReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NativeStateLayout { mod_id, row } => write!(
+                f,
+                "{E_MIXIN_STATE_LAYOUT}: {mod_id}:{row}: native state changes the prebuilt game's layout; use an attachment instead"
+            ),
+            Self::Message(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for PackageReadError {}
+
+impl From<String> for PackageReadError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for PackageReadError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
 impl Manifest {
+    /// Read a manifest from an opened file or package entry, under the published byte limit.
+    pub fn read(reader: impl Read) -> Result<Self, String> {
+        Self::read_detailed(reader).map_err(|error| error.to_string())
+    }
+
+    /// Read a manifest entry, retaining structured refusals for the package reader.
+    fn read_detailed(reader: impl Read) -> Result<Self, PackageReadError> {
+        let mut bytes = Vec::new();
+        reader
+            .take(MAX_MANIFEST + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("{MANIFEST}: {error}"))?;
+        Self::check_size(bytes.len())?;
+        let text = std::str::from_utf8(&bytes).map_err(|error| format!("{MANIFEST}: {error}"))?;
+        Self::parse_toml(text)
+    }
+
+    /// Read the package manifest. Native state declarations are refused with
+    /// `E_MIXIN_STATE_LAYOUT`; they cannot enter the parsed native tables.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let m: Manifest = toml::from_str(text).map_err(|e| toml_error(text, &e))?;
+        Self::parse_detailed(text).map_err(|error| error.to_string())
+    }
+
+    /// Read the package manifest, preserving structured refusals (such as
+    /// [`PackageReadError::NativeStateLayout`]) for callers that inspect or localize them at
+    /// their presentation boundary.
+    pub fn parse_detailed(text: &str) -> Result<Self, PackageReadError> {
+        Self::check_size(text.len())?;
+        Self::parse_toml(text)
+    }
+
+    fn check_size(bytes: usize) -> Result<(), PackageReadError> {
+        if bytes as u64 > MAX_MANIFEST {
+            return Err(format!("{MANIFEST}: over {} MiB", MAX_MANIFEST >> 20).into());
+        }
+        Ok(())
+    }
+
+    fn parse_toml(text: &str) -> Result<Self, PackageReadError> {
+        let document = toml::de::DeTable::parse(text)
+            .map_err(|e| PackageReadError::Message(toml_error(text, &e)))?;
+        let root = document.get_ref();
+        if let Some(state) = root
+            .get("native")
+            .and_then(|native| native.get_ref().get("state"))
+        {
+            let mod_id = root
+                .get("id")
+                .and_then(|id| id.get_ref().as_str())
+                .unwrap_or(MANIFEST)
+                .to_owned();
+            let row = state
+                .get_ref()
+                .get(0usize)
+                .and_then(|row| row.get_ref().get("id"))
+                .and_then(|id| id.get_ref().as_str())
+                .unwrap_or("native.state")
+                .to_owned();
+            return Err(PackageReadError::NativeStateLayout { mod_id, row });
+        }
+        let m = Self::deserialize(toml::de::Deserializer::from(document))
+            .map_err(|e| PackageReadError::Message(toml_error(text, &e)))?;
+        m.validate().map_err(PackageReadError::Message)
+    }
+
+    fn validate(self) -> Result<Self, String> {
+        let m = self;
         Internal::check_all(&m.internals)?;
         if !m.internals.is_empty() && m.native.is_none() {
             return Err(format!("{MANIFEST}: internals need a [native] mod"));
@@ -556,33 +863,6 @@ impl Manifest {
                 ));
             }
         }
-        let rules = m.incompatible.iter().chain(&m.discouraged);
-        for id in m
-            .dependencies
-            .keys()
-            .chain(rules.clone().map(|(id, _)| id))
-            .chain(&m.load_before)
-        {
-            if !valid_mod_id(id) {
-                return Err(format!("{MANIFEST}: invalid dependency id {id:?}"));
-            }
-        }
-        let rule_notes = rules.map(|(id, rule)| {
-            let details = rule.details();
-            (id, details.reason, details.url)
-        });
-        let dependency_notes = m.dependencies.iter().map(|(id, dependency)| {
-            let details = dependency.details();
-            (id, details.reason, details.url)
-        });
-        for (id, reason, url) in rule_notes.chain(dependency_notes) {
-            if reason.as_ref().is_some_and(|reason| reason.len() > 512) {
-                return Err(format!("{MANIFEST}: rule for {id}: reason over 512 bytes"));
-            }
-            if url.as_ref().is_some_and(|url| !url.starts_with("https://")) {
-                return Err(format!("{MANIFEST}: rule for {id}: url is not https://"));
-            }
-        }
         mixin::Mixin::check_all(
             m.native
                 .as_ref()
@@ -627,12 +907,12 @@ impl Manifest {
                 .mixin
                 .iter()
                 .map(|entry| &entry.id)
-                .chain(native.bridge.iter().chain(&native.state).map(|row| &row.id))
+                .chain(native.bridge.iter().map(|row| &row.id))
                 .chain(native.r#loop.iter().map(|row| &row.id))
             {
                 if id.trim().is_empty() || !ids.insert(id) {
                     return Err(format!(
-                        "{MANIFEST}: empty or duplicate mixin, bridge, state or loop id"
+                        "{MANIFEST}: empty or duplicate mixin, bridge or loop id"
                     ));
                 }
             }
@@ -694,25 +974,6 @@ impl Manifest {
             return Err(format!(
                 "unsupported content API {}; this Sunrise reads {API}: delete the api line, the tool writes it",
                 m.api
-            ));
-        }
-        let property_bytes: usize = m
-            .properties
-            .iter()
-            .map(|(key, value)| {
-                key.len()
-                    + match value {
-                        Property::Boolean(_) => 1,
-                        Property::Integer(_) | Property::Float(_) => 8,
-                        Property::String(text) => text.len(),
-                    }
-            })
-            .sum();
-        if m.properties.len() > MAX_PROPERTIES || property_bytes > MAX_PROPERTY_BYTES {
-            return Err(format!(
-                "{MANIFEST}: [properties] holds at most {MAX_PROPERTIES} keys and {MAX_PROPERTY_BYTES} \
-                 bytes; this one has {} keys and {property_bytes} bytes",
-                m.properties.len()
             ));
         }
         if m.capabilities != [Capability::Registries] {
@@ -860,22 +1121,20 @@ impl Package {
     }
 
     /// Read a flat `.smod` or project folder, without executing native code.
+    /// A folder is read by its package paths, not by the names of unrelated files beside them.
     pub fn read(path: &Path) -> Result<Self, String> {
+        Self::read_detailed(path).map_err(|error| error.to_string())
+    }
+
+    /// Read a flat `.smod` or project folder, preserving structured refusals (such as
+    /// [`PackageReadError::NativeStateLayout`]) for callers that inspect or localize them at
+    /// their presentation boundary.
+    pub fn read_detailed(path: &Path) -> Result<Self, PackageReadError> {
         let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
         let mut icon = None;
         let mut has_cargo = false;
         let mut has_source = false;
-        let toml = if metadata.is_dir() {
-            for old in [
-                "sunrise-native.json",
-                "horizon-mixin.toml",
-                "native",
-                "rust",
-            ] {
-                if std::fs::symlink_metadata(path.join(old)).is_ok() {
-                    return Err(format!("{old}: unsupported package path"));
-                }
-            }
+        let manifest = if metadata.is_dir() {
             if std::fs::symlink_metadata(path.join("Cargo.toml")).is_ok() {
                 check_folder_file(path, "Cargo.toml")?;
                 has_cargo = true;
@@ -902,40 +1161,41 @@ impl Package {
                     icon = Some(crate::icon::Icon::parse(bytes)?);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("icon.png: {e}")),
+                Err(e) => return Err(format!("icon.png: {e}").into()),
             }
             check_folder_file(path, MANIFEST)?;
             for (name, _) in crate::content::folder_files(path)? {
                 check_folder_file(path, &name)?;
             }
-            let mut text = String::new();
-            std::fs::File::open(path.join(MANIFEST))
-                .map_err(|e| format!("{MANIFEST}: {e}"))?
-                .take(MAX_MANIFEST + 1)
-                .read_to_string(&mut text)
-                .map_err(|e| format!("{MANIFEST}: {e}"))?;
-            if text.len() as u64 > MAX_MANIFEST {
-                return Err(format!("{MANIFEST}: over {} MiB", MAX_MANIFEST >> 20));
-            }
-            text
+            let file =
+                std::fs::File::open(path.join(MANIFEST)).map_err(|e| format!("{MANIFEST}: {e}"))?;
+            Manifest::read_detailed(file)?
         } else {
             if !metadata.is_file() {
-                return Err(format!(
-                    "{}: unsupported file type in a content mod",
-                    path.display()
-                ));
+                return Err(
+                    format!("{}: unsupported file type in a content mod", path.display()).into(),
+                );
             }
             let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
             let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-            return Self::read_zip(&mut zip);
+            return Self::read_zip_detailed(&mut zip);
         };
-        let package = Self::from_parts(&toml, icon, has_cargo, has_source)?;
+        let package = Self::from_parts(manifest, icon, has_cargo, has_source)?;
         package.check_runtime_layout(&crate::content::runtime_folder_files(path)?)?;
         Ok(package)
     }
 
     /// Read and validate an archive, including all selected source and resource entries.
     pub fn read_zip<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Self, String> {
+        Self::read_zip_detailed(zip).map_err(|error| error.to_string())
+    }
+
+    /// Read and validate an archive, preserving structured refusals (such as
+    /// [`PackageReadError::NativeStateLayout`]) for callers that inspect or localize them at
+    /// their presentation boundary.
+    pub fn read_zip_detailed<R: Read + std::io::Seek>(
+        zip: &mut zip::ZipArchive<R>,
+    ) -> Result<Self, PackageReadError> {
         let mut icon = None;
         let mut has_cargo = false;
         let mut has_source = false;
@@ -947,14 +1207,7 @@ impl Package {
             let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             let mode = entry.unix_mode().unwrap_or_default();
             entries.push((name.clone(), entry.size(), entry.is_dir()));
-            let first = name.split('/').next().unwrap_or("");
-            if matches!(
-                first,
-                "sunrise-native.json" | "horizon-mixin.toml" | "native" | "rust"
-            ) {
-                return Err(format!("{name}: unsupported package path"));
-            }
-            has_source |= first == "src";
+            has_source |= name.split('/').next() == Some("src");
             if entry.is_dir() && matches!(mode & 0o170000, 0 | 0o040000) {
                 continue;
             }
@@ -965,17 +1218,17 @@ impl Package {
             {
                 // Any file type, but a file: its bytes are checked against `[runtime]` below.
                 if !matches!(mode & 0o170000, 0 | 0o100000) {
-                    return Err(format!("{name}: unsupported file type"));
+                    return Err(format!("{name}: unsupported file type").into());
                 }
                 runtime.push((below.to_owned(), entry.size()));
                 continue;
             }
             if name == USES_FILE && matches!(mode & 0o170000, 0 | 0o100000) {
                 if uses {
-                    return Err(format!("duplicate {USES_FILE}"));
+                    return Err(format!("duplicate {USES_FILE}").into());
                 }
                 if entry.size() > MAX_USES {
-                    return Err(format!("{USES_FILE} exceeds {} MiB", MAX_USES >> 20));
+                    return Err(format!("{USES_FILE} exceeds {} MiB", MAX_USES >> 20).into());
                 }
                 uses = true;
                 continue;
@@ -998,18 +1251,13 @@ impl Package {
                 icon = Some(crate::icon::Icon::parse(bytes)?);
             }
         }
-        let mut toml = String::new();
-        zip.by_name(MANIFEST)
-            .map_err(|e| format!("{MANIFEST}: {e}"))?
-            .take(MAX_MANIFEST + 1)
-            .read_to_string(&mut toml)
+        let entry = zip
+            .by_name(MANIFEST)
             .map_err(|e| format!("{MANIFEST}: {e}"))?;
-        if toml.len() as u64 > MAX_MANIFEST {
-            return Err(format!("{MANIFEST}: over {} MiB", MAX_MANIFEST >> 20));
-        }
-        let package = Self::from_parts(&toml, icon, has_cargo, has_source)?;
+        let package =
+            Self::from_parts(Manifest::read_detailed(entry)?, icon, has_cargo, has_source)?;
         if uses && !package.is_native() {
-            return Err(format!("a content mod has no code, so no {USES_FILE}"));
+            return Err(format!("a content mod has no code, so no {USES_FILE}").into());
         }
         package.check_runtime_layout(&runtime)?;
         if package.is_native() {
@@ -1025,7 +1273,7 @@ impl Package {
                     &name
                 };
                 if !plain_path(path) || !names.insert(name.clone()) {
-                    return Err(format!("invalid or duplicate package path: {name}"));
+                    return Err(format!("invalid or duplicate package path: {name}").into());
                 }
                 if !directory {
                     if name != MANIFEST
@@ -1036,7 +1284,7 @@ impl Package {
                         && !name.starts_with("data/")
                         && !source_file(&name)
                     {
-                        return Err(format!("unexpected package path: {name}"));
+                        return Err(format!("unexpected package path: {name}").into());
                     }
                     if source_file(&name) {
                         source_count += 1;
@@ -1047,7 +1295,9 @@ impl Package {
                         crate::content::check_path(&name)?;
                         crate::content::check_namespace(&name, &package.manifest)?;
                         if size > crate::content::MAX_FILE {
-                            return Err(format!("{name} exceeds the content file size limit"));
+                            return Err(
+                                format!("{name} exceeds the content file size limit").into()
+                            );
                         }
                         resource_count += 1;
                         resource_bytes = resource_bytes
@@ -1121,12 +1371,11 @@ impl Package {
     }
 
     fn from_parts(
-        text: &str,
+        manifest: Manifest,
         icon: Option<crate::icon::Icon>,
         has_cargo: bool,
         has_source: bool,
-    ) -> Result<Self, String> {
-        let manifest = Manifest::parse(text)?;
+    ) -> Result<Self, PackageReadError> {
         if has_cargo != manifest.native.is_some() || has_source != has_cargo {
             return Err("[native] and Rust source must be declared together".into());
         }
@@ -1805,18 +2054,49 @@ capabilities = ["registries"]
     }
 
     #[test]
-    fn properties_are_typed_and_bounded() {
-        let properties = |rows: &str| Manifest::parse(&format!("{EXAMPLE}[properties]\n{rows}"));
-        let manifest = properties("tier = 3\nratio = 0.5\nlabel = 'x'\nfast = true\n").unwrap();
+    fn properties_keep_their_scalar_types() {
+        let text =
+            format!("{EXAMPLE}[properties]\ntier = 3\nratio = 0.5\nlabel = 'x'\nfast = true\n");
+        let manifest = Manifest::parse(&text).unwrap();
         assert_eq!(manifest.properties["tier"], Property::Integer(3));
         assert_eq!(manifest.properties["ratio"], Property::Float(0.5));
         assert_eq!(manifest.properties["label"], Property::String("x".into()));
         assert_eq!(manifest.properties["fast"], Property::Boolean(true));
-        let many: String = (0..65).map(|i| format!("k{i} = {i}\n")).collect();
-        let error = properties(&many).unwrap_err();
-        assert!(error.contains("at most 64 keys"), "{error}");
-        assert!(properties(&format!("text = '{}'\n", "a".repeat(8 << 10))).is_err());
-        assert!(properties("list = [1]\n").is_err());
+    }
+
+    #[test]
+    fn property_values_and_key_count_share_the_whole_manifest_limit() {
+        let value = "a".repeat(9 * 1024);
+        let mut text = format!("{EXAMPLE}[properties]\ntext = '{value}'\n");
+        use std::fmt::Write;
+        for key in 0..65 {
+            writeln!(text, "k{key} = {key}").unwrap();
+        }
+        let manifest = Manifest::parse(&text).unwrap();
+        assert_eq!(manifest.properties.len(), 66);
+        assert_eq!(manifest.properties["k64"], Property::Integer(64));
+        assert_eq!(manifest.properties["text"], Property::String(value));
+    }
+
+    #[test]
+    fn manifest_parse_rejects_input_over_the_published_byte_limit() {
+        let text = " ".repeat(32 * 1024 * 1024 + 1);
+        assert_eq!(
+            Manifest::parse(&text).unwrap_err(),
+            "sunrise-mod.toml: over 32 MiB"
+        );
+    }
+
+    #[test]
+    fn manifest_read_refuses_oversized_input_before_decoding_utf8() {
+        let start = format!("{EXAMPLE}#");
+        let whitespace = std::io::repeat(b' ').take((32 << 20) - start.len() as u64);
+        // The bounded reader sees only the first byte of this character beyond the limit.
+        let reader = start.as_bytes().chain(whitespace).chain("é\n".as_bytes());
+        assert_eq!(
+            Manifest::read(reader).unwrap_err(),
+            "sunrise-mod.toml: over 32 MiB"
+        );
     }
 
     #[test]
@@ -2046,9 +2326,62 @@ capabilities = ["registries"]
         );
         std::fs::write(root.join(MANIFEST), format!("{EXAMPLE}{native}")).unwrap();
         assert_eq!(Package::read(&root).unwrap().manifest.id, "ruby");
-        std::fs::create_dir(root.join("native")).unwrap();
-        assert!(Package::read(&root).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_project_reader_ignores_unrelated_root_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::write(root.join(MANIFEST), EXAMPLE).unwrap();
+        for dir in ["native", "rust"] {
+            std::fs::create_dir(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("sunrise-native.json"), "not a manifest").unwrap();
+        std::fs::write(root.join("horizon-mixin.toml"), "not a manifest").unwrap();
+        let package = Package::read(root).unwrap();
+        assert_eq!(package.manifest.id, "ruby");
+        assert_eq!(
+            package
+                .directory_files(root)
+                .unwrap()
+                .into_keys()
+                .collect::<Vec<_>>(),
+            [MANIFEST],
+        );
+    }
+
+    #[test]
+    fn native_state_refusal_preserves_structured_code_and_arguments() {
+        let native = format!(
+            "[native]\ngame = '26.3'\nsunrise = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        for (expected_row, state) in [
+            (
+                "autosave",
+                "[[native.state]]\nid = 'autosave'\nowner = 'game::Game'\nfield = 'count'\ntype = 'u32'\n",
+            ),
+            ("native.state", "state = []\n"),
+        ] {
+            let text = format!("{EXAMPLE}{native}{state}");
+            let error = Manifest::parse_detailed(&text).unwrap_err();
+            assert_eq!(error.code(), Some(E_MIXIN_STATE_LAYOUT));
+            assert_eq!(
+                error,
+                PackageReadError::NativeStateLayout {
+                    mod_id: "ruby".into(),
+                    row: expected_row.into(),
+                }
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "{E_MIXIN_STATE_LAYOUT}: ruby:{expected_row}: native state changes the prebuilt game's layout; use an attachment instead"
+                )
+            );
+        }
     }
 
     #[test]

@@ -1967,23 +1967,24 @@ mod tests {
         let item = Item::Vanilla(Opt::AttackIndicator);
         let r = row(&mut ui, &s, item);
         let before = format!("{s:?}");
-        let outputs = ui.wheel(&mut s, SIZE, (r[0] + 4.0, r[1] + 4.0), -1.0);
+        let (handled, outputs) = ui.wheel(&mut s, SIZE, (r[0] + 4.0, r[1] + 4.0), -1.0);
+        assert!(handled);
         assert_eq!(format!("{s:?}"), before, "the hovered value stays put");
         assert!(outputs.is_empty());
 
         s.extras.wheel_cycles_settings = true;
         let r = row(&mut ui, &s, item);
         let before = format!("{s:?}");
-        let outputs = ui.wheel(&mut s, SIZE, (r[0] + 4.0, r[1] + 4.0), -1.0);
+        let (handled, outputs) = ui.wheel(&mut s, SIZE, (r[0] + 4.0, r[1] + 4.0), -1.0);
+        assert!(handled);
         assert_ne!(format!("{s:?}"), before, "the hovered value steps");
         assert_eq!(outputs, [CLICK, CHANGED]);
         // A tick box leaves it to scroll the list.
         let vsync = row(&mut ui, &s, Item::Vanilla(Opt::Vsync));
         let before = s.vsync;
-        assert!(
-            ui.wheel(&mut s, SIZE, (vsync[0] + 4.0, vsync[1] + 4.0), -1.0)
-                .is_empty()
-        );
+        let (handled, outputs) = ui.wheel(&mut s, SIZE, (vsync[0] + 4.0, vsync[1] + 4.0), -1.0);
+        assert!(handled);
+        assert!(outputs.is_empty());
         assert_eq!(s.vsync, before);
     }
 

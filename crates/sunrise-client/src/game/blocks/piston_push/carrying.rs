@@ -294,7 +294,6 @@ impl Game<'_> {
             }
             self.move_pushed_body(
                 MoverType::Carried,
-                None,
                 rider.target,
                 body,
                 carried,

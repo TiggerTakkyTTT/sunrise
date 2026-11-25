@@ -1,6 +1,7 @@
 //! Serde buffers internally tagged and untagged enums and replays from its own
-//! deserializer. Its callbacks do not expose the branches to `Probe`. Decode
-//! those paths with the real enum, then record the chosen form and its fields.
+//! deserializer; the manifest's custom policy visitors likewise accept shapes
+//! without naming variants. Decode those paths with the real enum, then record
+//! the chosen form and its fields.
 //! Keep the matches exhaustive so a new Rust variant needs a coverage rule.
 
 use crate::{Input, Probe};
@@ -9,7 +10,7 @@ use serde_json::Value;
 use sunrise_mod_package::{
     content::{
         GateSound, RandomTicks, StateProperty,
-        entity_sounds::{Mute, SoundOverride},
+        entity_sounds::{Mute, SoundOverride, StepOverride},
     },
     manifest::{Dependency, DependencyDetails, Property, Rule, RuleDetails},
 };
@@ -86,14 +87,22 @@ pub fn probe(probe: &Probe<'_>, value: &Value) -> serde_json::Result<()> {
                 }
             }
         }
-        "entity_type.sounds.ambient"
-        | "entity_type.sounds.hurt"
-        | "entity_type.sounds.death"
-        | "entity_type.sounds.step" => {
+        "entity_type.sounds.ambient" | "entity_type.sounds.hurt" | "entity_type.sounds.death" => {
             forms = &["none", "id"];
             match SoundOverride::deserialize(value)? {
                 SoundOverride::Mute(Mute::None) => "none",
                 SoundOverride::Id(_) => "id",
+            }
+        }
+        "entity_type.sounds.step" => {
+            forms = &["none", "id", "sound"];
+            match StepOverride::deserialize(value)? {
+                StepOverride::Mute(Mute::None) => "none",
+                StepOverride::Id(_) => "id",
+                StepOverride::Sound(_) => {
+                    buffered_fields(probe, value, "sound", &["sound", "volume", "pitch"]);
+                    "sound"
+                }
             }
         }
         "entity_type.passenger_attachments" => {

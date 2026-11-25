@@ -1,4 +1,3 @@
-#![cfg(test)]
 use crate::game::{
     execution_role::ExecutionRole,
     native_entity_refs::tests::{run_fresh_cases, with_game_role},
@@ -989,7 +988,7 @@ fn piston_push_reaction_position_state_opens_ticks_and_saves() {
                     .find(|(p, _)| *p == at)
                     .unwrap()
                     .1;
-                let saved = game.saved_moving_piston(at, &moving);
+                let saved = game.saved_moving_piston(at, &moving).unwrap();
                 game.world.block_entities.discard_carried(&to);
                 let mut extras = sunrise_client::save::ChunkExtras::default();
                 extras.block_entities.push(saved);

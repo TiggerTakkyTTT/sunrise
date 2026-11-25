@@ -1,13 +1,18 @@
 //! The read-only tables behind `BlockStates`: the facts a block state carries, read from the
 //! game's shared resources alone. `Game` and every level view hand out this one view, so a part
 //! reads the same facts in a level callback as through a `Host`.
-use super::{Game, PackResources, Resources, WorldRest, api_values::TryIntoEngine};
+use super::{
+    Game, PackResources, Resources, WorldRest,
+    api_values::TryIntoEngine,
+    native_world_read::{api_fluid_state, engine_fluid_kind},
+};
 use mod_api::{
     BlockKey, BlockSoundType, BlockState, BlockStateRange, FluidDefinition, FluidKey, FluidState,
     FluidStateError, FluidTypeProperties, StateConstraint, StateMatchError, StateProperties,
     WeatheringAge,
 };
 use sunrise_client::items::ItemStack;
+use sunrise_mod_package::content::FluidMeasures;
 use sunrise_world::fluid::FluidKind;
 use sunrise_world::level::{fluid_drip_particle, fluid_explosion_resistance, fluid_randomly_ticks};
 use sunrise_world::registry::BlockStateId;
@@ -33,6 +38,132 @@ impl<'a> BlockTables<'a> {
         self.res.items()
     }
 
+    /// `BlockState.getShape` with an empty getter at the origin (`EmptyBlockGetter.INSTANCE`,
+    /// `BlockPos.ZERO`): the state's outline boxes in block-local space. Empty for a state with
+    /// no outline (air); None for an unknown state.
+    pub(in crate::game) fn block_state_outline(
+        &self,
+        state: BlockStateId,
+    ) -> Result<Option<&'a [[f64; 6]]>, mod_api::LevelReadError> {
+        Ok(self
+            .pack
+            .assets
+            .registry
+            .state(state)
+            .map(|_| self.res.facts().get(state).outline.as_ref()))
+    }
+
+    /// `BlockState.getFluidState`: the fluid state `state` holds (water for a waterlogged state,
+    /// the empty fluid for most). None for an unknown state.
+    pub(in crate::game) fn block_state_fluid_state(
+        &self,
+        state: BlockStateId,
+    ) -> Result<Option<FluidState>, mod_api::LevelReadError> {
+        Ok(self
+            .pack
+            .assets
+            .registry
+            .state(state)
+            .and_then(|_| api_fluid_state(self.res.behaviours().fluid(state))))
+    }
+
+    /// `Fluid.isSame`: whether `fluid` and `other` are the same fluid family. False when either
+    /// key has no world fluid.
+    pub(in crate::game) fn fluid_is_same(
+        &self,
+        fluid: FluidKey,
+        other: FluidKey,
+    ) -> Result<bool, mod_api::LevelReadError> {
+        Ok(match (engine_fluid_kind(fluid), engine_fluid_kind(other)) {
+            (Some(fluid), Some(other)) => fluid.same_family(other),
+            _ => false,
+        })
+    }
+
+    /// `Fluid.getBucket`: the bucket item that picks `fluid` up. None for `minecraft:empty`,
+    /// for fluids without a bucket, for a named item no item has, and for one of the game's own
+    /// buckets that would not keep it (the empty bucket, another fluid's or a mob's).
+    pub(in crate::game) fn fluid_bucket(
+        &self,
+        fluid: FluidKey,
+    ) -> Result<Option<mod_api::ItemKey>, mod_api::LevelReadError> {
+        let Some(fluid_id) = mod_api::__private::fluid_id(fluid) else {
+            return Ok(None);
+        };
+        let kind = FluidKind::from_name(fluid_id);
+        let Some(item) = (match kind {
+            Some(FluidKind::Mod(mod_fluid) | FluidKind::ModFlowing(mod_fluid)) => {
+                sunrise_client::mod_content::fluid_bucket(&mod_fluid.get().id)
+                    .and_then(|bucket| mod_api::__private::item_key(&bucket))
+            }
+            Some(kind) => {
+                sunrise_world::level::fluid_bucket(kind).and_then(mod_api::__private::item_key)
+            }
+            None => sunrise_client::mod_content::fluid_bucket(fluid_id)
+                .and_then(|bucket| mod_api::__private::item_key(&bucket)),
+        }) else {
+            return Ok(None);
+        };
+        // The game's own buckets keep what they hold: filling the empty one, or one of another
+        // fluid or a mob, would lose this fluid.
+        let Some(id) = mod_api::__private::item_key_id(item) else {
+            return Ok(None);
+        };
+        Ok(match sunrise_client::items::bucket_contents(id) {
+            Some((sunrise_world::level::BucketContent::Fluid(held), ..))
+                if kind.is_some_and(|kind| kind.same_family(held)) =>
+            {
+                Some(item)
+            }
+            Some(_) => None,
+            None if id == "minecraft:bucket" => None,
+            None => Some(item),
+        })
+    }
+
+    /// `BucketItem.content`: the fluid a filled bucket the game registers holds.
+    pub(in crate::game) fn bucket_fluid(
+        &self,
+        bucket: mod_api::ItemKey,
+    ) -> Result<Option<FluidKey>, mod_api::LevelReadError> {
+        let Some(item) = mod_api::__private::item_key_id(bucket) else {
+            return Ok(None);
+        };
+        Ok(match sunrise_client::items::bucket_contents(item) {
+            Some((sunrise_world::level::BucketContent::Fluid(kind), ..)) => {
+                mod_api::__private::fluid_key(kind.name())
+            }
+            _ => None,
+        })
+    }
+
+    /// `Fluid.getPickupSound`: the sound event a bucket plays as it picks `fluid` up.
+    pub(in crate::game) fn fluid_pickup_sound(
+        &self,
+        fluid: FluidKey,
+    ) -> Result<Option<&'static str>, mod_api::LevelReadError> {
+        Ok(match engine_fluid_kind(fluid) {
+            Some(kind) => sunrise_world::level::fluid_pickup_sound(kind),
+            None => self
+                .fluid_bucket(fluid)?
+                .map(|_| "minecraft:item.bucket.fill"),
+        })
+    }
+
+    /// `BucketItem.playEmptySound` / NeoForge `FluidType.getSound(BUCKET_EMPTY)`:
+    /// the sound event a bucket plays as it empties `fluid`.
+    pub(in crate::game) fn fluid_empty_sound(
+        &self,
+        fluid: FluidKey,
+    ) -> Result<Option<&'static str>, mod_api::LevelReadError> {
+        Ok(match engine_fluid_kind(fluid) {
+            Some(kind) => sunrise_world::level::fluid_empty_sound(kind),
+            None => self
+                .fluid_bucket(fluid)?
+                .map(|_| "minecraft:item.bucket.empty"),
+        })
+    }
+
     /// The exported definition of a world fluid, or a tank-only identity.
     pub(in crate::game) fn fluid_state_definition(
         &self,
@@ -42,15 +173,15 @@ impl<'a> BlockTables<'a> {
         let Some(definition) = self.res.behaviours().fluid_definitions().get(id) else {
             return Some(FluidDefinition::TankOnly);
         };
-        let default = super::native_world_read::api_fluid_state(definition.default)?;
+        let default = api_fluid_state(definition.default)?;
         Some(FluidDefinition::World {
             default,
             properties: StateProperties::of(&definition.properties),
         })
     }
 
-    /// A registered fluid's type properties: its block's light and name for a world fluid,
-    /// vanilla's `FluidTags.WATER` and `FluidTags.LAVA` behaviours by its family. None for a
+    /// A registered fluid's type properties: its block's name for a world fluid, its
+    /// `FluidType` numbers (a mod's from its fluid file, block or none), vanilla's `FluidTags.WATER` and `FluidTags.LAVA` behaviours by its family. None for a
     /// key the registry doesn't hold.
     pub(in crate::game) fn fluid_type_properties(
         &self,
@@ -70,9 +201,10 @@ impl<'a> BlockTables<'a> {
         let kind = FluidKind::from_name(id);
         let water = kind.is_some_and(|kind| kind.same_family(FluidKind::Water));
         let lava = kind.is_some_and(|kind| kind.same_family(FluidKind::Lava));
+        let measures = fluid_measures(id, kind);
         Some(FluidTypeProperties {
             description_id,
-            light_level: block.map_or(0, |block| block.emission),
+            light_level: measures.light_level,
             fall_distance_modifier: match (water, lava) {
                 (true, _) => 0.0,
                 (_, true) => 0.5,
@@ -87,6 +219,9 @@ impl<'a> BlockTables<'a> {
             explosion_resistance: kind.map_or(0.0, fluid_explosion_resistance),
             randomly_ticks: kind.is_some_and(fluid_randomly_ticks),
             drip_particle: kind.and_then(fluid_drip_particle).map(str::to_owned),
+            temperature: measures.temperature,
+            density: measures.density,
+            viscosity: measures.viscosity,
         })
     }
 
@@ -233,9 +368,7 @@ impl<'a> BlockTables<'a> {
     /// stepping on, placing, hitting and falling on it. None for an unknown state.
     pub(in crate::game) fn block_state_sound(&self, state: BlockStateId) -> Option<BlockSoundType> {
         self.pack.assets.registry.state(state)?;
-        Some(sunrise_client::block_sounds::own(
-            &self.res.facts().get(state).sounds,
-        ))
+        Some(self.res.facts().get(state).sounds.clone())
     }
     /// `BlockState.hasBlockEntity()`. None for an unknown state.
     pub(in crate::game) fn block_state_has_block_entity(
@@ -264,10 +397,35 @@ impl<'a> BlockTables<'a> {
         self.pack.assets.registry.state(state)?;
         Some(self.res.facts().get(state).friction)
     }
+    /// `Block.getSpeedFactor()` of the state's block. None for an unknown state.
+    pub(in crate::game) fn block_state_speed_factor(&self, state: BlockStateId) -> Option<f32> {
+        self.pack.assets.registry.state(state)?;
+        let block = self.res.motion().blocks.get(state).ok()?;
+        Some(block.coefficients.speed_factor)
+    }
+    /// `Block.getJumpFactor()` of the state's block. None for an unknown state.
+    pub(in crate::game) fn block_state_jump_factor(&self, state: BlockStateId) -> Option<f32> {
+        self.pack.assets.registry.state(state)?;
+        let block = self.res.motion().blocks.get(state).ok()?;
+        Some(block.coefficients.jump_factor)
+    }
     /// `BlockState.isSolidRender()`. None for an unknown state.
     pub(in crate::game) fn block_state_is_solid_render(&self, state: BlockStateId) -> Option<bool> {
         self.pack.assets.registry.state(state)?;
         Some(self.res.facts().get(state).solid_render)
+    }
+    /// `BlockState.propagatesSkylightDown()`. None for an unknown state.
+    pub(in crate::game) fn block_state_propagates_skylight_down(
+        &self,
+        state: BlockStateId,
+    ) -> Option<bool> {
+        self.pack.assets.registry.state(state)?;
+        Some(self.res.facts().get(state).skylight_down)
+    }
+    /// `BlockState.isAir()`, the exported per-state flag. None for an unknown state.
+    pub(in crate::game) fn block_state_is_air(&self, state: BlockStateId) -> Option<bool> {
+        self.pack.assets.registry.state(state)?;
+        Some(self.res.behaviours().is_air(state))
     }
     /// `BlockState.isRedstoneConductor` for a state alone, not a block in a level.
     pub(in crate::game) fn block_state_is_redstone_conductor(
@@ -296,6 +454,7 @@ impl<'a> BlockTables<'a> {
             BlockClass::IronBars => data.is(Class::IronBars),
             BlockClass::StainedGlassPane => data.is(Class::StainedGlassPane),
             BlockClass::TrapDoor => data.is(Class::TrapDoor),
+            BlockClass::Bonemealable => data.implements(Interface::Bonemealable),
         }))
     }
     /// The immutable local ordinals of `block`, independent of current world ID order.
@@ -406,5 +565,33 @@ impl<'a> BlockTables<'a> {
             .transformers()
             .waxed(registry, registry.state(state)?)?;
         registry.resolve(&waxed).ok()
+    }
+}
+
+/// `FluidType.getTemperature`, `getDensity`, `getViscosity` and `getLightLevel` of the registered fluid `id`,
+/// whose world kind is `kind`. NeoForgeMod's EMPTY_TYPE and LAVA_TYPE state their own; water
+/// keeps `FluidType.Properties`' defaults, and a mod's fluid, flowing or not, what its source's
+/// file states.
+fn fluid_measures(id: &str, kind: Option<FluidKind>) -> FluidMeasures {
+    match kind {
+        Some(FluidKind::Empty) => FluidMeasures {
+            temperature: 0,
+            density: 0,
+            viscosity: 0,
+            light_level: 0,
+        },
+        Some(kind) if kind.same_family(FluidKind::Lava) => FluidMeasures {
+            temperature: 1300,
+            density: 3000,
+            viscosity: 6000,
+            light_level: 15,
+        },
+        Some(kind) if kind.same_family(FluidKind::Water) => FluidMeasures::default(),
+        _ => {
+            let source = kind
+                .and_then(FluidKind::mod_fluid)
+                .map_or(id, |fluid| fluid.get().id.as_str());
+            sunrise_client::mod_content::fluid_measures(source).unwrap_or_default()
+        }
     }
 }

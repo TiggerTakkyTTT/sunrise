@@ -600,16 +600,13 @@ class WorkflowTests(unittest.TestCase):
         for name in ("break-glass", *bound):
             with self.subTest(job=name):
                 self.assertIn("github.run_attempt == '1'", jobs[name]["if"])
-        for name in ("build", "musl-build", "musl-attach"):
-            with self.subTest(job=name):
-                self.assertIn("(needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1')",
-                              " ".join(jobs[name]["if"].split()) if name == "musl-attach" else f"({jobs[name]['if']})")
+        self.assertIn("(needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1')",
+                      " ".join(jobs["build"]["if"].split()))
         for name in ("exporters", "sign", "publish"):
             with self.subTest(job=name):
                 self.assertIn("break-glass", jobs[name]["needs"])
                 self.assertIn("(needs.break-glass.result == 'success' && github.run_attempt == '1')", jobs[name]["if"])
-        for name in ("build", "musl-build"):
-            self.assertIn("exporters", jobs[name]["needs"])
+        self.assertIn("exporters", jobs["build"]["needs"])
 
     def test_the_surface_is_checked_at_the_pick_and_again_before_the_tag(self):
         jobs = workflow("nightly-build.yml")["jobs"]
@@ -636,7 +633,7 @@ class WorkflowTests(unittest.TestCase):
         # checked with OpenSSL (nightly.py verify-sums); the only build is the parent's sunrise-stage, from the
         # parent's own tree (nightly.parent_stage).
         # The SDK's and the mod tool's signing, checking and publishing jobs build nothing either.
-        for file, names in (("nightly-build.yml", ("pick", "break-glass", "sign", "publish", "musl-attach")),
+        for file, names in (("nightly-build.yml", ("pick", "break-glass", "sign", "publish")),
                             ("sdk-publish.yml", ("sign", "publish")), ("mod-tool.yml", ("sign", "verify", "publish"))):
             jobs = workflow(file)["jobs"]
             for name in names:

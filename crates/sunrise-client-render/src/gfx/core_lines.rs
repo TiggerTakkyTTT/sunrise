@@ -2,9 +2,9 @@
 //! and `secondaryBlockOutline` under a high contrast one): an outline its fragment shader colours
 //! or animates. Without one the outline draws natively (`vs_line` in terrain.wgsl).
 
-use crate::core_shader::{CoreProgram, Glue};
 use crate::polytone_post::ExpressionUniform;
 use glam::Mat4;
+use sunrise_glsl::{Glue, Translated};
 
 /// The outline's edges (`pack_lines::layout`: start, end, ARGB colour and width per instance) as
 /// vanilla's lines: four vertices an edge, the start twice and the end twice, the side
@@ -26,6 +26,8 @@ pub(crate) const GLUE: Glue = Glue {
     // 26.3's ProjMat already has wgpu's reversed 0 to 1 depth (Projection: zZeroToOne).
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    fragment_finish: None,
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 pub(crate) struct CoreLines {
@@ -41,7 +43,7 @@ pub(crate) struct CoreLines {
 impl super::Renderer {
     /// The resource packs' `core/rendertype_lines` (`HudAtlas::lines_shader`, with the
     /// expression uniforms resolved for it) for the block outline, or the built-in one.
-    pub fn set_lines_shader(&mut self, program: Option<(&CoreProgram, &[ExpressionUniform])>) {
+    pub fn set_lines_shader(&mut self, program: Option<(&Translated, &[ExpressionUniform])>) {
         let format = self.output.frame.format;
         // A pack's GLSL writes vanilla's gamma: a frame of linear light keeps the built-in one.
         let program = program.filter(|_| !self.output.frame.linear_light);
@@ -57,7 +59,7 @@ impl CoreLines {
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        program: &CoreProgram,
+        program: &Translated,
         expressions: &[ExpressionUniform],
     ) -> Option<Self> {
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
@@ -295,14 +297,13 @@ mod tests {
     }
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        let (_, device, queue) = crate::gfx::test_gpu::optional_device()?;
+        Some((device, queue))
     }
 
     /// One edge across the middle of a 64 by 64 target, 4 pixels wide, blue (ARGB `ff0000ff`),
     /// at `GameTime` 0.25, drawn with `program`: the RGBA rows read back.
-    fn draw_edge(device: &wgpu::Device, queue: &wgpu::Queue, program: &CoreProgram) -> Vec<u8> {
+    fn draw_edge(device: &wgpu::Device, queue: &wgpu::Queue, program: &Translated) -> Vec<u8> {
         draw_edge_with(device, queue, program, &[], None)
     }
 
@@ -311,7 +312,7 @@ mod tests {
     fn draw_edge_with(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        program: &CoreProgram,
+        program: &Translated,
         expressions: &[ExpressionUniform],
         poly_globals: Option<&super::super::expression_blocks::PolyGlobalsBytes>,
     ) -> Vec<u8> {
@@ -555,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_pack_fragment_shader_colours_the_outline() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device() else {
@@ -569,6 +571,7 @@ mod tests {
     /// A pack's own include with a bigger block than vanilla's (an older `DynamicTransforms`)
     /// is not used, and the outline draws natively, rather than failing at the draw.
     #[test]
+    #[ignore = "daily"]
     fn a_pack_block_bigger_than_vanillas_falls_back() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = device() else {
@@ -586,6 +589,7 @@ mod tests {
     /// Vanilla's own `rendertype_lines.vsh` (from the prepared resources) under a pack's
     /// fragment shader.
     #[test]
+    #[ignore = "daily"]
     fn vanillas_lines_vertex_shader_takes_a_packs_fragment_shader() {
         let _gpu = crate::gfx::test_gpu::lock();
         let root = std::env::var_os("SUNRISE_RESOURCES")
@@ -595,15 +599,10 @@ mod tests {
                     .join("../../.local/sunrise-client")
                     .join(sunrise_core::VANILLA_VERSION)
             });
-        let Ok(vertex) = std::fs::read_to_string(
+        let vertex = std::fs::read_to_string(
             root.join("assets/minecraft/shaders/core/rendertype_lines.vsh"),
-        ) else {
-            eprintln!(
-                "skipping resource-backed lines shader check: {}",
-                root.display()
-            );
-            return;
-        };
+        )
+        .expect("prepared vanilla rendertype_lines.vsh");
         let include = |id: &str| {
             let (namespace, path) = id.split_once(':')?;
             std::fs::read_to_string(root.join(format!("assets/{namespace}/{path}"))).ok()

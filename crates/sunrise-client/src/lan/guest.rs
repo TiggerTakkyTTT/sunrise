@@ -18,6 +18,7 @@ use std::{
 use sunrise_core::geometry::{Aabb, Vec3};
 use sunrise_protocol::{
     attachment_sync,
+    entity_data::{Value, serializer},
     item::Stack,
     packets::{
         configuration::{ClientInformation, CustomPayload},
@@ -199,6 +200,10 @@ pub struct Guest {
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
     pub left_reason: String,
+    /// The connections listed ahead of this player when the hub took them out of its list
+    /// (`Hub::remove_guest`): the game lists them again in that place while the mods hear them
+    /// leave.
+    pub listed_behind: Vec<u32>,
     /// A validated movement report the mods have not ruled on yet (`player_move`).
     pub pending_move: Option<super::hub::PendingMove>,
     /// A disconnect was started ([`Guest::begin_disconnect`]); the connection closes when the
@@ -260,7 +265,7 @@ pub struct Guest {
     /// `Player.sleepCounter`, and the bed last told to the player itself.
     pub bed: Option<[i32; 3]>,
     pub woke_from: Option<[i32; 3]>,
-    pub sleep_timer: u32,
+    pub sleep_timer: i32,
     pub sent_bed: Option<[i32; 3]>,
     /// Where the player respawns (a bed's spot; `ServerPlayer.respawnConfig`),
     /// None for the world spawn.
@@ -333,6 +338,9 @@ pub struct Guest {
     pub load_timeout: u8,
     // Chunks.
     pub center: Option<(i32, i32)>,
+    /// View distance changed since `update_view` last ran, so the next view pass
+    /// must prune/requeue even when `center` stayed the same.
+    pub(super) view_dirty: bool,
     pub sent_chunks: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// The near chunks the mods were told this player watches
     /// (`lan::chunk_watch`); empty while no mod listens.
@@ -354,6 +362,9 @@ pub struct Guest {
     /// What the player's client last said about the age of its copy of the collider
     /// (`sunrise:carry_age`): the collider and the ticks. Used by the next report only.
     pub carry_hint: Option<(u32, u8)>,
+    /// `ServerPlayer.requestedDebugSubscriptions`: the `debug_subscription` registry ids the
+    /// client asked for, kept whoever the player is (the permission check comes when they are read).
+    pub debug_subscriptions: Vec<i32>,
     /// The tick a mod last displaced the player and how many ticks in a row it has (a development
     /// build warns at 20; a release build never reads it).
     pub displaced_streak: (u64, u32),
@@ -381,8 +392,12 @@ pub struct Guest {
     /// `Entity.tickCount` carried while the same player is between bodies.
     /// A respawn clears it; a teleport or level change restores it to the new body.
     pub carried_tick_count: Option<i32>,
+    /// The same ServerPlayer keeps its body yaw across level travel. A
+    /// replacement body, including one after death, starts at zero.
+    pub carried_body_yaw: Option<f32>,
     /// The accepted hit follows the same living body through a full teleport restore.
     pub carried_hit: Option<std::sync::Arc<crate::health::AcceptedHit>>,
+    pub carried_last_hurt_mob: Option<(u32, i32)>,
     /// The vehicle the player's file names (`ServerPlayer.saveParentVehicle`'s
     /// "RootVehicle"), for the ride to come back on the next login.
     pub saved_vehicle: Option<[i32; 4]>,
@@ -425,6 +440,8 @@ pub struct Guest {
     pub xp_level: i32,
     pub xp_progress: f32,
     pub xp_total: i32,
+    /// `Player.DATA_SCORE_ID`, independent of total experience.
+    pub score: i32,
     /// `Player.enchantmentSeed` (the enchanting table's offers).
     pub xp_seed: i32,
     /// Active status effects (`LivingEntity.activeEffects`).
@@ -448,6 +465,7 @@ pub struct Guest {
     /// Whether the entity tracker has sent the initial health metadata to this player.
     pub(super) sent_health_data: bool,
     pub sent_xp: Option<(f32, i32, i32)>,
+    pub(super) sent_score: i32,
     /// The air supply and absorption the player's client was last sent
     /// (Entity.DATA_AIR_SUPPLY_ID, Player.DATA_PLAYER_ABSORPTION_ID); their
     /// defaults until either changes.
@@ -525,9 +543,6 @@ pub struct Guest {
     /// saves neither its player file nor its records, since the other server has the
     /// player now.
     pub released: bool,
-    /// Root command names the mods took out of this player's command tree
-    /// (`native_player_commands_sent`); their tree is sent without them.
-    pub hidden_commands: Vec<String>,
     /// `Player.getAbilities`: set from the game mode when it changes, and
     /// written by server mods. Saved with the player.
     pub abilities: super::abilities::PlayerAbilities,
@@ -547,6 +562,8 @@ pub struct Guest {
     pub attachments: sunrise_mod_runtime::attachments::ResidentAttachments,
     /// `ServerPlayer.seenCredits`: the end poem has been shown.
     pub seen_credits: bool,
+    /// `ServerPlayer.wonGame`: the End poem is showing until PERFORM_RESPAWN.
+    pub won_game: bool,
     /// `ServerPlayer.postEffects` and `postEffectsDirty`.
     pub post_effects: Vec<String>,
     pub post_effects_dirty: bool,
@@ -565,10 +582,11 @@ pub struct Guest {
     pub advancements_sent: bool,
     pub advancements_visible: Vec<bool>,
     pub advancements_changed: std::collections::BTreeSet<usize>,
-    /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
+    /// The world board last published to this connection, excluding its private overlay.
     pub scoreboard: super::scoreboard::View,
     /// Whether the joining sync (`PlayerList.updateEntireScoreboard`) went out.
-    pub scoreboard_synced: bool,
+    pub(super) scoreboard_synced: bool,
+    pub(super) personal_sidebar: Option<Box<super::scoreboard::PersonalSidebar>>,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -591,13 +609,39 @@ impl Guest {
         self.ip_address = address.ip().to_string();
     }
 
+    /// `ServerPlayer.nextContainerCounter`: advance the window counter to `counter % 100 + 1`
+    /// and return it. Every open takes its window id from here.
+    pub fn next_container_counter(&mut self) -> i32 {
+        self.next_window = self.next_window % 100 + 1;
+        self.next_window
+    }
+
     /// Allocate the next protocol window and a non-reusable menu identity.
     pub fn next_menu_window(&mut self) -> i32 {
-        self.next_window = self.next_window % 100 + 1;
+        self.next_container_counter();
         self.menu_generation = menu_generation();
         self.inactive_inventory_carried = self.carried.take();
         self.open_carried_sent = Some((self.next_window, None));
         self.next_window
+    }
+
+    /// The wire window and its parked cursor, before a transactional replacement.
+    /// The guest's active cursor is saved with their inventory through its loan.
+    pub fn menu_before_replacement(&self) -> impl FnOnce(&mut Self) + use<> {
+        let menu = self.menu.clone();
+        let native = self.native_menu.clone();
+        let window = self.next_window;
+        let generation = self.menu_generation;
+        let inactive = self.inactive_inventory_carried.clone();
+        let sent = self.open_carried_sent.clone();
+        move |guest| {
+            guest.menu = menu;
+            guest.native_menu = native;
+            guest.next_window = window;
+            guest.menu_generation = generation;
+            guest.inactive_inventory_carried = inactive;
+            guest.open_carried_sent = sent;
+        }
     }
 
     /// Retire an open menu, returning its carried stack for `AbstractContainerMenu.removed`.
@@ -724,6 +768,13 @@ impl Guest {
     pub fn joined(&self) -> bool {
         self.placed || self.respawning
     }
+    /// Whether this guest's sender still accepts play packets. Does not require a placed body.
+    pub fn play_connection_open(&self) -> bool {
+        !self.disconnect_pending
+            && self.left_reason.is_empty()
+            && !self.sender.payload_transport().closed()
+            && self.sender.is_live()
+    }
     /// Whether the guest is online and placed in level `dimension`: one of the
     /// level's players (`ServerLevel.players`).
     pub fn placed_in(&self, dimension: &str) -> bool {
@@ -776,6 +827,7 @@ impl Guest {
             last_reported: (position, [0.0, 0.0]),
             center_sent: None,
             left_reason: String::new(),
+            listed_behind: Vec::new(),
             pending_move: None,
             disconnect_pending: false,
             uuid: j.uuid,
@@ -841,6 +893,7 @@ impl Guest {
             loading: true,
             load_timeout: CLIENT_LOADED_TIMEOUT,
             center: None,
+            view_dirty: false,
             sent_chunks: Default::default(),
             watched: Default::default(),
             chunk_queue: Vec::new(),
@@ -851,6 +904,7 @@ impl Guest {
             collision_exclusions: Default::default(),
             on_collider: None,
             carry_hint: None,
+            debug_subscriptions: Vec::new(),
             displaced_streak: (0, 0),
             carry_correction: None,
             carry_commit: None,
@@ -860,6 +914,8 @@ impl Guest {
             loaded_body: None,
             carried_attributes: None,
             carried_tick_count: None,
+            carried_body_yaw: None,
+            carried_last_hurt_mob: None,
             carried_hit: None,
             saved_vehicle: None,
             logs_kept: None,
@@ -883,6 +939,7 @@ impl Guest {
             xp_level: 0,
             xp_progress: 0.0,
             xp_total: 0,
+            score: 0,
             xp_seed: 0,
             effects: Default::default(),
             modified_effect_particles: None,
@@ -894,6 +951,7 @@ impl Guest {
             sent_health: None,
             sent_health_data: false,
             sent_xp: None,
+            sent_score: 0,
             sent_air: (300, 0.0),
             sent_frozen: 0,
             sent_shared: 0,
@@ -924,7 +982,6 @@ impl Guest {
             arrival_recentered: false,
             quiet_leave: false,
             released: false,
-            hidden_commands: Vec::new(),
             abilities: Default::default(),
             dimension: "minecraft:overworld".into(),
             menu: None,
@@ -934,6 +991,7 @@ impl Guest {
             saved: None,
             attachments: Default::default(),
             seen_credits: false,
+            won_game: false,
             post_effects: Vec::new(),
             post_effects_dirty: true,
             recipe_book: Default::default(),
@@ -945,6 +1003,7 @@ impl Guest {
             advancements_changed: Default::default(),
             scoreboard: Default::default(),
             scoreboard_synced: false,
+            personal_sidebar: None,
             recipes_unlocked: Vec::new(),
         }
     }
@@ -959,6 +1018,16 @@ impl Guest {
         match packet.try_encode() {
             Ok(body) => self.sender.send(body),
             Err(error) => eprintln!("[lan] send refused: {error}"),
+        }
+    }
+    /// Send `Player.DATA_SCORE_ID` when its synced value changes, including before a death screen.
+    pub fn sync_score(&mut self) {
+        if self.score != self.sent_score {
+            self.sent_score = self.score;
+            self.send(&play::Clientbound::SetEntityData(play::SetEntityData {
+                id: self.entity_id,
+                values: vec![(18, serializer::INT, Value::Int(self.score))],
+            }));
         }
     }
     /// Send the committed data that fits the negotiated blockless packet's index.
@@ -1141,8 +1210,11 @@ impl Guest {
     pub fn is_sunrise(&self) -> bool {
         self.brand == "sunrise"
     }
-    /// `Player.getDesiredPose`: sleeping, gliding, then the body's own pose
-    /// (swimming, crawling, crouching) once its server tick has run.
+    /// The pose the server shows of this player: in bed or gliding as its
+    /// client announced, before the body's own tick has taken it; else the
+    /// body's own pose (`Entity.getPose`) once its server tick has run
+    /// (swimming, crawling, crouching); else crouching while the shift key is
+    /// held and it isn't flying.
     pub fn pose(&self) -> Pose {
         if self.sleeping {
             Pose::Sleeping
@@ -1175,7 +1247,9 @@ impl Guest {
         self.travel_vetoed = false;
         if !restore_all {
             self.carried_tick_count = None;
+            self.carried_body_yaw = Some(0.0);
             self.carried_hit = None;
+            self.carried_last_hurt_mob = None;
             self.death_canceled = false;
             self.death_time = 0;
         }
@@ -1183,7 +1257,9 @@ impl Guest {
         self.carried_attributes = Some(m.carried_attributes(restore_all));
         if restore_all {
             self.carried_tick_count = Some(m.health.tick_count);
+            self.carried_body_yaw = Some(m.body_yaw);
             self.carried_hit = m.health.accepted_hit.take();
+            self.carried_last_hurt_mob = m.health.last_hurt_mob.take();
         } else {
             self.carried_tick_count = None;
         }
@@ -1799,6 +1875,24 @@ pub fn canonicalize_stack_patch(
     wire.removed.retain(|id| retain(*id, true));
 }
 
+/// Encode a live stack, dropping component patch rows already in its prototype.
+pub(super) fn resident_stack(
+    source: &ItemStack,
+    item_id: &dyn Fn(&str) -> i32,
+    sync: &super::data::SyncData,
+    items: &crate::items::Items,
+    projected: &dyn Fn(&Admitted),
+) -> Stack {
+    let mut wire = network_stack_projecting(
+        item_id,
+        &|registry, name| sync.id(registry, name),
+        source,
+        projected,
+    );
+    canonicalize_stack_patch(&mut wire, source, items, &sync.builtin);
+    wire
+}
+
 /// Convert a borrowed item template with the same component codecs as inventory slots.
 pub(super) fn network_stack(
     item_id: &dyn Fn(&str) -> i32,
@@ -2137,7 +2231,7 @@ fn network_stack_projecting(
                 sunrise_protocol::item::component::WRITABLE_BOOK_CONTENT,
                 sunrise_protocol::item::Component::WritableBook {
                     pages: d.writable_pages.clone(),
-                    filtered: Vec::new(),
+                    filtered: d.writable_filtered.clone(),
                 },
             ));
         }

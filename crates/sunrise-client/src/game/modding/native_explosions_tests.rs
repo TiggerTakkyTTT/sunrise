@@ -2,11 +2,13 @@
 //! calculator, effects and unbounded radius.
 #![cfg(test)]
 use crate::game::Game;
-use crate::game::native_entity_refs::tests::{bind_local_player, run_with_game_stack, with_game};
+use crate::game::native_entity_refs::tests::{
+    bind_local_player, run_fresh_cases, run_with_game_stack, with_game,
+};
 use mod_api::{
     EntityRef, ExplodeError, ExplosionCalculator, ExplosionDetonateEvent, ExplosionInteraction,
     ExplosionSettings, ExplosionStartEvent, Flow, HitHost, Hooks, LivingDamagePostEvent,
-    LivingDeathEvent, ModEntry, ServerHost,
+    LivingDeathEvent, LivingExperienceDropEvent, LootDropsEvent, ModEntry, ServerHost,
 };
 use std::sync::{Arc, Mutex};
 use sunrise_client::{
@@ -102,29 +104,65 @@ fn mob(game: &mut Game<'_>, id: u32, kind: &str, at: Vec3, health: f32) {
     game.mobs.push(mob);
 }
 
-/// What `living_death` heard: the dying entity, the damage type and the causing entity.
-type Deaths = Arc<Mutex<Vec<(u32, String, i32)>>>;
-struct Deathwatch(Deaths);
+#[derive(Default)]
+struct DeathObservations {
+    sources: Vec<(u32, String, i32)>,
+    loot_players: Vec<Option<u128>>,
+    experience: Vec<(u32, Option<u128>, i32)>,
+}
+struct Deathwatch(Arc<Mutex<DeathObservations>>);
 #[mod_api::__subscriptions]
 impl Hooks for Deathwatch {
     fn living_death(&self, _: &mut dyn ServerHost, event: &mut LivingDeathEvent<'_>) -> Flow {
         let source = event.source;
-        self.0
-            .lock()
-            .unwrap()
-            .push((event.entity, source.damage_type.into(), source.causing));
+        self.0.lock().unwrap().sources.push((
+            event.entity,
+            source.damage_type.into(),
+            source.causing,
+        ));
+        Flow::Continue
+    }
+
+    fn loot_drops(&self, _: &mut dyn ServerHost, event: &mut LootDropsEvent<'_, '_>) {
+        if event.context.entity == Some((41, "minecraft:zombie")) {
+            self.0
+                .lock()
+                .unwrap()
+                .loot_players
+                .push(event.context.player);
+        }
+    }
+
+    fn living_experience_drop(
+        &self,
+        _: &mut dyn ServerHost,
+        event: &mut LivingExperienceDropEvent,
+    ) -> Flow {
+        self.0.lock().unwrap().experience.push((
+            event.entity,
+            event.attacking_player,
+            event.original,
+        ));
         Flow::Continue
     }
 }
 
-/// A blast at (4.5, 80, 4.5) whose source `source` makes (it answers the
-/// source's entity id) kills a zombie on one health beside it: what the
-/// zombie's death names, and whether a player is credited with the kill
-/// (`last_hurt_by_player`). The player in place is entity 11, out of reach.
-fn kill(source: impl Fn(&mut Game<'_>) -> u32) -> (Vec<(u32, String, i32)>, bool) {
+/// A loaded arena with the player clear of the blast.
+fn credit_arena(game: &mut Game<'_>) {
+    floor(game);
+    assert!(game.run_command("difficulty normal"));
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(14.5, 80.0, 14.5)).unwrap());
+    bind_local_player(game, 11, 123);
+    game.set_mode_id(0);
+    game.next_entity = 100;
+    game.load_ticking_neighbourhood(0, 0);
+    game.update_chunk_tickets();
+}
+
+/// A blast kills a zombie on one health; check its source and rewards at the hit boundary.
+fn kill(source: fn(&mut Game<'_>) -> u32, (causing, damage_type, credited): (i32, &str, bool)) {
     crate::entry::install_client_hooks();
-    let deaths = Deaths::default();
-    let mut credited = false;
+    let deaths = Arc::new(Mutex::new(DeathObservations::default()));
     mod_platform::testing::with_mods(
         vec![ModEntry::new(
             "explode-deaths",
@@ -133,12 +171,7 @@ fn kill(source: impl Fn(&mut Game<'_>) -> u32) -> (Vec<(u32, String, i32)>, bool
         .into(),
         || {
             with_game(|game| {
-                floor(game);
-                game.player =
-                    Some(PlayerMotion::new(game.motion, Vec3::new(14.5, 80.0, 14.5)).unwrap());
-                bind_local_player(game, 11, 123);
-                game.set_mode_id(0);
-                game.next_entity = 100;
+                credit_arena(game);
                 mob(game, 41, "minecraft:zombie", Vec3::new(6.0, 80.0, 4.5), 1.0);
                 let id = source(game);
                 let source = game.entity(id);
@@ -151,25 +184,90 @@ fn kill(source: impl Fn(&mut Game<'_>) -> u32) -> (Vec<(u32, String, i32)>, bool
                     interaction: ExplosionInteraction::None,
                     settings: ExplosionSettings::default(),
                 };
+                let mob_kills = |game: &Game<'_>| game.stats.get("custom", "minecraft:mob_kills");
+                let expected_kills = mob_kills(game) + if credited { 1 } else { 0 };
+                let expected_credit = credited.then(|| game.entity(11).unwrap());
                 explode(game, blast, Ok(()));
-                credited = game.last_hurt_by_player.contains_key(&41);
+                let corpse = game.living(game.entity(41).unwrap()).unwrap();
+                assert_eq!(corpse.alive(game), Some(false));
+                assert_eq!(corpse.kill_credit(game), expected_credit);
+                assert_eq!(mob_kills(game), expected_kills);
+                // Monster's base reward for an adult zombie with no equipment.
+                let xp: i32 = game
+                    .orbs
+                    .iter()
+                    .map(|orb| orb.value * orb.count as i32)
+                    .sum();
+                assert_eq!(xp, if credited { 5 } else { 0 });
+
                 game.tick_creature_entities().unwrap();
+                assert_eq!(mob_kills(game), expected_kills);
+                assert_eq!(corpse.kill_credit(game), expected_credit);
+                // LivingEntity.tickDeath removes the body at tick 20, before
+                // the remembered player would expire on its own.
+                for _ in 1..20 {
+                    game.tick_creature_entities().unwrap();
+                }
+                assert!(game.entity(41).is_none());
+                assert!(!game.last_hurt_by_player.contains_key(&41));
+                assert_eq!(mob_kills(game), expected_kills);
             })
         },
     );
-    let deaths = deaths.lock().unwrap().clone();
-    (deaths, credited)
+    let deaths = deaths.lock().unwrap();
+    assert_eq!(deaths.sources, [(41, damage_type.to_owned(), causing)]);
+    assert_eq!(deaths.loot_players, [credited.then_some(123)]);
+    assert_eq!(
+        deaths.experience.as_slice(),
+        credited.then_some((41, Some(123), 5)).as_slice()
+    );
 }
 
-/// Asserts the source credit and damage type reported by [`kill`].
 fn kills(name: &str, source: fn(&mut Game<'_>) -> u32, expected: (i32, &'static str, bool)) {
-    crate::game::in_own_process(&format!("game::native_explosions_tests::{name}"), || {
-        run_with_game_stack(move || {
-            let (causing, damage_type, credited) = expected;
-            assert_eq!(
-                kill(source),
-                (vec![(41, damage_type.to_owned(), causing)], credited)
-            );
+    if run_fresh_cases(
+        &format!("game::native_explosions_tests::{name}"),
+        "SUNRISE_EXPLOSION_DEATH_CHILD",
+        &["blast"],
+    ) {
+        return;
+    }
+    run_with_game_stack(move || kill(source, expected));
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_player_hit_expires_on_a_living_mob_after_the_last_memory_tick() {
+    if run_fresh_cases(
+        "game::native_explosions_tests::a_player_hit_expires_on_a_living_mob_after_the_last_memory_tick",
+        "SUNRISE_MOB_CREDIT_EXPIRY_CHILD",
+        &["expiry"],
+    ) {
+        return;
+    }
+    run_with_game_stack(|| {
+        with_game(|game| {
+            credit_arena(game);
+            mob(game, 41, "minecraft:pig", Vec3::new(6.0, 80.0, 4.5), 10.0);
+            let living = game.living(game.entity(41).unwrap()).unwrap();
+            assert!(game.mob_hits_mob(
+                41,
+                1.0,
+                sunrise_client::mobs::Damage::player([14.5, 80.0, 14.5])
+            ));
+            assert_eq!(living.alive(game), Some(true));
+            assert_eq!(living.kill_credit(game).map(|killer| killer.id()), Some(11));
+
+            // LivingEntity.resolvePlayerResponsibleForDamage starts the timer at
+            // 100; baseTick keeps the reference when it decrements to zero.
+            for _ in 0..100 {
+                game.tick_creature_entities().unwrap();
+            }
+            assert_eq!(living.kill_credit(game).map(|killer| killer.id()), Some(11));
+            assert!(game.last_hurt_by_player.contains_key(&41));
+            game.tick_creature_entities().unwrap();
+            assert_eq!(living.alive(game), Some(true));
+            assert_eq!(living.kill_credit(game), None);
+            assert!(!game.last_hurt_by_player.contains_key(&41));
         });
     });
 }
@@ -987,5 +1085,23 @@ fn a_passed_calculator_replaces_a_wind_charges_entity_rules() {
         assert!(player < 20.0, "{player}");
         let (zombie, _) = pushes(game);
         assert_eq!(zombie, plain);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn unloaded_centre_and_far_coordinates_still_explode_without_loading_chunks() {
+    heard(move |game, heard| {
+        // Centre in unloaded chunk (-1, 0), beside chunk (0, 0)'s stone floor.
+        explode(game, Blast::at([-1.5, 79.5, 8.5], 4.0), Ok(()));
+        assert!(!game.world.chunks.contains_key(&(-1, 0)), "never loaded");
+        assert!(
+            stone(game) < 256,
+            "rays from an unloaded centre still reach adjacent loaded blocks"
+        );
+        // Centre past 30,000,000 is finite and accepted like ServerLevel.explode.
+        explode(game, Blast::at([4.0e7, 80.5, 8.5], 4.0), Ok(()));
+        let heard = heard.lock().unwrap();
+        assert_eq!((heard.starts.len(), heard.detonates), (2, 2));
     });
 }

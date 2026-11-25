@@ -16,6 +16,10 @@ const ABOUT: &str = "sunrise.pages.extras.tooltip";
 const MODS: &str = "sunrise.pages.mods";
 const ZOOM: &str = "sunrise.extras.zoom";
 const ZOOM_INSTALL: &str = "sunrise.extras.zoom_mod_install";
+/// The group and the row that open Sunrise's graphics screen: Video Settings... opens vanilla's.
+const GRAPHICS_GROUP: &str = "sunrise.extras.graphics.group";
+const GRAPHICS: &str = "sunrise.pages.open.sunrise_graphics";
+const GRAPHICS_ABOUT: &str = "sunrise.pages.graphics.tooltip";
 const MOD_SETTINGS: &str = "sunrise.mods.settings";
 /// Its descriptions run long, as tooltips they were: most need more than two lines.
 const NOTE_LINES: usize = 5;
@@ -33,6 +37,8 @@ pub(crate) enum ExtraRow {
     /// It isn't installed: where to get it. A note, not a button: Options > Mods already has the
     /// one way into the Mods page (`every_setting_and_page_is_reached_from_one_place`).
     ZoomInstall,
+    /// Sunrise's graphics screen (`Page::Graphics`).
+    Graphics,
     /// Row `.1` of the section registered page `.0` adds (`Place::Extras`).
     Added(usize, usize),
 }
@@ -216,10 +222,17 @@ impl Screen for ExtrasScreen {
         shell::stamp_of(&(&s.extras, &s.mods, added))
     }
     fn sheets(&self, s: &Settings) -> Vec<Sheet<(), ExtraRow>> {
-        let mut groups = vec![Group {
-            name: MODS,
-            rows: zoom_rows(s),
-        }];
+        let open = Row::new(ExtraRow::Graphics, lang::get(GRAPHICS), Value::Press);
+        let mut groups = vec![
+            Group {
+                name: GRAPHICS_GROUP,
+                rows: vec![open.about(lang::get(GRAPHICS_ABOUT))],
+            },
+            Group {
+                name: MODS,
+                rows: zoom_rows(s),
+            },
+        ];
         for row in extras::rows() {
             match row {
                 Err(name) => groups.push(Group {
@@ -252,6 +265,10 @@ impl Screen for ExtrasScreen {
                 Output::Event(Event::NativeSettings(i)),
             ],
             ExtraRow::ZoomInstall => Vec::new(),
+            ExtraRow::Graphics => vec![
+                Output::Event(Event::ButtonClick),
+                Output::Push(Page::Graphics),
+            ],
             ExtraRow::Added(page, r) => {
                 act(page, r, if back { Act::PressBack } else { Act::Press })
             }
@@ -448,8 +465,8 @@ mod tests {
         crate::widgets::end_frame(1);
         let size = (batch.width, batch.height);
         let cols = Columns::of(size.0, size.1).with_note_lines(NOTE_LINES);
-        // The Mods group's note can't take the focus: the first item can.
-        let first = ExtraRow::Item(Item::OwnNameTag);
+        // The Sunrise Graphics row, over the Mods group's note, takes the focus first.
+        let first = ExtraRow::Graphics;
         let at = shell.point_at(&s, size, first);
         let [x, y, w, h] = crate::widgets::linked_step(cols.search(), true).unwrap();
         assert!(ui::hovered(at, x, y, w, h));

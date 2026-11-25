@@ -177,7 +177,7 @@ impl Game<'_> {
         let Err(error) = self.route_viewed_levels(data) else {
             return Ok(());
         };
-        self.refuse_play_payload(error)
+        self.refuse_remote_input(error)
     }
 
     /// Route the scoped variant of a completed vanilla-first group bundle.

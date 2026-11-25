@@ -93,7 +93,7 @@ def expansion_violations(files: dict[str, str], source_root: Path = SOURCE) -> l
     generated = {
         'mod_api_generated_host.rs', 'mod_api_generated.rs', 'mod_api_exports_root.rs',
         'wire_generated.rs', 'parts_modules.rs', 'mod_api_host_areas.rs',
-        'capability_providers_generated.rs', 'mod_api_exports_private_reload.rs',
+        'builtin_capability_keys.rs', 'mod_api_exports_private_reload.rs',
         'mod_api_exports_private_built.rs', 'mod_api_exports_private_game.rs',
         'mod_api_exports_private.rs',
     }

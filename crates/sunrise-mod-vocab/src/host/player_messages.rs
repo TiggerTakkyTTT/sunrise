@@ -1,4 +1,4 @@
-//! The `player_messages` area: chat, action bar, tab list, sounds and maps sent to one player. Host method declarations; access defaults and game forwarders are generated.
+//! The `player_messages` area: chat, action bar, tab list, sidebar, sounds and maps sent to one player. Host method declarations; access defaults and game forwarders are generated.
 #![allow(unused_variables)]
 use crate::*;
 /// The handles' writes of the `player_messages` area, implemented by the game and reached through [`BackendMut`].
@@ -31,6 +31,24 @@ pub trait PlayerMessagesBackendMut {
         footer: &Text,
     ) -> Result<bool, TextFormError>;
     /// Side: server.
+    /// Replaces this player's personal sidebar, or clears it with `None`. Only their client
+    /// holds it, until cleared or disconnected. It takes the ordinary sidebar slot and the
+    /// slot for their current team color, if any. Later world display packets take back the
+    /// slots they write; a score update does not. On clear, the world display returns in the
+    /// team slots and, if still held by the personal sidebar, the ordinary slot.
+    ///
+    /// Returns `Ok(false)` for a stale or offline player without checking the texts. The title
+    /// and both fields of the first 15 lines must fit the trusted scoreboard text codec. If
+    /// any is refused, the previous sidebar stays unchanged. Clearing an online player's
+    /// already-empty personal sidebar returns `Ok(true)` without sending anything. In a
+    /// transaction, an accepted change is sent only on commit, if the connection is still live.
+    #[forward_api_inputs]
+    fn player_set_sidebar(
+        &mut self,
+        player: PlayerRef,
+        sidebar: Option<Sidebar>,
+    ) -> Result<bool, TextFormError>;
+    /// Side: server.
     /// Sends the player `uuid` the whole picture of map `map_id`: 128 x 128
     /// colours (`MapColor` ids times 4 plus the shade, row by row), scale 0,
     /// locked, no decorations, as `ClientboundMapItemDataPacket`. A filled
@@ -43,7 +61,10 @@ pub trait PlayerMessagesBackendMut {
     /// Side: server.
     /// `StopSoundCommand` for one player: their client stops the playing
     /// sounds that match `sound` (an event id) and `source`; `None` matches
-    /// any. True means sent.
+    /// any. `true` means the request was accepted, not that a client received or played it.
+    /// Inside an open transaction, delivery waits for the owning level's outermost commit in
+    /// journal order. A deferred request is discarded on abort or if the player no longer
+    /// resolves at commit.
     fn player_stop_sound(
         &mut self,
         player: PlayerRef,
@@ -53,8 +74,11 @@ pub trait PlayerMessagesBackendMut {
     /// Side: server.
     /// `PlaySoundCommand` for one player: plays sound event `sound` at the
     /// player, for them only, under `source`'s volume slider. The seed is the
-    /// level random's `nextLong`, drawn once per call. True means sent, not
-    /// heard.
+    /// request level's random `nextLong`, drawn at the call outside a transaction or when
+    /// published at the owning level's outermost commit. `true` means the request was accepted,
+    /// not that a client received or played it. A deferred request is discarded on abort or if
+    /// the player no longer resolves at commit, without drawing a seed.
+    /// Registered events go by ID; other valid keys go by name, with volume and pitch as supplied.
     fn player_play_sound(
         &mut self,
         player: PlayerRef,

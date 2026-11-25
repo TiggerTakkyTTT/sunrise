@@ -10,6 +10,7 @@ use std::io::{Cursor, Write};
 /// written and reads 0 (Iris 1.11.7). colortex10 is only blended onto (`ONE ONE`), 0.125 a frame:
 /// it grows by 0.125 every frame (Iris 1.11.7 adds once per frame).
 #[test]
+#[ignore = "daily"]
 fn a_buffer_that_is_not_cleared_starts_the_frame_with_its_last_write() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

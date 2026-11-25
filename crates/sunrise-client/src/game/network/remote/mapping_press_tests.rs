@@ -76,7 +76,7 @@ fn with_callback_game(
     .into();
     mod_platform::testing::with_mods(mods, || {
         with_interaction_game(true, |game| {
-            game.set_mode_id(0);
+            game.set_local_mode(sunrise_client::command::args::GameMode::Survival);
             game.title = None;
             game.screen = Screen::Playing;
             game.remote.as_mut().unwrap().loaded_sent = true;
@@ -215,7 +215,7 @@ fn clicking_attack_on_nothing_punches_and_waits_out_the_miss_cooldown() {
         assert_eq!(game.clicks.miss_time, 8);
 
         game.clicks.miss_time = 0;
-        game.set_mode_id(1);
+        game.set_local_mode(sunrise_client::command::args::GameMode::Creative);
         assert_eq!(attack_mapping.click(game), Ok(()));
         game.remote_handle_input();
         assert_eq!(sent(packets), ["minecraft:punch"]);
@@ -389,7 +389,7 @@ fn opening_a_screen_releases_mod_holds() {
 #[ignore = "daily"]
 fn a_creative_drop_sends_no_creative_slot() {
     with_pressing_game(|game, packets, _| {
-        game.set_mode_id(1);
+        game.set_local_mode(sunrise_client::command::args::GameMode::Creative);
         game.forced_hit = None;
         game.inventory[game.selected] = Some(ItemStack::new("minecraft:stone", 16));
         // The setup's stack is the server's as well.
@@ -424,7 +424,7 @@ fn a_creative_drop_sends_no_creative_slot() {
 #[ignore = "daily"]
 fn a_toolbar_load_goes_out_before_a_drop_in_its_tick() {
     with_pressing_game(|game, packets, _| {
-        game.set_mode_id(1);
+        game.set_local_mode(sunrise_client::command::args::GameMode::Creative);
         game.forced_hit = None;
         game.inventory[game.selected] = Some(ItemStack::new("minecraft:stone", 16));
         game.remote_synced();

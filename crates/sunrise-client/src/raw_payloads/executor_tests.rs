@@ -20,6 +20,7 @@ const CHANNEL: &str = "executor_probe:message";
 enum Mode {
     Success,
     Pressure,
+    PressureWithPanickingDrop,
     Error,
     Panic,
     Cancel,
@@ -32,11 +33,14 @@ struct Probe {
     receiver: Mutex<Option<Consumer<NetEvent>>>,
     transport: Mutex<Weak<Transport>>,
     drops: Arc<AtomicUsize>,
+    attributed_drops: Arc<AtomicUsize>,
     calls: AtomicUsize,
 }
 struct ReentrantWork {
     epoch: Arc<connection::Epoch>,
     drops: Arc<AtomicUsize>,
+    attributed_drops: Arc<AtomicUsize>,
+    panic_on_drop: bool,
 }
 impl PayloadWork for ReentrantWork {
     fn run(&self, _: &mut dyn IPayloadContext) -> Result<(), String> {
@@ -49,6 +53,14 @@ impl Drop for ReentrantWork {
         // completion assertion below fails without joining the stuck thread.
         let _ = self.epoch.with_active(|| ());
         self.drops.fetch_add(1, Ordering::SeqCst);
+        if mod_api::content::crash::current_native_call()
+            .is_some_and(|call| call.id == "executor_probe" && call.hook == "payload work drop")
+        {
+            self.attributed_drops.fetch_add(1, Ordering::SeqCst);
+        }
+        if self.panic_on_drop {
+            panic!("deliberate work destructor panic");
+        }
     }
 }
 impl IPayloadHandler for Probe {
@@ -62,13 +74,21 @@ impl IPayloadHandler for Probe {
             Err(PayloadContextError::WrongThread)
         ));
         let transport = self.transport.lock().unwrap().upgrade().unwrap();
-        for _ in 0..2 {
+        let pressure = matches!(self.mode, Mode::Pressure | Mode::PressureWithPanickingDrop);
+        let work_count = if self.mode == Mode::PressureWithPanickingDrop {
+            1
+        } else {
+            2
+        };
+        for _ in 0..work_count {
             let before = self.events.stats().reserved_bytes;
             let result = ctx.enqueue_work(Arc::new(ReentrantWork {
                 epoch: transport.epoch().unwrap(),
                 drops: self.drops.clone(),
+                attributed_drops: self.attributed_drops.clone(),
+                panic_on_drop: matches!(self.mode, Mode::Panic | Mode::PressureWithPanickingDrop),
             }));
-            if self.mode == Mode::Pressure {
+            if pressure {
                 assert_eq!(result, Err(PayloadContextError::Backpressure));
                 assert_eq!(self.events.stats().reserved_bytes, before);
             } else {
@@ -125,7 +145,7 @@ fn with_case(
     bytes: usize,
     run: impl FnOnce(Arc<Probe>, Incoming, Endpoint, Box<dyn Fn() -> Vec<Vec<u8>>>),
 ) {
-    let (events, receiver) = if mode == Mode::Pressure {
+    let (events, receiver) = if matches!(mode, Mode::Pressure | Mode::PressureWithPanickingDrop) {
         crate::lan::event_channel_with_capacity(
             sunrise_mod_runtime::byte_channel::message_overhead::<NetEvent>(),
         )
@@ -138,6 +158,7 @@ fn with_case(
         receiver: Mutex::new(Some(receiver)),
         transport: Mutex::new(Weak::new()),
         drops: Arc::default(),
+        attributed_drops: Arc::default(),
         calls: AtomicUsize::new(0),
     });
     mod_platform::testing::with_mods(
@@ -239,6 +260,30 @@ fn provider_pressure_refuses_work_before_acceptance() {
 }
 
 #[test]
+fn a_panicking_work_destructor_on_refused_enqueue_quarantines_only_its_registration() {
+    with_case(
+        Mode::PressureWithPanickingDrop,
+        1,
+        |probe, incoming, endpoint, out| {
+            let original = Arc::downgrade(&incoming.lease);
+            let receiver = incoming.receiver.clone();
+            dispatch(incoming, endpoint.clone(), queue(&probe, &endpoint));
+            assert_eq!(
+                probe.calls.load(Ordering::SeqCst),
+                1,
+                "the handler ignored the refusal and staged a reply"
+            );
+            assert_eq!(probe.attributed_drops.load(Ordering::SeqCst), 1);
+            assert!(receiver.poisoned());
+            assert!(!endpoint.transport().closed());
+            assert!(original.upgrade().is_none());
+            assert_eq!(probe.events.stats().reserved_bytes, 0);
+            assert!(out().is_empty());
+        },
+    );
+}
+
+#[test]
 fn handler_error_or_epoch_cancellation_publishes_no_staged_work_or_replies() {
     for mode in [Mode::Error, Mode::Panic, Mode::Cancel, Mode::Reconfigure] {
         with_case(mode, 1, |probe, incoming, endpoint, out| {
@@ -247,6 +292,7 @@ fn handler_error_or_epoch_cancellation_publishes_no_staged_work_or_replies() {
             assert!(original.upgrade().is_none());
             assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
             assert_eq!(probe.drops.load(Ordering::SeqCst), 2);
+            assert_eq!(probe.attributed_drops.load(Ordering::SeqCst), 2);
             assert_eq!(probe.events.stats().reserved_bytes, 0);
             assert_eq!(probe.events.stats().queued_items, 0);
             assert_eq!(reply_count(&*out), 0);

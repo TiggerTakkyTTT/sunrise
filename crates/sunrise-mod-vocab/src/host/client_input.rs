@@ -15,7 +15,7 @@ pub trait ClientInputClientHost {
     /// [`ModKeyRefusal::Unavailable`] when there is no client backend in this host.
     fn mod_key_mapping(&self, owner: &str, id: &str) -> Result<ModKeyMappingRef, ModKeyRefusal>;
     /// Side: client.
-    /// Playing, with nothing over the world: keys and zoom apply.
+    /// Playing, with nothing over the world: in-game keys and camera effects apply.
     fn playing(&self) -> bool;
     /// Side: client.
     /// Resolve a vanilla mapping name such as `key.jump`, not a binding name such as

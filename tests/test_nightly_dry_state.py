@@ -70,7 +70,7 @@ class DryStateTests(unittest.TestCase):
     def test_cleanup_is_independent_of_pick_outputs_and_fails_on_api_errors(self):
         workflow = (ROOT / ".github/workflows/nightly-build.yml").read_text()
         job = workflow.split("\n  cleanup-dry-run:\n", 1)[1].split("\n  answer:", 1)[0]
-        self.assertIn("needs: [pick, build, sign, publish, musl-build]", job)
+        self.assertIn("needs: [pick, build, sign, publish]", job)
         # Every dispatch: a real run has no dry-run ref, and a case variant of a publishing ref is a dry run too.
         self.assertIn("if: always() && github.event_name == 'workflow_dispatch'\n", job)
         script = textwrap.dedent(job.split("        run: |\n", 1)[1])

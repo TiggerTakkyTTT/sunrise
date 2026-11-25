@@ -45,6 +45,7 @@ pub fn main_with(
             install_packages: mod_api::__private::install_packages,
             install_registration_data: mod_api::__private::install_registration_data,
             install_parts: mod_api::__private::install_parts,
+            with_registration_open: mod_api::__private::with_registration_open,
             profiler_is_enabled: mod_api::__private::profiler::is_enabled,
             profiler_start: mod_api::__private::profiler::start,
             profiler_stop: mod_api::__private::profiler::stop,

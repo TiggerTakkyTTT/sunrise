@@ -1,4 +1,4 @@
-sunrise-client game::client_executor::tests::closing_window_during_pending_save_discards_pending_and_late_client_tasks lib daily resources
+sunrise-client game::client_executor::tests::closing_window_during_pending_save_discards_pending_and_late_client_tasks lib daily child-process
 sunrise-client game::client_executor::tests::executor_drains_work_published_while_a_packet_disconnects lib daily resources
 sunrise-client game::client_executor::tests::executor_panic_reports_and_disables_only_the_failed_owner_without_undoing_live_placement lib daily resources
 sunrise-client game::client_executor::tests::title_quit_discards_pending_and_late_client_tasks lib daily resources

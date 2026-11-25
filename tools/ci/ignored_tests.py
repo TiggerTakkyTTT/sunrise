@@ -26,8 +26,8 @@ the runner has a Vulkan driver (an ICD file), and must pass there.
 
 A row marked `daily` (`PACKAGE TEST TARGET daily REASON`, in `daily-<package>.txt`) is a test moved out of
 `verify` into the daily run with `#[ignore = "daily"]` (tools/ci/move_to_daily.py): not a known failure, it must
-pass, and its row must name a test that still runs. A package's shard runs the daily rows of the targets it
-already runs (its library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
+pass, and its row must name a test that still runs. Daily shards and `daily-rows` require an adapter for GPU
+fixtures, including rows with reason `gpu`. A package's shard runs the daily rows of the targets it already runs (its library; every target for the packages in INTEGRATION_TESTS); the shard `daily-rows`
 (tools/ci/ignored_shards.py) runs every other daily row: the root workspace's tests are built once with verify's command
 (WORKSPACE_TEST_BUILD) and each package's test executables then run with `--ignored --exact TEST...`; a package that
 build didn't make, or one in OWN_BUILD, runs `cargo test -p PACKAGE TARGET... -- --ignored --exact TEST...`, from the
@@ -85,6 +85,8 @@ POLICY_PATH = "tools/ci/ignored-tests"  # as messages name it
 # The single list these files replaced: a file there again fails every reader, naming the folder.
 RETIRED = Path(__file__).with_name("ignored-tests-known-failures.txt")
 RESULT = re.compile(r"^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED)$")
+# libtest's header over a failed test's captured output.
+CAPTURE = re.compile(r"^---- (\S+) stdout ----$")
 SUMMARY = re.compile(r"^test result: \S+\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured;")
 # Cargo's line as a test executable starts: `Running unittests src/lib.rs (…)`, `Running tests/x.rs (…)`, or a
 # target whose source lives in another package's folder (`Running ../sunrise-client/tests/lan_bot.rs (…)`).
@@ -108,7 +110,7 @@ LISTED = re.compile(r"^(\S+): test$")
 DAILY_TARGET = re.compile(r"^(?:lib|(?:bin|test):[\w-]+)$")
 # Why a test is a daily test (CONTRIBUTING.md "CI tiers"): slower than 2 s, or what it needs. `stable-line` is a check
 # `verify` runs too, repeated in the daily because a stable release needs a green daily of its commit to hold it.
-DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "windows", "own-sdk", "stable-line")
+DAILY_REASONS = ("slow", "game-boot", "resources", "child-process", "network", "gpu", "windows", "own-sdk", "stable-line")
 # A test that needs the daily head's SDK in book-quickstart.yml, not a previous Nightly.
 OWN_SDK_REASON = "own-sdk"
 # A daily reason for a test whose target compiles only on Windows (`#![cfg(windows)]`): no Linux shard or `daily-rows`
@@ -147,8 +149,12 @@ def compile_diagnostics(output):
         elif re.match(r"^\s*--> [\w./-]+:\d+:\d+$", line):
             headings.append(line)
     for line in headings[:20]:
+        location = re.match(r"^\s*--> ([\w./-]+):\d+:\d+$", line)
+        # A location is published only when it is a tracked source: a generated file's path is the runner's own.
+        if location and source_lines(location[1]) is None:
+            line, location = "  --> location withheld (not a tracked Rust source)", None
         print("  compiler: " + line[:300] + (" [shortened]" if len(line) > 300 else ""))
-        if line.strip().startswith("--> "):
+        if location:
             panic_source(line.strip()[4:], kind="compiler")
     if len(headings) > 20:
         print(f"  compiler diagnostics truncated: {len(headings) - 20} more headings")
@@ -544,8 +550,10 @@ def assertion_source(path, line):
 def failure_diagnostics(output):
     """One record per failed result occurrence, including repeated names across targets.
 
-    Panic contexts use libtest's name model and the first panic for that name.
-    They cannot disambiguate identical names in different targets.
+    Panic contexts use libtest's name model. Within the first failed-test capture kept for a name (libtest's
+    `---- <name> stdout ----` block), its last panic wins: the one the test failed on, after any it caught. Across
+    targets the first kept context wins for every occurrence of the name, and so does the first panic of output
+    outside a failed test's capture (a fatal run's).
     Beside the classified reason, a record shows the statement that panicked and any part of the payload (a
     message, an operand) that occurs verbatim in the tracked source around it (public_text): the checkout's own text,
     never a computed or prepared value.
@@ -556,9 +564,15 @@ def failure_diagnostics(output):
     aborts = []
     panic_reason_pending = False
     thread_name = None
-    # Collect compiler codes only after a panic that already exposed a tracked message.
+    # Collect compiler codes only after a panic that already exposed a tracked message, or one whose payload starts as
+    # rustc's own output does.
     compiler_codes = {}
     pending_codes = None
+    # Which captured-output block a line is in (a result line or libtest's capture header starts the next), the test
+    # whose failed-test capture it is (None outside one), and the block each kept context came from.
+    block = 0
+    capture = None
+    kept_block = {}
     # The tracked (path, line) of the current panic, and whether its `left:`/`right:` operand lines may follow.
     where = None
     operands_pending = False
@@ -606,6 +620,10 @@ def failure_diagnostics(output):
                 ("index out of bounds", "index out of bounds"),
                 ("attempt to", "arithmetic failure"),
             ) if line.strip().startswith(prefix)), "custom panic")
+            # A test that compiles a generated program panics with rustc's own output: its codes are categories.
+            compiler = RUSTC_ERROR.match(line.strip())
+            if compiler:
+                reason = "rustc could not compile a test program"
             withheld_text = "payload withheld (resource privacy)"
             if reason == "Result::unwrap on an error":
                 if shape := unwrap_error_shape(line.strip().split(" value: ", 1)[-1]):
@@ -618,7 +636,10 @@ def failure_diagnostics(output):
                 message = line.strip().split("failed: ", 1)[1] if "failed: " in line else None
             elif where and reason in ("assertion condition failed", "custom panic"):
                 message = line.strip()
-            if shown := (public_text(message, *where) if message else None):
+            if compiler and context is contexts.get(thread_name):
+                context.append(f"  panic reason: {reason}; {withheld_text}")
+                pending_codes = compiler_codes[thread_name] = [compiler[1]]
+            elif shown := (public_text(message, *where) if message else None):
                 context.append(f"  panic reason: {reason}; message: {shown}")
                 if context is contexts.get(thread_name):
                     pending_codes = compiler_codes[thread_name] = []
@@ -632,12 +653,22 @@ def failure_diagnostics(output):
         if found := RESULT.match(line):
             if found[2] == "FAILED":
                 failures.append(found[1])
+        header = CAPTURE.match(line)
+        if header or RESULT.match(line):
+            block += 1
+            capture = header[1] if header else None
         if panic:
             context = []
             thread_name = panic[1]
-            if thread_name not in contexts:
+            if thread_name in contexts and kept_block[thread_name] == block and capture == thread_name:
+                # A test that catches a panic it raises on purpose (a listener's) fails on its last one: a later
+                # panic in the same failed-test capture replaces the earlier.
+                contexts[thread_name] = context
+                compiler_codes.pop(thread_name, None)
+            elif thread_name not in contexts:
                 if len(contexts) < DIAGNOSTIC_CONTEXTS:
                     contexts[thread_name] = context
+                    kept_block[thread_name] = block
                 else:
                     skipped_contexts += 1
                     continue
@@ -930,7 +961,31 @@ def run_binaries(package, executables, arguments, env):
     return subprocess.CompletedProcess(list(executables.values()), status, "\n".join(output) + "\n")
 
 
+# What the current run's commands printed, by stage (build, list, test): kept privately when the run fails.
+_captured = {}
+
+
 def run(package, skip, number=None, count=None, only=None, binaries=None):
+    """Run one leg (run_leg) and, when it fails in any way, keep everything its commands printed.
+
+    The public log withholds free-form panic payloads and compiler text (they can carry vanilla data). With
+    IGNORED_TESTS_PRIVATE_LOGS set, a run that stopped (None) or has a failed test keeps each stage's whole output
+    there as `<leg>.<stage>.log`, which ignored-tests.yml copies into the CI host's private keep; the public log
+    names the files only."""
+    _captured.clear()
+    results = run_leg(package, skip, number, count, only, binaries)
+    private = os.environ.get("IGNORED_TESTS_PRIVATE_LOGS")
+    if private and (results is None or not all(results.values())):
+        leg = package if number is None else f"{package}#{number}of{count}"
+        for stage, text in _captured.items():
+            kept = Path(private) / f"{leg}.{stage}.log"
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            kept.write_text(text, errors="replace")
+            print(f"{package}: kept privately on the runner: {kept.name}")
+    return results
+
+
+def run_leg(package, skip, number=None, count=None, only=None, binaries=None):
     """Each test's result in `package`'s ignored library tests but `skip` (and, with a leg, the other legs'), or None if they didn't build.
 
     `only=(targets, tests)` runs just those ignored tests of those targets (`lib`, `bin:NAME`, `test:NAME`) instead;
@@ -973,10 +1028,11 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         if client_half:
             # The runner's own cap (tools/ci/cargo_jobs.py --cap) when set, else the old fixed one.
             command.append(f"--jobs={os.environ.get('CI_JOBS', '8')}")
-        # What the package's tests need built first (ignored_shards.PREPARE: the command verify runs too).
+        # What the package's tests need built first (ignored_shards.PREPARE).
         if prepare := ignored_shards.PREPARE.get(package):
             built = subprocess.run(prepare, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    errors="replace", env=env, cwd=ROOT / workspace)
+            _captured["build"] = built.stdout
             if built.returncode:
                 print(f"{package}: building what its tests need failed (cargo exit {built.returncode})")
                 compile_diagnostics(built.stdout)
@@ -994,6 +1050,7 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", env=env,
                 cwd=ROOT / workspace,
             )
+            _captured["list"] = (listing.stdout or "") + (listing.stderr or "")
             names = {found[1] for line in listing.stdout.splitlines() if (found := LISTED.match(line))}
             if listing.returncode or not names:
                 print(f"{package}: could not list the tests to split into legs (cargo exit {listing.returncode})")
@@ -1013,6 +1070,7 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
         threads = min(8 if client_half else 4, int(os.environ.get("CI_CPUS", "8")))
         selection = ["--ignored", "--exact", f"--test-threads={threads}", *only[1]] if only else \
             ["--include-ignored", "--exact", f"--test-threads={threads}", *skips]
+        env["SUNRISE_GPU_TESTS_REQUIRE_ADAPTER"] = "1"
         if binaries:
             process = run_binaries(package, {target: binaries[target] for target in only[0]}, selection, env)
         else:
@@ -1023,6 +1081,7 @@ def run(package, skip, number=None, count=None, only=None, binaries=None):
             )
         if timing:
             print(f"data-leg phase={phase} test-command-end utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} execution_seconds={time.monotonic() - execution_started:.3f}", flush=True)
+    _captured["test"] = process.stdout
     results = {}
     summaries = []
     print(f"{package}: cargo exit {process.returncode}")

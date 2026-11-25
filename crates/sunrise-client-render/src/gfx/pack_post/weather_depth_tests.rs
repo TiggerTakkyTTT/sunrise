@@ -7,8 +7,7 @@ use wgpu::util::DeviceExt;
 #[ignore = "daily"]
 fn rain_and_snow_leave_depth_alone_whatever_rain_depth_says() {
     let _gpu = crate::gfx::test_gpu::lock();
-    let instance = crate::gfx::test_gpu::instance();
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let adapter = crate::gfx::test_gpu::adapter().unwrap();
     eprintln!("Weather depth GPU: {:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         required_limits: adapter.limits(),

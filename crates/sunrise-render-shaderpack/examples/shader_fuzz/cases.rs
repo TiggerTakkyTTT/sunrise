@@ -1,8 +1,8 @@
-//! Cases: a corpus pack cut down to one or two programs (and what they include), then a few
+//! Cases: a corpus pack, whole, with one or two of its programs the steps edit, then a few
 //! mutations, each a named step re-derived from its own seed so a shrinker can drop any of them.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sunrise_shaders::{Macros, Pack, Properties};
 
@@ -44,17 +44,51 @@ pub const DIMENSIONS: [(&str, i32); 3] = [
     ("minecraft:the_end", 1),
 ];
 
-/// A corpus pack: its files by path inside `shaders`, and per dimension the folder the game
-/// loads and the programs in it: both stages there, or compute shaders only.
+/// A pack of the corpus as the run indexes it: its name and where it is. Nothing of the pack is
+/// read until a case process samples it (`sample`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// The committed seed pack, which `--smoke` runs.
+pub fn seed_pack() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/shader_fuzz/seeds")
+}
+
+/// The seed pack `seeds`, then each entry of `corpus` the game would take for a pack (a folder
+/// or a `.zip`, `sunrise_shaders::candidates`), unopened.
+pub fn index(seeds: &Path, corpus: Option<&Path>) -> Vec<Entry> {
+    let mut out = vec![Entry {
+        name: seeds
+            .file_name()
+            .map_or_else(|| "seeds".to_owned(), |n| n.to_string_lossy().into_owned()),
+        path: seeds.to_owned(),
+    }];
+    if let Some(dir) = corpus {
+        out.extend(
+            sunrise_shaders::candidates(dir)
+                .into_iter()
+                .map(|(name, path)| Entry { name, path }),
+        );
+    }
+    out
+}
+
+/// A pack opened in a case process: its files by path inside `shaders`, and per dimension the
+/// folder the game loads and the programs in it: both stages there, or compute shaders only.
 pub struct Source {
     pub name: String,
+    pub pack: Pack,
     pub files: BTreeMap<String, Vec<u8>>,
     pub folders: [(String, Vec<String>); 3],
 }
 
 impl Source {
-    pub fn open(path: &Path) -> Option<Source> {
-        let pack = Pack::open(path).ok()?;
+    /// Why a pack doesn't open, as the game refuses it.
+    pub fn open(path: &Path) -> Result<Source, String> {
+        let pack = Pack::open(path).map_err(|e| e.to_string())?;
         let files: BTreeMap<String, Vec<u8>> = pack
             .all_files()
             .into_iter()
@@ -64,8 +98,9 @@ impl Source {
             let folder = sunrise_shaders::dimension_folder_named(&pack, id, legacy);
             (folder.clone(), programs_in_files(&folder, &files))
         });
-        Some(Source {
+        Ok(Source {
             name: pack.name().to_owned(),
+            pack,
             files,
             folders,
         })
@@ -262,12 +297,28 @@ pub fn setup_program(name: &str) -> bool {
             .is_ok_and(|number| (1..=99).contains(&number) && number.to_string() == suffix)
 }
 
+pub fn in_folder(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
+    }
+}
+
+/// `path` relative to `folder` when it is a file directly in it.
+fn directly_in<'a>(folder: &str, path: &'a str) -> Option<&'a str> {
+    let rest = if folder.is_empty() {
+        path
+    } else {
+        path.strip_prefix(folder)?.strip_prefix('/')?
+    };
+    (!rest.contains('/')).then_some(rest)
+}
+
+/// Whether `path` is one of the stage files of `program` in `folder`, as the loader names them
+/// (`<folder>/<program>.<stage>`, and `<program>_<a..z>.csh`).
 pub fn owns_in(folder: &str, program: &str, path: &str) -> bool {
-    let Some(rest) = path
-        .strip_prefix(&in_folder(folder, ""))
-        .filter(|_| !folder.is_empty())
-        .or((folder.is_empty()).then_some(path))
-    else {
+    let Some(rest) = directly_in(folder, path) else {
         return false;
     };
     let Some((stem, ext)) = rest.rsplit_once('.') else {
@@ -282,28 +333,119 @@ pub fn owns_in(folder: &str, program: &str, path: &str) -> bool {
     (stem == program && ["vsh", "fsh", "gsh", "tcs", "tes"].contains(&ext)) || compute
 }
 
-pub fn in_folder(folder: &str, name: &str) -> String {
-    if folder.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{folder}/{name}")
+/// Which case to make: generated from a seed, or the `n`th fixed smoke case. Written as
+/// `--replay` takes it: the seed (`1234`), or `smoke:N`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CaseId {
+    Seed(u64),
+    Smoke(usize),
+}
+
+impl std::fmt::Display for CaseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CaseId::Seed(seed) => write!(f, "{seed}"),
+            CaseId::Smoke(n) => write!(f, "smoke:{n}"),
+        }
     }
 }
 
-/// The committed seed pack, then each pack (zip or folder) of `corpus`, by name.
-pub fn corpus(corpus: Option<&Path>) -> Vec<Source> {
-    let seeds = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/shader_fuzz/seeds");
-    let mut out = vec![Source::open(&seeds).expect("the seed pack opens")];
-    if let Some(dir) = corpus {
-        for found in sunrise_shaders::discover(dir) {
-            if found.problem.is_none()
-                && let Some(source) = Source::open(&found.path)
-            {
-                out.push(source);
-            }
+impl std::str::FromStr for CaseId {
+    type Err = ();
+
+    /// A seed or `smoke:N`, in decimal digits only.
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let digits = |t: &str| {
+            (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| t.parse::<u64>().ok())
+                .flatten()
+                .ok_or(())
+        };
+        match text.strip_prefix("smoke:") {
+            Some(n) => Ok(CaseId::Smoke(usize::try_from(digits(n)?).map_err(|_| ())?)),
+            None => Ok(CaseId::Seed(digits(text)?)),
         }
     }
-    out
+}
+
+impl CaseId {
+    /// The seed the case is made from (the smoke cases' is 0, as `smoke` makes them).
+    pub fn seed(self) -> u64 {
+        match self {
+            CaseId::Seed(seed) => seed,
+            CaseId::Smoke(_) => 0,
+        }
+    }
+
+    /// The index of the pack the case takes from an index of `count` packs, known before the
+    /// pack is opened: a generated case's first draw, the seed pack for the smoke cases.
+    pub fn pack(self, count: usize) -> usize {
+        match self {
+            CaseId::Seed(seed) => Stream(seed).below(count),
+            CaseId::Smoke(_) => 0,
+        }
+    }
+}
+
+/// Why an id makes no case.
+#[derive(Debug, PartialEq)]
+pub enum NoCase {
+    /// Its pack doesn't open, as the game refuses it: the pack's name, and why.
+    Unopened(String),
+    /// The pack's folder for the dimension drawn has no program.
+    NoPrograms(String),
+    /// A smoke case past the last, or past a seed pack that doesn't open (which ends the
+    /// smoke cases at the first): why, naming the seed pack.
+    Past(String),
+}
+
+impl std::fmt::Display for NoCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            NoCase::Unopened(why) => write!(f, "{why} (the pack doesn't open)"),
+            NoCase::NoPrograms(pack) => write!(f, "{pack}: no program in the dimension's folder"),
+            NoCase::Past(why) => f.write_str(why),
+        }
+    }
+}
+
+/// The case `id` names, its pack opened and read here (in a case process, a run's isolation),
+/// or why it makes none. A seed pack that doesn't open makes the first smoke case's
+/// `Unopened`, and ends them there: each later one is `Past`, with the same reason.
+pub fn sample(index: &[Entry], id: CaseId) -> Result<Case, NoCase> {
+    match id {
+        CaseId::Seed(seed) => generate(index, seed, true),
+        CaseId::Smoke(n) => match smoke(index) {
+            Ok(cases) => {
+                let count = cases.len();
+                cases.into_iter().nth(n).ok_or_else(|| {
+                    NoCase::Past(format!(
+                        "past the last smoke case: {} makes {count}",
+                        index[0].name
+                    ))
+                })
+            }
+            Err(why) if n == 0 => Err(why),
+            Err(why) => Err(NoCase::Past(why.to_string())),
+        },
+    }
+}
+
+/// Fixed cases that must hold every invariant: each seed program alone, unmutated, in flat and
+/// grid terrain, and all of them together.
+pub fn smoke(index: &[Entry]) -> Result<Vec<Case>, NoCase> {
+    let seeds = Source::open(&index[0].path)
+        .map_err(|e| NoCase::Unopened(format!("{}: {e}", index[0].name)))?;
+    let programs = &seeds.folders[0].1;
+    let mut sets: Vec<Vec<String>> = programs.iter().map(|p| vec![p.clone()]).collect();
+    sets.push(programs.clone());
+    let mut out = Vec::new();
+    for flat in [true, false] {
+        for set in &sets {
+            out.push(Case::unmutated(&seeds, 0, 0, flat, set.clone()));
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -372,10 +514,36 @@ pub struct Case {
     pub programs: Vec<String>,
     pub folder: String,
     pub files: BTreeMap<String, Vec<u8>>,
+    /// The files the programs' stage files read through the loader's preprocessor: their own
+    /// and what they include (`reach`).
+    pub reach: BTreeSet<String>,
     pub steps: Vec<Step>,
 }
 
 impl Case {
+    /// The case of seed `seed` on `programs` of `source`'s folder for dimension `dim`, before
+    /// any step: the whole pack, as it is.
+    pub fn unmutated(
+        source: &Source,
+        seed: u64,
+        dim: usize,
+        flat: bool,
+        programs: Vec<String>,
+    ) -> Self {
+        let folder = source.folders[dim].0.clone();
+        Self {
+            seed,
+            pack: source.name.clone(),
+            dim,
+            flat,
+            reach: reach(source, &folder, &programs),
+            programs,
+            folder,
+            files: source.files.clone(),
+            steps: Vec::new(),
+        }
+    }
+
     /// The pack the case loads: its files with every step applied, in order.
     pub fn materialize(&self) -> BTreeMap<String, Vec<u8>> {
         self.materialize_first(self.steps.len())
@@ -395,8 +563,6 @@ impl Case {
         owns_in(&self.folder, program, path)
     }
 }
-
-const STAGES: [&str; 6] = ["vsh", "fsh", "gsh", "csh", "tcs", "tes"];
 
 fn is_source(path: &str) -> bool {
     !path.ends_with(".properties")
@@ -426,48 +592,34 @@ fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-/// The files of `source` a case on `programs` (in `folder`) needs: their stage files, what those
-/// include (transitively), and the `.properties` files at the root.
-pub fn subset(source: &Source, folder: &str, programs: &[String]) -> BTreeMap<String, Vec<u8>> {
-    let mut wanted: BTreeSet<String> = source
+/// The files the stage files of `programs` (in `folder`) read: each one, and what it includes,
+/// as the loader's own preprocessor finds it (`Preprocessed::files`) with the macros the load
+/// uses. These are what a case's steps edit.
+pub fn reach(source: &Source, folder: &str, programs: &[String]) -> BTreeSet<String> {
+    let (_, macros) = crate::check::pack_macros(&source.pack);
+    let mut reach = BTreeSet::new();
+    let owned = source
         .files
         .keys()
-        .filter(|f| !f.contains('/') && f.ends_with(".properties"))
-        .cloned()
-        .collect();
-    let mut queue: Vec<String> = Vec::new();
-    for p in programs {
-        for ext in STAGES {
-            queue.push(in_folder(folder, &format!("{p}.{ext}")));
-        }
-        for c in 'a'..='z' {
-            queue.push(in_folder(folder, &format!("{p}_{c}.csh")));
-        }
+        .filter(|p| programs.iter().any(|program| owns_in(folder, program, p)));
+    for path in owned {
+        reach.extend(sunrise_shaders::preprocess(&source.pack, path, &macros).files);
     }
-    while let Some(path) = queue.pop() {
-        let Some(bytes) = source.files.get(&path) else {
-            continue;
-        };
-        if !wanted.insert(path.clone()) {
-            continue;
-        }
-        queue.extend(includes(&path, &String::from_utf8_lossy(bytes)));
-    }
-    wanted
-        .into_iter()
-        .filter_map(|p| Some((p.clone(), source.files.get(&p)?.clone())))
-        .collect()
+    reach
 }
 
-/// The case of seed `seed`: a pack of the corpus, a dimension, one or two of its programs and
-/// one to six steps. `steps: false` leaves the files as the pack has them.
-pub fn generate(corpus: &[Source], seed: u64, steps: bool) -> Option<Case> {
+/// The case of seed `seed`: a pack of the index, a dimension, one or two of its programs and
+/// one to six steps. `steps: false` leaves the files as the pack has them. The pack is opened
+/// and read here: run in a case process.
+pub fn generate(index: &[Entry], seed: u64, steps: bool) -> Result<Case, NoCase> {
     let mut s = Stream(seed);
-    let source = &corpus[s.below(corpus.len())];
+    let entry = &index[s.below(index.len())];
+    let source =
+        Source::open(&entry.path).map_err(|e| NoCase::Unopened(format!("{}: {e}", entry.name)))?;
     let dim = s.below(DIMENSIONS.len());
-    let (folder, programs) = &source.folders[dim];
+    let programs = &source.folders[dim].1;
     if programs.is_empty() {
-        return None;
+        return Err(NoCase::NoPrograms(entry.name.clone()));
     }
     let mut chosen = vec![s.pick(programs).clone()];
     if s.chance(3) {
@@ -477,17 +629,8 @@ pub fn generate(corpus: &[Source], seed: u64, steps: bool) -> Option<Case> {
         }
     }
     chosen.sort();
-    let files = subset(source, folder, &chosen);
-    let mut case = Case {
-        seed,
-        pack: source.name.clone(),
-        dim,
-        flat: s.chance(2),
-        programs: chosen,
-        folder: folder.clone(),
-        files,
-        steps: Vec::new(),
-    };
+    let flat = s.chance(2);
+    let mut case = Case::unmutated(&source, seed, dim, flat, chosen);
     if steps {
         let most = if s.chance(4) { 6 } else { 2 };
         let count = 1 + s.below(most);
@@ -497,7 +640,13 @@ pub fn generate(corpus: &[Source], seed: u64, steps: bool) -> Option<Case> {
             let file = if kind == Kind::Properties {
                 "shaders.properties".to_owned()
             } else {
-                let sources: Vec<&String> = current.keys().filter(|f| is_source(f)).collect();
+                // What the programs read, and what steps added.
+                let sources: Vec<&String> = current
+                    .keys()
+                    .filter(|f| {
+                        is_source(f) && (case.reach.contains(*f) || !case.files.contains_key(*f))
+                    })
+                    .collect();
                 // Mostly the programs' own stage files, else what they include.
                 let own: Vec<&String> = sources
                     .iter()
@@ -521,7 +670,7 @@ pub fn generate(corpus: &[Source], seed: u64, steps: bool) -> Option<Case> {
             case.steps.push(step);
         }
     }
-    Some(case)
+    Ok(case)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1480,13 +1629,17 @@ fn properties(s: &mut Stream, text: &str) -> String {
 mod tests {
     use super::*;
 
-    fn seeds() -> Vec<Source> {
-        corpus(None)
+    fn seeds() -> Vec<Entry> {
+        index(&super::seed_pack(), None)
+    }
+
+    fn seed_source() -> Source {
+        Source::open(&seeds()[0].path).unwrap()
     }
 
     #[test]
     fn the_seed_pack_offers_its_programs_in_every_dimension() {
-        let corpus = seeds();
+        let source = seed_source();
         let names = [
             "composite",
             "composite1",
@@ -1496,7 +1649,7 @@ mod tests {
             "gbuffers_water",
             "shadow",
         ];
-        for (folder, programs) in &corpus[0].folders {
+        for (folder, programs) in &source.folders {
             assert_eq!(folder, "");
             assert_eq!(programs, &names);
         }
@@ -1522,6 +1675,7 @@ mod tests {
         }
     }
 
+    /// Candidate selection follows the loader's enabled stage files.
     #[test]
     fn compute_candidates_keep_each_enabled_stage_and_setup_letter_stages() {
         let files = BTreeMap::from([
@@ -1601,26 +1755,22 @@ mod tests {
         .into();
         assert_eq!(active_folder(0, &files), "custom");
         assert_eq!(programs_in_files("custom", &files), ["composite"]);
-
         files.insert(
             "dimension.properties".into(),
             b"dimension.world0 = minecraft:overworld\n".to_vec(),
         );
         assert_eq!(active_folder(0, &files), "world0");
         assert_eq!(programs_in_files("world0", &files), ["final"]);
-
         files.remove("dimension.properties");
         assert_eq!(active_folder(0, &files), "world0");
         files.remove("world0/final.vsh");
         files.remove("world0/final.fsh");
         assert_eq!(active_folder(0, &files), "");
-
         files.insert("setup.vsh".into(), b"vertex".to_vec());
         files.insert("setup.fsh".into(), b"fragment".to_vec());
         assert!(programs_in_files("", &files).is_empty());
         files.insert("setup.csh".into(), b"compute".to_vec());
         assert_eq!(programs_in_files("", &files), ["setup"]);
-
         let files = BTreeMap::from([
             ("composite.fsh".into(), b"fragment".to_vec()),
             ("composite.csh".into(), b"compute".to_vec()),
@@ -1644,32 +1794,62 @@ mod tests {
         assert_eq!(programs_in_files("custom", &files), ["final"]);
     }
 
+    /// A generated case keeps the whole pack: other programs' settings and inputs stay intact.
     #[test]
-    fn a_case_takes_its_programs_and_what_they_include() {
-        let corpus = seeds();
-        let files = subset(&corpus[0], "", &["composite".to_owned()]);
+    fn a_case_holds_its_whole_pack() {
+        let index = seeds();
+        let source = seed_source();
+        for case in smoke(&index).unwrap() {
+            assert_eq!(case.files, source.files, "{:?}", case.programs);
+        }
+        for i in 0..20 {
+            let case = generate(&index, case_seed(3, i), false).unwrap();
+            assert_eq!(case.files, source.files, "{:?}", case.programs);
+        }
+    }
+
+    /// Program reach uses the same conditional include expansion as the loader.
+    #[test]
+    fn a_cases_programs_read_what_the_loader_reads() {
+        let dir = std::env::temp_dir().join(format!("shader-fuzz-cases-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files: [(&str, &str); 6] = [
+            (
+                "world0/composite.fsh",
+                "#include \"final.fsh\" // its main\n#ifdef NOPE\n#include \"deferred.fsh\"\n#endif\n",
+            ),
+            ("world0/composite.vsh", "void main() {}\n"),
+            ("world0/final.fsh", "void main() {}\n"),
+            ("world0/final.vsh", "void main() {}\n"),
+            ("world0/deferred.fsh", "void main() {}\n"),
+            ("world0/deferred.vsh", "void main() {}\n"),
+        ];
+        for (path, text) in files {
+            let file = dir.join("shaders").join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, text).unwrap();
+        }
+        let source = Source::open(&dir).unwrap();
+        assert_eq!(source.folders[0].0, "world0");
         assert_eq!(
-            files.keys().collect::<Vec<_>>(),
+            reach(&source, "world0", &["composite".to_owned()])
+                .into_iter()
+                .collect::<Vec<_>>(),
             [
-                "composite.fsh",
-                "composite.vsh",
-                "lib/common.glsl",
-                "shaders.properties"
+                "world0/composite.fsh",
+                "world0/composite.vsh",
+                "world0/final.fsh"
             ]
         );
-        let files = subset(&corpus[0], "", &["composite1".to_owned()]);
-        assert_eq!(
-            files.keys().collect::<Vec<_>>(),
-            ["composite1.csh", "shaders.properties"]
-        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn generation_is_seeded_and_reaches_every_kind() {
         let corpus = seeds();
         let a = generate(&corpus, case_seed(1, 0), true).unwrap();
-        assert_eq!(Some(&a), generate(&corpus, case_seed(1, 0), true).as_ref());
-        assert_ne!(Some(&a), generate(&corpus, case_seed(1, 1), true).as_ref());
+        assert_eq!(Ok(&a), generate(&corpus, case_seed(1, 0), true).as_ref());
+        assert_ne!(Ok(&a), generate(&corpus, case_seed(1, 1), true).as_ref());
         assert_eq!(a.materialize(), a.clone().materialize());
         let mut kinds = BTreeSet::new();
         for i in 0..300 {
@@ -1722,6 +1902,7 @@ mod tests {
             programs: vec!["composite".into()],
             folder: "world0".into(),
             files: BTreeMap::new(),
+            reach: BTreeSet::new(),
             steps: Vec::new(),
         };
         for own in [

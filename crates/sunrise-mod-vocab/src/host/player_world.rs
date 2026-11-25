@@ -79,7 +79,8 @@ pub trait PlayerWorldBackendMut {
     /// Side: server.
     /// `Player.setLastDeathLocation`: stores where the player died, or
     /// forgets it for None. The client hears of it with the player's next
-    /// respawn, as in vanilla. False in the cases a read gives None.
+    /// respawn, as in vanilla. A resident dead player can still be edited.
+    /// False if the server player's state is unavailable.
     fn player_set_last_death_location(
         &mut self,
         player: PlayerRef,
@@ -121,4 +122,39 @@ pub trait PlayerWorldBackendMut {
     /// ignores exactly that player; one who has won the game and is watching the End poem is
     /// respawned even alive, as the button does).
     fn player_respawn(&mut self, player: PlayerRef) -> Result<(), RespawnRefusal>;
+    /// Side: server.
+    /// Where the player would respawn now, without respawning them, as vanilla's own
+    /// `EndPortalBlock` asks it (`ServerPlayer.findRespawnPositionAndUseSpawnBlock(false,
+    /// DO_NOTHING)`): at their respawn point's bed or charged anchor, standing beside it and
+    /// facing it (`ServerPlayer.findRespawnAndUseSpawnBlock`, with a block's
+    /// `respawn_position` answer, a forced point where it is free); else, when the point no
+    /// longer gives a position, at the world spawn with `missing_respawn_block`
+    /// (`TeleportTransition.missingRespawnBlock`); else, with no point or one in a level the
+    /// world lacks, at the world spawn (`TeleportTransition.createDefault`): the free column
+    /// the spawn search finds around it (`PlayerSpawnFinder`), facing the world spawn's angle.
+    /// It has no side effect on the world: an anchor keeps its charge, nothing is told
+    /// (`player_respawn_position` is the respawn's), and the player stays where they are. Like
+    /// vanilla's read, it loads the respawn point's chunk to FULL, blocking the tick, and the
+    /// spawn search asks for the chunk it waits for (`TicketType.SPAWN_SEARCH`). It may put
+    /// another level in place for the read, and puts the caller's back before it returns. The
+    /// refusals are named by `RespawnTargetUnavailable`, checked in this order: `Stale` (no
+    /// player on this server behind the handle), `InPlayerHook` and `Loading`.
+    fn player_respawn_target(
+        &mut self,
+        player: PlayerRef,
+    ) -> Result<RespawnTarget, RespawnTargetUnavailable>;
+}
+
+/// The handles' client writes of the `player_world` area, reached through [`ClientBackendMut`].
+// hidden: a handle's backend, reached through `ClientBackendMut`; mods call the handle
+#[doc(hidden)]
+#[sunrise_mod_api_macros::host_area]
+pub trait PlayerWorldClientBackendMut {
+    /// Side: client.
+    /// Sets the local player's current body yaw in degrees (`LivingEntity.setYBodyRot`).
+    /// The view, head, previous body angle and packets are unchanged. `Ok(false)` for a stale,
+    /// nonlocal, or unavailable player. Returns `Err(LevelWriteError::Unavailable)` when the
+    /// host cannot write living state. Does not change frame extraction order.
+    fn player_set_body_yaw(&mut self, player: PlayerRef, yaw: f32)
+    -> Result<bool, LevelWriteError>;
 }

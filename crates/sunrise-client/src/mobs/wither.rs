@@ -86,9 +86,11 @@ fn undead(s: Species) -> bool {
 struct DoNothing;
 impl Goal for DoNothing {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         MOVE | JUMP | LOOK
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, _cx: &mut Cx) -> bool {
         m.extra.counter > 0
     }
@@ -130,7 +132,8 @@ fn shoot(m: &mut Mob, head: usize, at: [f64; 3], dangerous: bool, events: &mut V
         Vec3::new(h[0], h[1], h[2]),
         Some(Who::Mob(m.id)),
         dir,
-    );
+    )
+    .facing_shooter(m.yaw, m.head_pitch);
     events.push(MobEvent::Projectile(p));
 }
 /// `WitherBoss.aiStep` before travel: climb above and close in on the

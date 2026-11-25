@@ -56,6 +56,10 @@ impl Game<'_> {
             std::mem::take(out),
         )
         .track_normal_pose()
+        .with_quad_budget(
+            self.entity_quad_capacity(),
+            self.entity_batch_reserved_quads(),
+        )
         .animated(self.animation_time());
         let mut canceled = false;
         self.native_render_hand(

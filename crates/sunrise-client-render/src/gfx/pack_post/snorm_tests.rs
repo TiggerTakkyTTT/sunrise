@@ -54,6 +54,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn snorm_buffers_clamp_and_quantise() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

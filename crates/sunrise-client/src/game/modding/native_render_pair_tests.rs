@@ -1,7 +1,8 @@
 //! The render hook pair around a living entity (#3681): `render_living_pre` and
 //! `render_living_post`, wrapped for a player by `render_player_pre` and `render_player_post`. A
-//! canceled Pre skips the model, layers and later passes. Canceling only Living Pre still calls
-//! Player Post without a model. Culled entities are not asked; the hooks run in draw queue order.
+//! canceled Pre skips the model, layers and the later name tag and leash passes, but not its
+//! flames and shadow. Canceling only Living Pre still calls Player Post without a model. Culled
+//! entities are not asked; the hooks run in draw queue order.
 use super::Game;
 use mod_api::{
     BlockEntityDrawContext, Hooks, RenderLivingPostEvent, RenderLivingPreEvent,
@@ -155,6 +156,13 @@ fn events(heard: &Arc<Mutex<Heard>>) -> Vec<String> {
 #[test]
 #[ignore = "daily"]
 fn two_entities_are_asked_in_the_draw_queues_order() {
+    if super::native_entity_refs::tests::run_fresh_cases(
+        "game::native_render_pair_tests::two_entities_are_asked_in_the_draw_queues_order",
+        "SUNRISE_RENDER_PAIR_ORDER_CHILD",
+        &["draw-order"],
+    ) {
+        return;
+    }
     let heard = Arc::default();
     with_pair(&heard, |game| {
         game.pack_ids = Some(Default::default());
@@ -167,10 +175,10 @@ fn two_entities_are_asked_in_the_draw_queues_order() {
             [
                 "living_pre 91",
                 "living_post 91",
-                "player_pre true",
-                "living_pre 4321",
+                "player_pre true head Some(true)",
+                "living_pre 4321 head Some(false)",
                 "living_post 4321",
-                "player_post true",
+                "player_post true model true head Some(false)",
                 "living_pre 92",
                 "living_post 92"
             ]
@@ -290,6 +298,10 @@ pub(super) fn submitted_bodies<T>(
 #[test]
 #[ignore = "daily"]
 fn entity_draw_order_after_client_packets() {
+    run_entity_draw_order_after_client_packets();
+}
+
+pub(in crate::game) fn run_entity_draw_order_after_client_packets() {
     use sunrise_client::camera::CameraType;
     use sunrise_protocol::{
         entity_data::{
@@ -493,6 +505,13 @@ fn entity_draw_order_after_client_packets() {
 #[test]
 #[ignore = "daily"]
 fn a_canceled_living_pre_skips_the_model_and_the_post_hook() {
+    if super::native_entity_refs::tests::run_fresh_cases(
+        "game::native_render_pair_tests::a_canceled_living_pre_skips_the_model_and_the_post_hook",
+        "SUNRISE_RENDER_PAIR_CHILD",
+        &["game"],
+    ) {
+        return;
+    }
     let heard: Arc<Mutex<Heard>> = Arc::default();
     with_pair(&heard, |game| {
         game.mobs.push(mob(game, "minecraft:zombie", 91, 0.0));
@@ -509,9 +528,8 @@ fn a_canceled_living_pre_skips_the_model_and_the_post_hook() {
             canceled.len()
         );
         assert_eq!(markers(&canceled), 4);
-        // The frame's later passes (name tag, shadow, flames, leash) leave it out.
+        // The frame's later name tag and leash passes leave it out.
         assert!(game.render_canceled(91));
-        assert_eq!(game.drawn_mobs().count(), 0);
     });
 }
 
@@ -527,12 +545,105 @@ fn a_canceled_entity_draws_no_name_tag() {
         let tag = |game: &mut Game<'_>| {
             mob_frame(game);
             let (mut out, mut see_through) = (Vec::new(), Vec::new());
-            game.name_tag_geometry(CAMERA, 1.0, &mut out, &mut see_through);
+            let mut collector = std::mem::take(&mut game.see_through_collector);
+            collector.clear();
+            game.name_tag_geometry(CAMERA, 1.0, &mut out, &mut collector);
+            collector.flush(&mut see_through);
+            game.see_through_collector = collector;
             out.len() + see_through.len()
         };
         assert!(tag(game) > 0, "a named zombie's tag");
         heard.lock().unwrap().cancel_living.push(91);
         assert_eq!(tag(game), 0, "none once its pre hook cancels");
+    });
+}
+
+/// A stone floor under the origin, so a standing entity has something to cast a shadow on.
+fn place_stone_floor(game: &mut Game<'_>) {
+    game.world
+        .chunks
+        .insert((0, 0), Arc::new(sunrise_client::chunk::Chunk::empty(0, 0)));
+    let stone = game
+        .pack
+        .assets
+        .registry
+        .default_state("minecraft:stone")
+        .unwrap();
+    game.world.set(0, 63, 0, stone).unwrap();
+}
+
+/// Vertices of one whole entity frame (`entity_geometry`).
+fn entity_frame(game: &mut Game<'_>) -> usize {
+    let (out, ..) = game.entity_geometry(CAMERA, 1.0, None, Vec::new(), &mut Vec::new());
+    out.len()
+}
+
+/// The vertices of one whole entity frame with a zombie standing on stone, burning when
+/// `burning`, with entity shadows on when `shadows`.
+fn zombie_frame(game: &mut Game<'_>, burning: bool, shadows: bool) -> usize {
+    let mut zombie = mob(game, "minecraft:zombie", 91, 0.0);
+    zombie.fire_ticks = if burning { 100 } else { 0 };
+    game.mobs.clear();
+    game.mobs.push(zombie);
+    game.settings.entity_shadows = shadows;
+    entity_frame(game)
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_canceled_pre_keeps_the_flames_and_the_shadow() {
+    if super::native_entity_refs::tests::run_fresh_cases(
+        "game::native_render_pair_tests::a_canceled_pre_keeps_the_flames_and_the_shadow",
+        "SUNRISE_RENDER_PAIR_CHILD",
+        &["game"],
+    ) {
+        return;
+    }
+    let heard: Arc<Mutex<Heard>> = Arc::default();
+    with_pair(&heard, |game| {
+        place_stone_floor(game);
+        // FlameFeatureRenderer submits six quads for an adult zombie; the stone gives one shadow quad.
+        let (flames, shadow) = (24, 4);
+        let plain = zombie_frame(game, false, false);
+        assert_eq!(zombie_frame(game, true, false) - plain, flames);
+        assert_eq!(zombie_frame(game, false, true) - plain, shadow);
+        heard.lock().unwrap().cancel_living.push(91);
+        let plain = zombie_frame(game, false, false);
+        assert_eq!(zombie_frame(game, true, false) - plain, flames);
+        assert_eq!(zombie_frame(game, false, true) - plain, shadow);
+        assert!(game.render_canceled(91));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_canceled_pre_keeps_the_local_players_flames() {
+    if super::native_entity_refs::tests::run_fresh_cases(
+        "game::native_render_pair_tests::a_canceled_pre_keeps_the_local_players_flames",
+        "SUNRISE_RENDER_PAIR_CHILD",
+        &["game"],
+    ) {
+        return;
+    }
+    let heard: Arc<Mutex<Heard>> = Arc::default();
+    with_pair(&heard, |game| {
+        place_stone_floor(game);
+        admit_own_player(game, false);
+        game.settings.entity_shadows = false;
+        let expected = 20; // FlameFeatureRenderer submits five quads for a standing player.
+        let added = |game: &mut Game<'_>| {
+            game.player.as_mut().unwrap().fire_ticks = 0;
+            let plain = entity_frame(game);
+            game.player.as_mut().unwrap().fire_ticks = 100;
+            entity_frame(game) - plain
+        };
+        assert_eq!(added(game), expected);
+        heard.lock().unwrap().cancel_living.push(4321);
+        assert_eq!(added(game), expected);
+        assert!(game.own_render_canceled());
+        heard.lock().unwrap().cancel_player.push(true);
+        assert_eq!(added(game), expected);
+        assert!(game.own_render_canceled());
     });
 }
 

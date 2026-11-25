@@ -124,13 +124,7 @@ def main():
         scratch = Path(tmp)
         homes = {k: scratch / k for k in ('SUNRISE_HOME', 'SUNRISE_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME')}
         env = lab.game_env(os.environ, **homes, RUST_MIN_STACK='16777216')
-        run(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib', '--no-run', '--message-format=json'],
-            'compile-game', env=env)
-        binaries = [Path(row['executable']) for row in map(json.loads, filter(
-            lambda l: l.startswith('{'), (build / 'compile-game.log').read_text(encoding='utf-8').splitlines()))
-            if row.get('reason') == 'compiler-artifact' and row.get('executable')
-            and row.get('target', {}).get('name') == 'sunrise_client' and row.get('profile', {}).get('test')]
-        assert len(binaries) == 1, 'expected one Game test binary'
+        binaries = [lab.parity_fixtures()]
         env.update(SUNRISE_TEST_RESOURCES=str(Path(os.environ.get('SUNRISE_TEST_RESOURCES', lab.RESOURCES)).resolve()),
                    SUNRISE_REACH_DRAW_CASES=str(game_inputs), SUNRISE_REACH_DRAW_OUT=str(build / 'game.jsonl'))
         run([binaries[0], GAME_TEST, '--exact', '--ignored'], 'game', cwd=scratch, env=env)

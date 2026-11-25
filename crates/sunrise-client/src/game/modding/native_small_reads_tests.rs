@@ -1,5 +1,5 @@
-//! A client's `LevelRef::brightness`, `EntityRef::set_sprinting` and the server's
-//! `tick_rate_is_frozen`.
+//! A client's `LevelRef::brightness`, `EntityRef::set_sprinting`, the local and tracked stance
+//! reads, and the server's `tick_rate_is_frozen` and mob jump cooldown.
 
 use super::native_entity_refs::tests::with_game;
 use super::native_guest_turn_tests::with_guests;
@@ -353,32 +353,96 @@ fn client_merchant_offers_follow_the_open_menu() {
 fn client_player_state_reads_its_own_copy_only() {
     use super::native_client_session::tests::logged_client;
     use super::native_entity_refs::tests::with_client_game;
-    use sunrise_client::{items::ItemStack, motion::PlayerMotion};
+    use sunrise_client::{
+        chunk::Chunk,
+        items::ItemStack,
+        motion::{MotionWorld, PlayerMotion},
+        pose::Pose,
+    };
     use sunrise_core::geometry::Vec3;
     mod_platform::testing::with_mods(Default::default(), || {
         with_client_game(|game| {
             let _server = logged_client(game);
-            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.streaming
+                .insert_remote(&mut game.world, Chunk::empty(0, 0));
+            // Mid-chunk: a fluid update reads the chunks one block past the box (`hasChunksAt`),
+            // and only column (0, 0) is loaded.
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(8.5, 64.0, 8.5)).unwrap());
             let local = game.local_player().unwrap();
             let entity = local.entity();
+            let living = mod_api::LivingRef::new(entity);
             let other = mod_api::EntityRef::new(entity.epoch(), 99);
+            let other_living = mod_api::LivingRef::new(other);
             let other_player = mod_api::__private::game::player_ref(other, 99);
+            let air = game.world.air;
+            let lava = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:lava")
+                .unwrap();
             game.inventory[5] = Some(ItemStack::new("minecraft:stone", 3));
             for flag in [true, false] {
+                game.world
+                    .set(8, 64, 8, if flag { lava } else { air })
+                    .unwrap();
+                {
+                    let body = game.player.as_mut().unwrap();
+                    body.fluids.first_tick = false;
+                }
+                {
+                    let side = game_side!(game);
+                    let mut world = MotionWorld {
+                        side: &side,
+                        entities: &[],
+                        player: game.player.as_mut().unwrap(),
+                        scene: &mut game.world,
+                        assets: &game.pack.assets,
+                        collision_binding: game.collision,
+                        resources: game.motion,
+                        health: &game.health_resources,
+                        tag_items: None,
+                        loop_context: &game.loop_context,
+                        damage_hooks: &game.damage_hooks,
+                        block_registries: None,
+                    };
+                    world.fluid_base_tick().unwrap();
+                }
                 let body = game.player.as_mut().unwrap();
                 body.ground.on_ground = flag;
                 body.fluids.was_touching_water = flag;
                 body.swimming = flag;
+                body.sprinting = flag;
+                body.pose = if flag {
+                    Pose::Crouching
+                } else {
+                    Pose::Standing
+                };
+                body.local_crouching = flag;
+                body.no_jump_delay = if flag { 10 } else { 0 };
                 body.air = if flag { 87 } else { 12 };
                 let host = &*game as &dyn mod_api::ClientHost;
                 assert_eq!(entity.on_ground(host), Some(flag));
                 assert_eq!(entity.is_in_water(host), Some(flag));
+                assert_eq!(entity.is_in_lava(host), Some(flag));
                 assert_eq!(entity.is_swimming(host), Some(flag));
+                assert_eq!(entity.is_sprinting(host), Some(flag));
+                assert_eq!(
+                    entity.pose(host),
+                    Some(if flag { "crouching" } else { "standing" })
+                );
+                assert_eq!(entity.is_crouching(host), Some(flag));
+                assert_eq!(living.no_jump_delay(host), Some(if flag { 10 } else { 0 }));
                 assert_eq!(entity.air_supply(host), Some(if flag { 87 } else { 12 }));
                 assert_eq!(entity.max_air_supply(host), Some(300));
                 assert_eq!(other.on_ground(host), None);
                 assert_eq!(other.is_in_water(host), None);
+                assert_eq!(other.is_in_lava(host), None);
                 assert_eq!(other.is_swimming(host), None);
+                assert_eq!(other.is_sprinting(host), None);
+                assert_eq!(other.pose(host), None);
+                assert_eq!(other.is_crouching(host), None);
+                assert_eq!(other_living.no_jump_delay(host), None);
                 assert_eq!(other.air_supply(host), None);
                 assert_eq!(other.max_air_supply(host), None);
                 local
@@ -392,7 +456,199 @@ fn client_player_state_reads_its_own_copy_only() {
                 assert_eq!(other_player.with_inventory(host, |_| ()), None);
                 assert_eq!(local.with_ender_chest(host, |_| ()), None);
             }
+            // LocalPlayer.isCrouching is its own flag, not the pose: the tick it starts or
+            // stops crouching the two differ.
+            let body = game.player.as_mut().unwrap();
+            body.pose = Pose::Crouching;
+            body.local_crouching = false;
+            let host = &*game as &dyn mod_api::ClientHost;
+            assert_eq!(entity.pose(host), Some("crouching"));
+            assert_eq!(entity.is_crouching(host), Some(false));
+            let body = game.player.as_mut().unwrap();
+            body.pose = Pose::Standing;
+            body.local_crouching = true;
+            let host = &*game as &dyn mod_api::ClientHost;
+            assert_eq!(entity.pose(host), Some("standing"));
+            assert_eq!(entity.is_crouching(host), Some(true));
         });
+    });
+}
+
+/// `ClientLevel.tickRateManager()`: the rate, freeze and steps the ticking packets set
+/// (`handleTickingState` / `handleTickingStep`), from `Login` on, before any player is placed;
+/// none before a client level exists.
+#[test]
+#[ignore = "daily"]
+fn tick_rate_reads_the_clients_tick_rate_manager() {
+    use sunrise_protocol::{
+        connection::Pipe,
+        packets::play::{self, Clientbound as C},
+    };
+    mod_platform::testing::with_mods(Vec::<mod_api::ModEntry>::new().into(), || {
+        super::native_entity_refs::tests::with_client_game(|game| {
+            let read = |game: &Game<'_>| mod_api::prelude::ClientViewClientHost::tick_rate(game);
+            assert!(game.native_client_level().is_none());
+            assert_eq!(read(game), None);
+            let (client, _server) = Pipe::pair();
+            game.connect_local(client, "TickRateTest").unwrap();
+            assert_eq!(read(game), None, "connected, but no level before Login");
+            let spawn = play::SpawnInfo {
+                dimension_type: 0,
+                dimension: "minecraft:overworld".into(),
+                seed: 0,
+                game_type: 0,
+                previous_game_type: None,
+                debug: false,
+                flat: false,
+                last_death: None,
+                portal_cooldown: 0,
+                sea_level: 63,
+            };
+            game.handle_packet(C::Login(play::Login {
+                player_id: 7,
+                hardcore: false,
+                levels: vec![spawn.dimension.clone()],
+                max_players: 1,
+                chunk_radius: 2,
+                simulation_distance: 2,
+                reduced_debug_info: false,
+                show_death_screen: true,
+                limited_crafting: false,
+                spawn,
+                online_mode: false,
+                enforces_secure_chat: false,
+            }))
+            .unwrap();
+            game.player = None;
+            let before = read(game).expect("Login makes the client level");
+            assert_eq!(before.tick_rate, 20.0);
+            game.handle_packet(C::TickingState(play::TickingState {
+                rate: 5.0,
+                frozen: true,
+            }))
+            .unwrap();
+            game.handle_packet(C::TickingStep(play::TickingStep { steps: 7 }))
+                .unwrap();
+            assert_eq!(
+                read(game),
+                Some(mod_api::ClientTickRate {
+                    tick_rate: 5.0,
+                    frozen: true,
+                    frozen_ticks_to_run: 7,
+                }),
+                "read before the player is placed"
+            );
+        });
+    });
+}
+
+/// A client reads a tracked player's and a tracked mob's pose from the `DATA_POSE` the server
+/// sent, and has no jump cooldown for either.
+#[test]
+#[ignore = "daily"]
+fn client_tracked_entities_read_their_synced_pose() {
+    use super::native_client_session::tests::logged_client;
+    use super::native_entity_refs::tests::with_client_game;
+    use sunrise_protocol::packets::play::{self, Clientbound as C};
+    fn add_entity(game: &Game<'_>, id: i32, uuid: u128, kind: &str) -> C {
+        let kind = game
+            .remote
+            .as_ref()
+            .unwrap()
+            .builtin
+            .get("minecraft:entity_type")
+            .unwrap()
+            .id(kind)
+            .unwrap();
+        C::AddEntity(play::AddEntity {
+            id,
+            uuid,
+            kind,
+            position: [2.5, 64.0, 2.5],
+            velocity: [0.0; 3],
+            pitch: 0,
+            yaw: 0,
+            head_yaw: 0,
+            data: 0,
+        })
+    }
+    mod_platform::testing::with_mods(Default::default(), || {
+        with_client_game(|game| {
+            let _server = logged_client(game);
+            let player_uuid = 0x5e4d_0001_u128;
+            game.handle_packet(C::PlayerInfoUpdate(play::PlayerInfoUpdate {
+                actions: 0x01 | 0x04 | 0x08,
+                entries: vec![play::PlayerInfo {
+                    uuid: player_uuid,
+                    name: Some("Tracked".into()),
+                    game_mode: Some(0),
+                    listed: Some(true),
+                    ..play::PlayerInfo::default()
+                }],
+            }))
+            .unwrap();
+            let pkt = add_entity(game, 301, player_uuid, "minecraft:player");
+            game.handle_packet(pkt).unwrap();
+            let pkt = add_entity(game, 302, 0x5e4d_0002, "minecraft:zombie");
+            game.handle_packet(pkt).unwrap();
+            // As SetEntityData's DATA_POSE leaves them: a player's in `synced_pose`, a mob's in
+            // `pose` (crouching is 5, swimming 3).
+            for mob in game.mobs.iter_mut() {
+                match mob.id {
+                    301 => mob.extra.synced_pose = 5,
+                    302 => mob.extra.pose = 3,
+                    _ => {}
+                }
+            }
+            let player = game.entity(301).expect("the tracked player");
+            let zombie = game.entity(302).expect("the tracked zombie");
+            let host = &*game as &dyn mod_api::ClientHost;
+            assert_eq!(player.pose(host), Some("crouching"));
+            assert_eq!(player.is_crouching(host), Some(true));
+            assert_eq!(zombie.pose(host), Some("swimming"));
+            assert_eq!(zombie.is_crouching(host), Some(false));
+            for entity in [player, zombie] {
+                assert_eq!(mod_api::LivingRef::new(entity).no_jump_delay(host), None);
+            }
+        });
+    });
+}
+
+/// A server reads a mob's jump cooldown, `LivingEntity.noJumpDelay`, from its own body.
+#[test]
+#[ignore = "daily"]
+fn a_server_reads_a_mobs_jump_cooldown() {
+    use std::sync::Arc;
+    use sunrise_client::chunk::Chunk;
+    use sunrise_core::nbt::{Compound, Tag};
+    with_game(|game| {
+        game.options.dedicated = Some(Vec::new());
+        game.native_level_opened(super::Dim::Overworld);
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.streaming.forced.insert((0, 0));
+        game.native_joins_skip();
+        let nbt: Compound = [("NoAI".into(), Tag::Byte(1))].into_iter().collect();
+        let level = game.level("minecraft:overworld").expect("the overworld");
+        let entity = game
+            .level_summon(level, "minecraft:pig", [1.5, 70.0, 1.5], nbt)
+            .expect("a level write")
+            .expect("a pig");
+        let id = entity.id();
+        for delay in [7, 0] {
+            game.mobs
+                .iter_mut()
+                .find(|m| m.id == id)
+                .unwrap()
+                .ai
+                .no_jump_delay = delay;
+            let host = &*game as &dyn mod_api::Host;
+            assert_eq!(
+                mod_api::LivingRef::new(entity).no_jump_delay(host),
+                Some(delay)
+            );
+        }
     });
 }
 

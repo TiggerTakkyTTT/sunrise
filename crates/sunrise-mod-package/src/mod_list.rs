@@ -94,6 +94,9 @@ pub struct NativePage {
     pub mappings: Vec<KeyMapping>,
     /// Its settings, in registration order, with the values the page shows.
     pub settings: Vec<NativeSetting>,
+    /// The mod registered its own config screen (`Registrar::register_config_screen`): Config
+    /// shows for it and opens that screen, not this page's settings.
+    pub own_screen: bool,
 }
 
 /// A setting on a native mod's page: its key within the mod, the translation keys of its label

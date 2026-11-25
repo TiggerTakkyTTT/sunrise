@@ -14,6 +14,7 @@ pub(super) struct LivingFrame<'a> {
     pub(super) viewer: Option<&'a sunrise_client::scoreboard::Team>,
     pub(super) skinning: bool,
     pub(super) listened: bool,
+    pub(super) now: std::time::Instant,
 }
 
 impl Game<'_> {
@@ -32,12 +33,19 @@ impl Game<'_> {
             viewer,
             skinning,
             listened,
+            now,
         } = *frame;
         let atlas = &self.gui.atlas;
         let lookup = |name: &str| atlas.sprites.get(name).map(|r| [r.u0, r.v0, r.u1, r.v1]);
         // LevelRenderer: the entity the view looks out of is not drawn
         // in first person.
         if self.hides_as_camera(mob.id) {
+            return;
+        }
+        if !self.entity_section_visible(
+            glam::DVec3::new(mob.position.x, mob.position.y, mob.position.z),
+            now,
+        ) {
             return;
         }
         let is_player = &*mob.kind.id == "minecraft:player";
@@ -79,7 +87,7 @@ impl Game<'_> {
             && !sunrise_client::scoreboard::invisible_to(
                 self.mob_team_of(mob),
                 viewer,
-                self.spectator(),
+                self.own_player_is_spectator(),
                 true,
             );
         let layers_only = invisible && outline.is_none() && is_player && !seen_invisible;
@@ -108,7 +116,7 @@ impl Game<'_> {
         // The mods' pre hooks (a player's `render_player_pre`, then `render_living_pre`),
         // before any of the vanilla model's parts (a sulfur cube's swallowed block) are
         // drawn. A cancel skips the rest of the entity's drawing and its post hooks; the
-        // frame's later passes (flames, name tag, shadow, leash) leave it out too.
+        // frame's later name tag and leash passes leave it out too, its flames and shadow stay.
         let who = is_player
             .then(|| self.remote_player_name(mob.id))
             .flatten()

@@ -22,7 +22,10 @@ pub(super) fn bind(
             let (namespace, name) = file.strip_prefix("data/")?.split_once(&separator)?;
             let name = name.strip_suffix(".json")?;
             let json = serde_json::from_slice::<Json>(&root.read(&file).ok()?).ok()?;
-            Some((format!("{namespace}:{name}"), TagLayers::from_file(&json)))
+            let layer = TagLayers::from_file(json)
+                .inspect_err(|err| log::warn!("Sunrise: couldn't read tag file {file}: {err}"))
+                .ok()?;
+            Some((format!("{namespace}:{name}"), layer))
         })
         .collect();
     TagLayers::bind(registry, &raw, contains)

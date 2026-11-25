@@ -5,12 +5,12 @@
 //! again whole, off the game thread, rather than block by block, and each
 //! section changed is remeshed once.
 use crate::chunk::index;
-use crate::fast_hash::{FxHashMap, FxHashSet};
+use crate::fast_hash::FxHashMap;
 use crate::world::World;
 use sunrise_world::registry::BlockStateId;
 
 /// A run of one column, resolved: blocks `y0..=y1` of column (x, z) set to
-/// `state` where filter `only` (if any) passes the block there.
+/// `state` where filter `only` (if any) passes the block there. Filter IDs may be sparse.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Run {
     pub x: i32,
@@ -18,7 +18,7 @@ pub struct Run {
     pub y0: i32,
     pub y1: i32,
     pub state: u32,
-    pub only: Option<u16>,
+    pub only: Option<usize>,
 }
 
 /// What an edit changed.
@@ -31,8 +31,6 @@ pub struct Outcome {
     /// Changes of the states `tracked` asked for (block entities, watched
     /// blocks): position, previous and new state.
     pub tracked: Vec<((i32, i32, i32), u32, u32)>,
-    /// Replaced cells whose open group journal needs to forget the old block.
-    pub group_clears: FxHashSet<(i32, i32, i32)>,
 }
 
 /// Changed sections waiting for one whole-chunk publication, after transaction commit.
@@ -42,6 +40,7 @@ pub struct BulkPublication {
 }
 
 /// Per state answers, worked out once each.
+#[derive(Default)]
 struct Memo(Vec<u8>);
 impl Memo {
     #[inline]
@@ -59,10 +58,8 @@ impl Memo {
 
 impl World {
     /// Make `runs` in order, each seeing the changes of those before it.
-    /// `matches(filter, state)` says whether a filter passes a state, and
-    /// `tracked(state)` whether its changes are reported; each is asked once
-    /// per state. `journaled_groups` names cells whose group may have been tentatively removed;
-    /// report their changes too, even when overlapping runs leave the same block at the end.
+    /// `matches(filter, state)` is asked once per filter and state, and
+    /// `tracked(state)` once per state to decide whether its changes are reported.
     /// Runs in unloaded chunks and the parts of runs outside each chunk's own column
     /// (`Chunk::layout`) are left out.
     ///
@@ -76,34 +73,32 @@ impl World {
     pub fn edit_runs(
         &mut self,
         runs: &[Run],
-        journaled_groups: &FxHashSet<(i32, i32, i32)>,
-        matches: impl FnMut(u16, u32) -> bool,
+        matches: impl FnMut(usize, u32) -> bool,
         tracked: impl FnMut(u32) -> bool,
     ) -> Outcome {
-        self.write_runs::<false>(runs, journaled_groups, matches, tracked, |_, _, _| {})
+        self.write_runs::<false>(runs, matches, tracked, |_, _, _, _, _| {})
             .0
     }
 
     /// The same bulk storage write without publishing; `keep` records each transition
-    /// in the caller's transaction.
+    /// (including whether it replaces the group and what group it replaces) in the
+    /// caller's transaction.
     pub fn stage_edit_runs(
         &mut self,
         runs: &[Run],
-        journaled_groups: &FxHashSet<(i32, i32, i32)>,
-        matches: impl FnMut(u16, u32) -> bool,
+        matches: impl FnMut(usize, u32) -> bool,
         tracked: impl FnMut(u32) -> bool,
-        keep: impl FnMut((i32, i32, i32), u32, u32),
+        keep: impl FnMut((i32, i32, i32), u32, u32, bool, Option<u64>),
     ) -> (Outcome, BulkPublication) {
-        self.write_runs::<true>(runs, journaled_groups, matches, tracked, keep)
+        self.write_runs::<true>(runs, matches, tracked, keep)
     }
 
     fn write_runs<const STAGED: bool>(
         &mut self,
         runs: &[Run],
-        journaled_groups: &FxHashSet<(i32, i32, i32)>,
-        mut matches: impl FnMut(u16, u32) -> bool,
+        mut matches: impl FnMut(usize, u32) -> bool,
         mut tracked: impl FnMut(u32) -> bool,
-        mut keep: impl FnMut((i32, i32, i32), u32, u32),
+        mut keep: impl FnMut((i32, i32, i32), u32, u32, bool, Option<u64>),
     ) -> (Outcome, BulkPublication) {
         let mut out = Outcome::default();
         let mut publication = BulkPublication::default();
@@ -123,11 +118,11 @@ impl World {
                 })
                 .push(i as u32);
         }
-        let mut filter_memo: Vec<Memo> = Vec::new();
-        let mut tracked_memo = Memo(Vec::new());
+        let mut filter_memo: FxHashMap<usize, Memo> = FxHashMap::default();
+        let mut tracked_memo = Memo::default();
         let mut values: Vec<Option<Box<[u32; 4096]>>> = Vec::new();
         let mut changed: Vec<bool> = Vec::new();
-        let mut grouped_changes = Vec::new();
+        let mut group_clears = Vec::new();
         for key in order {
             let Some(chunk) = self.chunks.get(&key) else {
                 continue;
@@ -145,6 +140,10 @@ impl World {
                 let r = runs[i as usize];
                 let (lx, lz) = (r.x & 15, r.z & 15);
                 let (y0, y1) = (r.y0.max(min_y), r.y1.min(max_y - 1));
+                if y0 > y1 {
+                    continue;
+                }
+                let mut filter = r.only.map(|id| (id, filter_memo.entry(id).or_default()));
                 let mut y = y0;
                 while y <= y1 {
                     let s = ((y - min_y) >> 4) as usize;
@@ -160,30 +159,36 @@ impl World {
                         if old == r.state {
                             continue;
                         }
-                        if let Some(f) = r.only {
-                            let f = f as usize;
-                            if filter_memo.len() <= f {
-                                filter_memo.resize_with(f + 1, || Memo(Vec::new()));
-                            }
-                            if !filter_memo[f].get(old, |s| matches(f as u16, s)) {
-                                continue;
-                            }
+                        if let Some((id, memo)) = &mut filter
+                            && !memo.get(old, |state| matches(*id, state))
+                        {
+                            continue;
                         }
+                        let pos = (r.x, yy, r.z);
+                        let group = has_groups
+                            .then(|| chunk.connection_groups.get(&((s as u32) << 12 | at as u32)))
+                            .flatten()
+                            .copied();
+                        let clears_group = (STAGED || group.is_some())
+                            && self.replaces_connection_group(
+                                BlockStateId(old),
+                                BlockStateId(r.state),
+                            );
                         if STAGED {
-                            keep((r.x, yy, r.z), old, r.state);
+                            keep(
+                                pos,
+                                old,
+                                r.state,
+                                clears_group,
+                                group.filter(|_| clears_group),
+                            );
+                        }
+                        if clears_group && group.is_some() {
+                            group_clears.push(pos);
                         }
                         vals[at] = r.state;
                         changed[s] = true;
                         any += 1;
-                        let pos = (r.x, yy, r.z);
-                        if (has_groups
-                            && chunk
-                                .connection_groups
-                                .contains_key(&((s as u32) << 12 | at as u32)))
-                            || (!journaled_groups.is_empty() && journaled_groups.contains(&pos))
-                        {
-                            grouped_changes.push((pos, old, r.state));
-                        }
                         if tracked_memo.get(old, &mut tracked)
                             || tracked_memo.get(r.state, &mut tracked)
                         {
@@ -207,11 +212,11 @@ impl World {
                     chunk.replace_blocks(s, v);
                 }
             }
-            for (pos, old, new) in grouped_changes.drain(..) {
-                if self.block_storage_changed(pos, BlockStateId(old), BlockStateId(new))
-                    && journaled_groups.contains(&pos)
-                {
-                    out.group_clears.insert(pos);
+            for (x, y, z) in group_clears.drain(..) {
+                if STAGED {
+                    self.set_connection_group_stored(x, y, z, None);
+                } else {
+                    self.invalidate_replaced_group((x, y, z));
                 }
             }
             if STAGED {
@@ -263,7 +268,6 @@ mod tests {
     use super::*;
     use crate::chunk::Chunk;
     use std::sync::Arc;
-    use sunrise_world::registry::BlockStateId;
 
     fn world() -> World {
         let mut w = World::new(BlockStateId(0), 0);
@@ -285,7 +289,7 @@ mod tests {
         w.block_log = Some(Vec::new());
         w
     }
-    fn run(x: i32, z: i32, y0: i32, y1: i32, state: u32, only: Option<u16>) -> Run {
+    fn run(x: i32, z: i32, y0: i32, y1: i32, state: u32, only: Option<usize>) -> Run {
         Run {
             x,
             z,
@@ -306,7 +310,7 @@ mod tests {
             run(3, 4, 0, 80, 7, Some(0)),
             run(-1, 20, -70, 400, 9, None),
         ];
-        let out = w.edit_runs(&runs, &FxHashSet::default(), |_, s| s == 0, |_| false);
+        let out = w.edit_runs(&runs, |_, s| s == 0, |_| false);
         assert_eq!(w.block(3, 9, 4).0, 1);
         assert_eq!(w.block(3, 11, 4).0, 5);
         assert_eq!(w.block(3, 13, 4).0, 7);
@@ -327,11 +331,35 @@ mod tests {
     }
 
     #[test]
+    fn sparse_filter_ids_match_and_memoize_independently() {
+        let mut w = World::new(BlockStateId(0), 0);
+        w.chunks.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        let runs = [
+            run(0, 0, 0, 1, 1, Some(0)),
+            run(1, 0, 0, 1, 1, Some(usize::MAX)),
+            run(2, 0, 0, 1, 1, Some(usize::MAX)),
+        ];
+        let mut asked = Vec::new();
+        let out = w.edit_runs(
+            &runs,
+            |id, state| {
+                asked.push((id, state));
+                id == usize::MAX && state == 0
+            },
+            |_| false,
+        );
+        assert_eq!(asked, [(0, 0), (usize::MAX, 0)]);
+        assert_eq!(out.changed, 4);
+        assert_eq!(w.block(0, 0, 0), BlockStateId(0));
+        assert_eq!(w.block(1, 0, 0), BlockStateId(1));
+        assert_eq!(w.block(2, 1, 0), BlockStateId(1));
+    }
+
+    #[test]
     fn unloaded_chunks_and_unchanged_blocks_are_left_out() {
         let mut w = world();
         let out = w.edit_runs(
             &[run(100, 100, 0, 10, 0, None), run(0, 0, 0, 10, 1, None)],
-            &FxHashSet::default(),
             |_, _| true,
             |_| false,
         );
@@ -344,12 +372,7 @@ mod tests {
     #[ignore = "daily"]
     fn tracked_states_are_reported() {
         let mut w = world();
-        let out = w.edit_runs(
-            &[run(1, 1, 60, 65, 3, None)],
-            &FxHashSet::default(),
-            |_, _| true,
-            |s| s == 3,
-        );
+        let out = w.edit_runs(&[run(1, 1, 60, 65, 3, None)], |_, _| true, |s| s == 3);
         assert_eq!(out.tracked.len(), 6);
         assert_eq!(out.tracked[0], ((1, 60, 1), 1, 3));
         assert_eq!(out.tracked[5], ((1, 65, 1), 0, 3));
@@ -360,19 +383,9 @@ mod tests {
         let mut w = world();
         let air = |s: u32| s == 0;
         assert_eq!(w.world_surface(5, 5, |s| air(s.0)), 64);
-        w.edit_runs(
-            &[run(5, 5, 20, 63, 0, None)],
-            &FxHashSet::default(),
-            |_, _| true,
-            |_| false,
-        );
+        w.edit_runs(&[run(5, 5, 20, 63, 0, None)], |_, _| true, |_| false);
         assert_eq!(w.world_surface(5, 5, |s| air(s.0)), 20);
-        w.edit_runs(
-            &[run(5, 5, 90, 90, 2, None)],
-            &FxHashSet::default(),
-            |_, _| true,
-            |_| false,
-        );
+        w.edit_runs(&[run(5, 5, 90, 90, 2, None)], |_, _| true, |_| false);
         assert_eq!(w.world_surface(5, 5, |s| air(s.0)), 91);
     }
 
@@ -384,12 +397,7 @@ mod tests {
         let mut w = World::new(BlockStateId(0), 0);
         w.chunks
             .insert((0, 0), Arc::new(Chunk::with_layout(0, 0, tall)));
-        let out = w.edit_runs(
-            &[run(2, 3, -500, 900, 4, None)],
-            &FxHashSet::default(),
-            |_, _| true,
-            |_| false,
-        );
+        let out = w.edit_runs(&[run(2, 3, -500, 900, 4, None)], |_, _| true, |_| false);
         assert_eq!(out.changed, 640);
         let chunk = &w.chunks[&(0, 0)];
         assert_eq!(chunk.block(2, -128, 3).0, 4);

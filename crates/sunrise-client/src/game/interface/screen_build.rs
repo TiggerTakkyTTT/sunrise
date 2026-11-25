@@ -22,32 +22,41 @@ use super::{Game, Screen};
 
 /// What the native hooks see of the screen showing (`observe_screen`), kept
 /// beside its build so one `ScreenState` holds both.
+#[derive(Clone)]
 pub(super) struct ObservedScreen {
     pub(super) id: &'static str,
     /// Not a `Screen` value: the title's own screen or an overlay drawn over
     /// gameplay (sign editor, book, dialog, prompt). `set_screen` never sees
     /// it open or close.
     pub(super) overlay: bool,
+    pub(super) mod_screen: Option<String>,
     pub(super) menu: Option<String>,
+    pub(super) menu_generation: Option<u64>,
+    /// Dialog, warning and waiting screens share one public id, not one receiver.
+    pub(super) dialog_key: Option<(bool, bool, Option<u64>)>,
     pub(super) title: Option<std::sync::Arc<mod_api::Text>>,
     pub(super) rect: [f32; 4],
+    /// Actual GUI-scaled screen dimensions (`width`, `height`), used to detect
+    /// viewport/GUI-scale resizes independently of a panel's `rect`.
+    pub(super) screen_size: [f32; 2],
     pub(super) slots: usize,
     pub(super) mouse: [f32; 2],
     pub(super) partial_tick: f32,
+    pub(super) regions: Vec<mod_api::ScreenRegion>,
 }
 
 impl ObservedScreen {
     pub(super) fn view(&self) -> ScreenView<'_> {
         ScreenView::from(mod_api::__private::built::ScreenView {
             id: self.id,
+            mod_screen: self.mod_screen.as_deref(),
             menu: self.menu.as_deref(),
             title: self.title.as_deref(),
             rect: self.rect,
             slots: self.slots,
             mouse: self.mouse,
             partial_tick: self.partial_tick,
-            // A snapshot for comparing frames: the frame's own view has them.
-            regions: &[],
+            regions: &self.regions,
         })
     }
 }
@@ -295,6 +304,16 @@ impl ScreenBuild {
     }
 }
 
+/// The last handled mouse press on a screen, for vanilla's 250ms double-click
+/// detection (`MouseHandler.LastClick`, `MouseHandler.java:101-106`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LastScreenClick {
+    time: u64,
+    title_mode: Option<u64>,
+    pub(super) screen_instance: u64,
+    pub(super) button: i32,
+}
+
 /// What the game knows about the screen showing: the snapshot the native hooks
 /// see (`ObservedScreen`) and the build the screen's drawing will read.
 #[derive(Default)]
@@ -307,6 +326,16 @@ pub(super) struct ScreenState {
     /// frame painted them (`recipe_book_screen::sprite_bounds`); None when the
     /// book drew none.
     pub(super) drawn_book_tabs: std::cell::Cell<Option<[f32; 4]>>,
+    pub(super) widgets: super::screen_widgets::MountedScreenWidgets,
+    /// Monotonic identity of the currently open screen instance. Bumped on
+    /// every screen open, close, or replacement, and preserved across
+    /// same-instance resize/rebuild (`Screen.resize`/`rebuildWidgets`).
+    pub(super) screen_instance: u64,
+    /// Identity of the text field that last owned IME composition, so switching
+    /// directly between two fields clears the old field's preedit and area.
+    pub(super) ime_focus: Option<u64>,
+    /// Last handled screen mouse press for 250ms double-click detection.
+    pub(super) last_click: Option<LastScreenClick>,
     /// A mod's `ScreenOpening::Vanilla` answer is opening its screen: that
     /// change fires no screen hook again.
     pub(super) replacing: bool,
@@ -314,6 +343,50 @@ pub(super) struct ScreenState {
     /// (a mod's `Cancel`, `ModScreen` or `Vanilla`): a caller's grab after it
     /// leaves the screen that shows its pointer. Never set with no listener.
     pub(super) answered: std::cell::Cell<bool>,
+}
+
+impl ScreenState {
+    /// Advance the receiving screen's identity. Rebuilding children is not a replacement.
+    pub(super) fn bump_instance(&mut self) -> u64 {
+        self.screen_instance = self.screen_instance.wrapping_add(1);
+        self.last_click = None;
+        self.screen_instance
+    }
+
+    /// Whether a press at `now` on `screen_instance` with `button` is a vanilla
+    /// double-click (within 250ms on the same screen instance and button,
+    /// `MouseHandler.java:101-106`).
+    pub(super) fn is_double_click(
+        &self,
+        now: u64,
+        screen_instance: u64,
+        title_mode: Option<u64>,
+        button: i32,
+    ) -> bool {
+        self.last_click.is_some_and(|last| {
+            now.checked_sub(last.time)
+                .is_some_and(|elapsed| elapsed < 250)
+                && last.title_mode == title_mode
+                && last.screen_instance == screen_instance
+                && last.button == button
+        })
+    }
+
+    /// Record a handled mouse press for subsequent double-click detection.
+    pub(super) fn record_click(
+        &mut self,
+        now: u64,
+        screen_instance: u64,
+        title_mode: Option<u64>,
+        button: i32,
+    ) {
+        self.last_click = Some(LastScreenClick {
+            time: now,
+            title_mode,
+            screen_instance,
+            button,
+        });
+    }
 }
 
 /// One frame's `RenderInventoryMobEffects` answer and what it was taken for.
@@ -494,11 +567,8 @@ impl Game<'_> {
         self.release_screen_mappings();
     }
 
-    /// `Screen.init`/`Screen.resize` for the game's open screen: builds it
-    /// when it opens, remakes it when the window or the GUI scale changed it,
-    /// and drops it when it closes. A frame that changes neither builds
-    /// nothing, so `observe_screen` calls it every frame.
-    pub(super) fn build_screen(&mut self) {
+    /// Framebuffer size and GUI projection, including before the renderer is initialized.
+    pub(super) fn gui_frame_now(&self) -> ([u32; 2], GuiSize) {
         let framebuffer = self.renderer.as_ref().map_or_else(
             || {
                 self.window.as_ref().map_or([1280, 720], |window| {
@@ -508,7 +578,16 @@ impl Game<'_> {
             },
             |renderer| [renderer.config.width, renderer.config.height],
         );
-        self.build_screen_at(framebuffer);
+        let inputs = self.settings.gui_scale_inputs();
+        (
+            framebuffer,
+            GuiSize::new(framebuffer, inputs.requested, inputs.unicode),
+        )
+    }
+
+    /// `Screen.init`/`Screen.resize` builds the open screen, and drops it when it closes.
+    pub(super) fn build_screen(&mut self) {
+        self.build_screen_at(self.gui_frame_now().0);
     }
 
     fn build_screen_at(&mut self, framebuffer: [u32; 2]) {
@@ -1584,8 +1663,7 @@ mod tests {
                 // The inventory and creative screen belong to a client in a world. An
                 // in-memory connection supplies the client registry holder for creative tabs.
                 let _server = crate::game::native_client_session::tests::logged_client(game);
-                game.native_lifecycle
-                    .begin_open(mod_api::Authority::RemoteClient);
+                game.native_lifecycle.begin_open(None);
                 game.player = Some(
                     sunrise_client::motion::PlayerMotion::new(
                         game.motion,
@@ -1659,7 +1737,7 @@ mod tests {
                 // Vanilla's painted 26 x 32 tabs are in two rows. The player
                 // can use the operator utilities, including the tab in column five.
                 game.potions.effects.list.clear();
-                game.set_mode_id(1);
+                game.set_local_mode(sunrise_client::command::args::GameMode::Creative);
                 game.ui.registries.permission = 2;
                 game.settings.operator_items_tab = true;
                 game.screen = Screen::Creative;
@@ -1679,7 +1757,7 @@ mod tests {
                 assert_eq!(tabs, expected);
 
                 // AnvilScreen does not paint the inventory's EffectsInInventory panel.
-                game.set_mode_id(0);
+                game.set_local_mode(sunrise_client::command::args::GameMode::Survival);
                 game.potions.effects.list = vec![sunrise_client::effects::EffectInstance::new(
                     "speed", 200, 0,
                 )];

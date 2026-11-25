@@ -1,6 +1,5 @@
 use super::*;
 use crate::item::crafting::Shape;
-use crate::world::snapshots::LootEntity;
 use crate::{RecipeSlotDisplay, Tag, Text};
 
 fn round<T: Wire>(value: &T, initial: u16) {
@@ -30,7 +29,9 @@ fn recursive_at_limit<T: Wire>(leaf: T, wraps: usize, reader_depth: u16, wrap: i
 /// is refused on both sides, and it fits a small stack.
 #[test]
 fn datapack_schemas_and_values_stop_at_the_generic_depth() {
-    use crate::world::datapack_registry::{DatapackField, DatapackFieldKind, DatapackValue};
+    use crate::world::datapack_registry::{
+        DatapackField, DatapackFieldKind, DatapackValue, DatapackVariant,
+    };
     std::thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(|| {
@@ -59,6 +60,25 @@ fn datapack_schemas_and_values_stop_at_the_generic_depth() {
                         "a",
                         DatapackFieldKind::Record {
                             fields: vec![field],
+                        },
+                    )
+                },
+            );
+            recursive_at_limit(DatapackValue::Int(1), 31, 0, |v| DatapackValue::Variant {
+                id: "example:a".into(),
+                fields: vec![("a".into(), v)],
+            });
+            // A dispatched field, its kind and the variant use three envelopes per wrapper.
+            recursive_at_limit(
+                DatapackField::required("a", DatapackFieldKind::Bool),
+                10,
+                0,
+                |field| {
+                    DatapackField::required(
+                        "a",
+                        DatapackFieldKind::Dispatch {
+                            key: "type".into(),
+                            variants: vec![DatapackVariant::new("example:a", vec![field])],
                         },
                     )
                 },
@@ -96,14 +116,6 @@ fn structural_families_fit_a_small_stack() {
                 display = RecipeSlotDisplay::Composite(vec![display]);
             }
             round(&display, 0);
-            let mut entity = LootEntity::default();
-            for _ in 0..15 {
-                entity = LootEntity {
-                    vehicle: Some(Box::new(entity)),
-                    ..Default::default()
-                };
-            }
-            round(&Box::new(entity), 0);
             // These public SCC members no longer recurse structurally: every Text
             // edge crosses through the stack-independent iterative codec. Their own
             // envelope still guards depth.
@@ -252,42 +264,6 @@ fn json_backed_codecs_preflight_before_serde_recursion() {
                     serde_json::Value::Array(values) => pending.extend(values),
                     serde_json::Value::Object(values) => pending.extend(values.into_values()),
                     _ => {}
-                }
-            }
-            let mut model = crate::ModelPart::new(vec![], vec![], Default::default());
-            for _ in 0..10 {
-                model = crate::ModelPart::new(
-                    vec![],
-                    vec![("child".into(), model)],
-                    Default::default(),
-                );
-            }
-            let mut valid_model = Writer::new();
-            valid_model.put(&model);
-            assert_eq!(valid_model.error(), None);
-            let _ = Reader::decode::<crate::ModelPart>(valid_model.bytes()).unwrap();
-            for depth in 10..1024 {
-                if depth == 11 {
-                    let mut refused = Writer::new();
-                    refused.put(&model);
-                    assert_eq!(refused.error(), Some(WireError::Depth));
-                }
-                model = crate::ModelPart::new(
-                    vec![],
-                    vec![("child".into(), model)],
-                    Default::default(),
-                );
-            }
-            let mut out = Writer::new();
-            out.put(&model);
-            assert_eq!(out.error(), Some(WireError::Depth));
-            let mut parts = vec![model];
-            while let Some(mut part) = parts.pop() {
-                for (_, child) in part.children_mut() {
-                    parts.push(std::mem::replace(
-                        child,
-                        crate::ModelPart::new(vec![], vec![], Default::default()),
-                    ));
                 }
             }
         })

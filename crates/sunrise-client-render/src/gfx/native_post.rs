@@ -20,7 +20,7 @@ pub(super) const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 /// out as the frame stores them: encoded, as `sunrise_encode`, or where the frame holds linear
 /// light (`linear`, `[frame] blend = "linear"`) as they are. The shadow pass has no prelude, so
 /// these stand alone.
-pub fn line_helpers(api: Api, linear: bool) -> &'static str {
+pub(crate) fn line_helpers(api: Api, linear: bool) -> &'static str {
     match (api, linear) {
         (Api::V0_1, _) => {
             "fn sunrise_line_in(c: vec3<f32>) -> vec3<f32> { return c; }
@@ -435,7 +435,7 @@ fn frame_entry(visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
 }
 
 /// The size of the water mirror for a world of `size`: half of it.
-pub fn reflection_size(size: [u32; 2]) -> [u32; 2] {
+pub(crate) fn reflection_size(size: [u32; 2]) -> [u32; 2] {
     size.map(|s| s.div_ceil(2).max(1))
 }
 
@@ -692,7 +692,7 @@ impl NativeFrame {
     /// colour `color` can be copied (the scaled target, not the window's own), its size and
     /// format; the group is made again when they change. Nothing for a pack that doesn't read
     /// them.
-    pub fn fit_opaque(
+    pub(crate) fn fit_opaque(
         &mut self,
         device: &wgpu::Device,
         depth: &wgpu::Texture,
@@ -723,7 +723,7 @@ impl NativeFrame {
     }
 
     /// Fills `opaque_color` from the world's colour `color`: a copy, under 0.2 decoded.
-    pub fn copy_opaque(
+    pub(crate) fn copy_opaque(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -743,7 +743,7 @@ impl NativeFrame {
     }
 
     /// The water mirror `view` as the material reads it: under 0.2 decoded into a copy.
-    pub fn linear_mirror(
+    pub(crate) fn linear_mirror(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -763,7 +763,7 @@ impl NativeFrame {
     }
 
     /// Sizes the surface target: the world's while a material stage writes it, else a blank.
-    pub fn fit_surface(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+    pub(crate) fn fit_surface(&mut self, device: &wgpu::Device, size: [u32; 2]) {
         if [self.surface.width(), self.surface.height()] != size {
             self.surface = surface_target(device, size);
             self.surface_view = self.surface.create_view(&Default::default());
@@ -772,7 +772,11 @@ impl NativeFrame {
 
     /// Binds `view` as this frame's `reflection` (`None`: the blank). The mirror is drawn
     /// before the stages read it.
-    pub fn set_reflection(&mut self, device: &wgpu::Device, view: Option<&wgpu::TextureView>) {
+    pub(crate) fn set_reflection(
+        &mut self,
+        device: &wgpu::Device,
+        view: Option<&wgpu::TextureView>,
+    ) {
         let view = view.unwrap_or(&self.blank);
         if *view != self.reflection {
             self.reflection = view.clone();
@@ -918,7 +922,7 @@ impl NativeFrame {
 }
 
 /// The option values of `constants` that `module` declares as overrides (wgpu refuses others).
-pub fn present_constants<'a>(
+pub(crate) fn present_constants<'a>(
     module: &naga::Module,
     constants: &'a [(String, f64)],
 ) -> Vec<(&'a str, f64)> {
@@ -1169,7 +1173,7 @@ impl NativePost {
     }
 
     /// Whether the pack has a `[tonemap]` of its own, which replaces Sunrise's tone curve.
-    pub fn tonemaps(&self) -> bool {
+    pub(crate) fn tonemaps(&self) -> bool {
         self.display.as_ref().is_some_and(|d| d.label.is_some())
     }
 
@@ -1514,8 +1518,13 @@ fn wetness(wetness: f32, rain: f32, dt: f32) -> f32 {
     rain + (wetness - rain) * 0.5f32.powf(dt / half_life)
 }
 
+// Native shader input inverts this exact, left-associated composition.
+pub(super) fn view_projection(projection: Mat4, bob: Mat4, spin: Mat4) -> Mat4 {
+    projection * bob * spin
+}
+
 /// The frame as packs read it (docs/api/shaders-reference.md), from the renderer's `Frame`.
-pub fn frame_inputs(
+pub(crate) fn frame_inputs(
     frame: &Frame,
     size: [u32; 2],
     seconds: f32,
@@ -1523,10 +1532,16 @@ pub fn frame_inputs(
     shadow: Option<&sunrise_shaders::Shadow>,
 ) -> FrameInputs {
     let aspect = size[0] as f32 / size[1].max(1) as f32;
-    let view = crate::camera::view_matrix(frame.yaw, frame.pitch);
-    let projection = super::world_projection(frame.fov_degrees, aspect, frame.depth_far)
-        * frame.bob
-        * frame.spin;
+    let view = if frame.roll == 0.0 {
+        crate::camera::view_matrix(frame.yaw, frame.pitch)
+    } else {
+        crate::camera::view_matrix_rolled(frame.yaw, frame.pitch, frame.roll)
+    };
+    let projection = view_projection(
+        super::world_projection(frame.fov_degrees, aspect, frame.depth_far),
+        frame.posed_bob(),
+        frame.spin,
+    );
     // A celestial body's direction at `angle` degrees (SkyRenderer: Y -90°, then X by the
     // angle, of straight up): overhead at 0, rising in the east (+x).
     let body = |angle: f32| {
@@ -1769,6 +1784,7 @@ mod tests {
     /// A scripted clock comes before STILL's ticks, eased values and wetness move by its
     /// delta, and a long wait between its frames is not a gap that starts them over.
     #[test]
+    #[ignore = "daily"]
     fn a_scripted_clock_drives_time_frame_index_and_eased_values() {
         let _gpu = crate::gfx::test_gpu::lock();
         use crate::gfx::pack_uniforms::FrameTiming;
@@ -1819,6 +1835,7 @@ mod tests {
     /// After a reset, the same frames give the same inputs, to the bit, as a pack just made,
     /// however the frames before moved the eased values, wetness and the frame count.
     #[test]
+    #[ignore = "daily"]
     fn a_reset_frame_gives_a_fresh_pack_s_inputs() {
         let _gpu = crate::gfx::test_gpu::lock();
         use crate::gfx::pack_uniforms::FrameTiming;
@@ -1869,6 +1886,7 @@ mod tests {
     /// After a reset a pass reads its pack's own targets blank, as in a pack just made: here
     /// `fb`, which a pass reads before the pass that writes it, so it holds last frame's.
     #[test]
+    #[ignore = "daily"]
     fn a_reset_post_reads_its_own_targets_blank() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(true) else {
@@ -2002,6 +2020,7 @@ mod tests {
     /// Two passes: the first doubles the world's colour (over 1, so the half-float target
     /// must keep it) times an option, the second halves it and writes the depth as alpha.
     #[test]
+    #[ignore = "daily"]
     fn passes_chain_through_half_float_targets_with_options_and_depth() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(true) else {
@@ -2122,6 +2141,7 @@ mod tests {
     /// `history` is black on the first frame, then what the pass before the last wrote the
     /// frame before.
     #[test]
+    #[ignore = "daily"]
     fn the_last_pass_reads_last_frames_input_as_history() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(true) else {
@@ -2247,6 +2267,7 @@ mod tests {
     /// `EXT_color_buffer_float`) but always renders to the integer formats, so the surface
     /// is an integer format, and `surface_at` gets the floats back from the stored bits.
     #[test]
+    #[ignore = "daily"]
     fn the_surface_is_an_integer_target_that_the_post_stage_reads_bit_exact() {
         let _gpu = crate::gfx::test_gpu::lock();
         assert_eq!(
@@ -2424,6 +2445,7 @@ mod tests {
     /// pipeline) on bits fed as integers and checks the texture holds them exactly: payloads,
     /// signs and denormals included.
     #[test]
+    #[ignore = "daily"]
     fn the_surface_keeps_every_bit_of_the_floats_written_through_the_material_stage_bitcast() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(false) else {
@@ -2560,6 +2582,7 @@ mod tests {
     /// Sunrise's tonemap or the pack's identity one, comes back encoded as it went in (within
     /// an 8-bit step), at alpha 1.
     #[test]
+    #[ignore = "daily"]
     fn a_0_2_world_comes_back_through_decode_tonemap_and_encode() {
         let _gpu = crate::gfx::test_gpu::lock();
         assert!(tonemap_entries(false).contains("sunrise_encode(min(sunrise_sanitize(out)"));
@@ -2682,6 +2705,7 @@ mod tests {
     /// A 0.2 pack's `Frame` describes the HDR display its picture goes to, and SDR
     /// without one: `hdr` 0, `headroom` 1, `paper_white` and `peak` 80, `black_level` 0.
     #[test]
+    #[ignore = "daily"]
     fn a_0_2_frame_describes_the_display_it_goes_to() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, _)) = device(false) else {
@@ -2724,6 +2748,7 @@ mod tests {
     /// alone, held to the headroom. In SDR Sunrise's is a clip at white. An HDR output switched
     /// to scRGB and back to HDR10 (`Hdr::retargeted`) maps it once all the same.
     #[test]
+    #[ignore = "daily"]
     fn a_0_2_pack_is_tone_mapped_once_by_its_own_curve_or_sunrises() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device(true) else {

@@ -23,6 +23,8 @@ type Registry = BTreeMap<(String, String), Option<(Definition, bool)>>;
 #[derive(Default)]
 pub struct PackRegistryDefinitions {
     entries: BTreeMap<&'static str, Registry>,
+    /// Admitted prepared holders for registries whose pack winners are stored above.
+    pub(super) prepared_ids: Vec<(&'static str, String)>,
 }
 
 /// Keep the admitted item definitions alongside the exact wire encoding.
@@ -33,6 +35,23 @@ enum Definition {
 }
 
 impl PackRegistryDefinitions {
+    /// Registry holders from this load, including tombstones for skipped or
+    /// refused winners. Standalone command metadata is not a holder source.
+    pub fn entries(&self) -> impl Iterator<Item = (&'static str, String, bool)> + '_ {
+        self.entries
+            .iter()
+            .flat_map(|(&registry, entries)| {
+                entries.iter().map(move |((namespace, path), entry)| {
+                    (registry, format!("{namespace}:{path}"), entry.is_some())
+                })
+            })
+            .chain(
+                self.prepared_ids
+                    .iter()
+                    .map(|(registry, id)| (*registry, id.clone(), true)),
+            )
+    }
+
     /// RegistryDataLoader's collected errors: try every winning definition,
     /// then refuse the entire load and report each failure by registry and id.
     pub(super) fn load(
@@ -131,8 +150,14 @@ impl PackRegistryDefinitions {
                 );
                 // The pack winner (even if refused or skipped) hides resources below it.
                 prepared.retain(|(key, _, _)| !entries.contains_key(key));
-                condition_filter::filter(&mut prepared, false, overlay.conditions, kind);
                 for (key, value, from_pack) in prepared {
+                    if !overlay
+                        .conditions
+                        .allows_parts(&value, kind, &key.0, &key.1)
+                    {
+                        entries.insert(key, None);
+                        continue;
+                    }
                     let definition = if kind == "enchantment" {
                         Definition::Enchantment(value)
                     } else if from_pack {
@@ -169,7 +194,7 @@ impl PackRegistryDefinitions {
                     let (Definition::Enchantment(value), from_pack) = entry.as_mut()? else {
                         return None;
                     };
-                    Some((format!("{namespace}:{path}"), value, *from_pack))
+                    Some(((namespace.clone(), path.clone()), value, *from_pack))
                 })
                 .collect();
             let binding = enchantments
@@ -180,10 +205,15 @@ impl PackRegistryDefinitions {
                         resources,
                         overlay,
                         defaults,
-                        enchantments.iter().map(|(id, _, _)| id.clone()).collect(),
+                        enchantments
+                            .iter()
+                            .map(|((namespace, path), _, _)| format!("{namespace}:{path}"))
+                            .collect(),
                     )
                 });
-            for (id, value, from_pack) in enchantments {
+            let mut rejected = Vec::new();
+            for (key, value, from_pack) in enchantments {
+                let id = format!("{}:{}", key.0, key.1);
                 let result = if let Some(binding) =
                     binding.as_ref().filter(|_| HolderSetBinding::needed(value))
                 {
@@ -207,7 +237,11 @@ impl PackRegistryDefinitions {
                         .entry("minecraft:enchantment")
                         .or_default()
                         .insert(id, error);
+                    rejected.push(key);
                 }
+            }
+            for key in rejected {
+                entries.insert(key, None);
             }
         }
         // RegistryDataLoader.validateRegistry: every dialog a winner names is bound.
@@ -656,15 +690,15 @@ mod tests {
                 files: &files,
                 ..PackOverlay::default()
             };
-            let packed = super::super::SyncData::stage_registry_definitions(
+            let (packed, admission) = super::super::SyncData::stage_registry_definitions(
                 root.path(),
                 &defaults,
                 &overlay,
                 &Default::default(),
                 &Default::default(),
                 |_| true,
-            )
-            .unwrap();
+            );
+            admission.unwrap();
             // Gameplay must not evaluate the definition conditions with this other context.
             packed
                 .install_items(
@@ -1143,7 +1177,7 @@ mod tests {
         )
         .unwrap();
         let defaults = sunrise_world::item_defaults::read(root.path()).unwrap();
-        let Err(error) = super::super::SyncData::stage_registry_definitions(
+        let (_, Err(error)) = super::super::SyncData::stage_registry_definitions(
             root.path(),
             &defaults,
             &PackOverlay::new(&files),

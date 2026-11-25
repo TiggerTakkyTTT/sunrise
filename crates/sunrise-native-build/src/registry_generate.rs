@@ -2,52 +2,14 @@
 use super::{Bundle, api};
 use crate::rust::Toolchain;
 use std::{
-    collections::BTreeSet,
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
-use sunrise_mod_package::native_route::PACKAGES;
 
-/// Copies only inert manifests. Source files, build scripts and Cargo config never enter it.
-pub fn stage(bundle: &Bundle, output: &Path) -> Result<(), String> {
-    let mut todo = vec![PathBuf::new()];
-    let mut seen = BTreeSet::new();
-    while let Some(relative) = todo.pop() {
-        if !seen.insert(relative.clone()) {
-            continue;
-        }
-        let input = bundle.dir.join(&relative);
-        let manifest_path = input.join("Cargo.toml");
-        if super::crates::is_link_or_junction(
-            &fs::symlink_metadata(&manifest_path).map_err(|e| e.to_string())?,
-        ) {
-            return Err("linked dependency manifest is refused".into());
-        }
-        let mut manifest: toml::Table = fs::read_to_string(&manifest_path)
-            .map_err(|e| e.to_string())?
-            .parse()
-            .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
-        for section in ["patch", "replace", "workspace"] {
-            if manifest.contains_key(section) {
-                return Err(format!(
-                    "{}: [{section}] is refused",
-                    manifest_path.display()
-                ));
-            }
-        }
-        rewrite_dependencies(bundle, &relative, &mut manifest, &mut todo)?;
-        if let Some(targets) = manifest
-            .get_mut("target")
-            .and_then(toml::Value::as_table_mut)
-        {
-            for target in targets
-                .iter_mut()
-                .filter_map(|(_, value)| value.as_table_mut())
-            {
-                rewrite_dependencies(bundle, &relative, target, &mut todo)?;
-            }
-        }
+/// For `native-lock`, emit only inert manifests; no build scripts, source or Cargo config.
+fn stage(project: &api::Project<'_>, output: &Path) -> Result<(), String> {
+    let write = |relative: &Path, manifest: &mut toml::Table| -> Result<(), String> {
         manifest.remove("bin");
         manifest.remove("example");
         manifest.remove("test");
@@ -68,54 +30,10 @@ pub fn stage(bundle: &Bundle, output: &Path) -> Result<(), String> {
         let dest = output.join(relative);
         fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         fs::write(dest.join("Cargo.toml"), manifest.to_string()).map_err(|e| e.to_string())?;
-        fs::write(dest.join("inert.rs"), "").map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-pub fn rewrite_dependencies(
-    bundle: &Bundle,
-    relative: &Path,
-    table: &mut toml::Table,
-    todo: &mut Vec<PathBuf>,
-) -> Result<(), String> {
-    for kind in super::crates::DEPENDENCY_KINDS {
-        let Some(deps) = table.get_mut(kind).and_then(toml::Value::as_table_mut) else {
-            continue;
-        };
-        let mut sdk = Vec::new();
-        for (key, dep) in deps.iter_mut() {
-            let get = |field| dep.get(field).and_then(toml::Value::as_str);
-            let package = get("package").unwrap_or(key);
-            if let Some(&(name, _)) = PACKAGES.iter().find(|(name, _)| *name == package) {
-                api::sdk_source(key, name, dep)?;
-                sdk.push(key.clone());
-                continue;
-            }
-            for selector in [
-                "git",
-                "rev",
-                "tag",
-                "branch",
-                "registry",
-                "registry-index",
-                "workspace",
-            ] {
-                if dep.get(selector).is_some() {
-                    return Err(format!("{key}: {selector} source is refused"));
-                }
-            }
-            if let Some(path) = dep.get("path") {
-                let path = path.as_str().ok_or("dependency path must be a string")?;
-                let inside = super::crates::local_path(&bundle.dir, relative, path)?;
-                todo.push(inside);
-            }
-        }
-        for key in sdk {
-            deps.remove(&key);
-        }
-    }
-    Ok(())
+        fs::write(dest.join("inert.rs"), "").map_err(|e| e.to_string())
+    };
+    let (mut root, _) = super::crates::rewrite_closure(project, &project.bundle.dir, write)?;
+    write(Path::new(""), &mut root)
 }
 
 /// The `Cargo.lock` of the game build `revision`, which a mod's lock starts from: kept in the
@@ -188,7 +106,7 @@ pub fn generate<T: Toolchain>(
         )
     })?;
     // Project owns the original API declaration and source-policy boundary.
-    api::Project::read(bundle).map_err(|e| e.to_string())?;
+    let project = api::Project::read(bundle).map_err(|e| e.to_string())?;
     let destination = bundle.dir.join("Cargo.lock");
     if destination.exists() && !update {
         return Err(
@@ -197,7 +115,7 @@ pub fn generate<T: Toolchain>(
     }
     fs::create_dir_all(super::root()).map_err(|e| e.to_string())?;
     let work = tempfile::tempdir_in(super::root()).map_err(|e| e.to_string())?;
-    stage(bundle, work.path())?;
+    stage(&project, work.path())?;
     let seed = super::registry_lock::RegistryLock::parse(&game(&native.sunrise)?)?;
     let rust = rust()?;
     let text = super::registry_resolve::resolve(work.path(), &seed, &seed, None, |subcommand| {
@@ -231,6 +149,11 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\nversion='0.1.0'\n[dependencies]\nsunrise-mod-api={ path='.sunrise/sdk/api/crates/sunrise-mod-api' }\nitoa='1'\n").unwrap();
         super::super::bundle_in(root).unwrap().unwrap()
     }
+    fn stage_bundle(bundle: &Bundle, output: &Path) -> Result<(), String> {
+        let project = api::Project::read(bundle).map_err(|e| e.to_string())?;
+        stage(&project, output)
+    }
+
     #[test]
     fn the_sdk_is_removed_only_in_its_path_form_and_sources_are_inert() {
         let input = tempfile::tempdir().unwrap();
@@ -244,7 +167,7 @@ mod tests {
         )
         .unwrap();
         let before = fs::read(input.path().join("Cargo.toml")).unwrap();
-        stage(&bundle, output.path()).unwrap();
+        stage_bundle(&bundle, output.path()).unwrap();
         assert!(!output.path().join(".cargo").exists());
         let generated = fs::read_to_string(output.path().join("Cargo.toml")).unwrap();
         assert!(!generated.contains("sunrise-mod-api"));
@@ -275,8 +198,8 @@ mod tests {
                 original.replace("{ path='.sunrise/sdk/api/crates/sunrise-mod-api' }", &form),
             )
             .unwrap();
-            let error = stage(&bundle, output.path()).unwrap_err();
-            assert!(error.starts_with(refusal), "{error}");
+            let error = stage_bundle(&bundle, output.path()).unwrap_err();
+            assert!(error.contains(refusal), "{error}");
         }
     }
     #[test]
@@ -308,7 +231,7 @@ mod tests {
                 format!("{original}\n{extra}"),
             )
             .unwrap();
-            assert!(stage(&bundle, output.path()).is_err());
+            assert!(stage_bundle(&bundle, output.path()).is_err());
             assert_eq!(
                 fs::read_to_string(input.path().join("Cargo.lock")).unwrap(),
                 "original pins"
@@ -332,7 +255,7 @@ mod tests {
             format!("{original}\nhelper={{path='local'}}\n"),
         )
         .unwrap();
-        stage(&bundle, output.path()).unwrap();
+        stage_bundle(&bundle, output.path()).unwrap();
         assert!(output.path().join("local/inert.rs").is_file());
         fs::write(
             input.path().join("Cargo.toml"),
@@ -340,7 +263,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            stage(&bundle, output.path())
+            stage_bundle(&bundle, output.path())
                 .unwrap_err()
                 .contains("outside the mod")
         );

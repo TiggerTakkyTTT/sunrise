@@ -74,6 +74,9 @@ impl Game<'_> {
             keep_client_state(self.world.block_entities.get(&key), &mut loaded);
             let command_block = matches!(loaded, BlockEntity::CommandBlock(_));
             self.world.block_entities.insert(key, loaded);
+            if source == BlockEntityDataSource::Chunk {
+                sunrise_client::spans::note_block_entity_loads(1);
+            }
             self.update_spawner_display(key);
             // The section is drawn again with what the block entity shows.
             let state = self.world.block(pos[0], pos[1], pos[2]);
@@ -123,12 +126,21 @@ impl Game<'_> {
         }
         // A mod block's is the mod's own, as on the server.
         let removed = match self.new_block_entity_for_state(state) {
-            Some(entity) => {
+            Some(mut entity) => {
+                // PotentSulfurBlockEntity.setLevel: the eruption clock starts as it joins the
+                // level, not at its first tick.
+                if let BlockEntity::PotentSulfur(sulfur) = &mut entity {
+                    sulfur.eruption_tick = self.world.game_time;
+                }
                 let same = self.world.block_entities.get(&pos).is_some_and(|e| {
                     e.id() == entity.id() && !(other_block && matches!(e, BlockEntity::Mod(_)))
                 });
                 if same {
                     return;
+                }
+                // With no previous state this is a column load/adoption, not a block edit.
+                if previous.is_none() {
+                    sunrise_client::spans::note_block_entity_loads(1);
                 }
                 self.world.block_entities.replace(pos, entity)
             }

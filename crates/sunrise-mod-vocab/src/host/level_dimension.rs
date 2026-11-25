@@ -37,7 +37,7 @@ pub trait LevelDimensionBackend {
     /// scale, ambient light, fixed time, infiniburn, monster spawn light, sky and the gameplay
     /// switches a mod's `DimensionSettings` or a data pack sets. A level whose type neither gave
     /// fields for has the Overworld's. None for a stale handle; on a client, the level it shows.
-    fn level_dimension_type(&self, level: LevelRef) -> Option<LevelDimensionType>;
+    fn level_dimension_type(&self, level: LevelRef) -> Option<LevelDimensionType<'_>>;
     /// Side: server.
     /// `Level.getSeaLevel`: 63 in the Overworld, 32 in the Nether, 0 in the End; for a level of the
     /// noise generator the `sea_level` of its noise settings (a data pack's too, when it replaces

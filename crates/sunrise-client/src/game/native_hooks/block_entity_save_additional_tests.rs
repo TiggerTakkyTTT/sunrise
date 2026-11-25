@@ -282,14 +282,6 @@ mod tests {
     impl mod_api::BlockPart for SaveItemsPart {}
     #[mod_api::sunrise_part]
     impl BlockEntityPart for SaveItemsPart {
-        fn block_entity_ticks(
-            &self,
-            _: &dyn mod_api::Host,
-            event: &mut mod_api::BlockEntityTicksEvent<'_>,
-        ) {
-            event.ticks = true;
-        }
-
         fn block_entity_save_additional(
             &self,
             _: &dyn LevelHost,
@@ -393,28 +385,38 @@ mod tests {
                 assert!(game.streaming.set_forced(0, 0, true));
                 game.update_chunk_tickets();
                 game.tick_block_entities().unwrap();
+                let stone = saved_stack("minecraft:stone");
                 let expected = [
                     Some(saved_stack("minecraft:dirt")),
                     None,
-                    Some(saved_stack("minecraft:stone")),
+                    Some(stone.clone()),
                 ];
+                let items_key = "Items".into();
                 for (x, items) in (1..=3).zip(&expected) {
-                    assert_eq!(
-                        game.world
+                    assert!(
+                        !game
+                            .world
                             .block_entities
-                            .ticking(game.world.block(x, 64, 1).0),
-                        sunrise_client::block_entities::Ticking::Yes,
+                            .ticker_slots()
+                            .iter()
+                            .any(|(pos, _)| *pos == (x, 64, 1))
                     );
                     let Some(BlockEntity::Mod(row)) = game.world.block_entities.get(&(x, 64, 1))
                     else {
                         panic!("missing resident holder at {x}");
                     };
                     assert!(row.numeric_id().is_some());
-                    assert!(row.nbt.get(&"Items".into()).is_none());
-                    assert_eq!(
-                        row.items[0].as_ref().unwrap().item.as_ref(),
-                        "minecraft:stone"
-                    );
+                    assert!(row.tick_kind().is_none());
+                    if x == 3 {
+                        assert_eq!(row.nbt.get(&items_key), None);
+                        let [Some(stack)] = row.items.as_slice() else {
+                            panic!("expected one modeled stack at {x}");
+                        };
+                        assert_eq!((stack.item.as_ref(), stack.count), ("minecraft:stone", 1));
+                    } else {
+                        assert_eq!(row.nbt.get(&items_key), Some(&stone));
+                        assert!(row.items.is_empty());
+                    }
                     let captured = game.block_entity_nbt([x, 64, 1]).unwrap();
                     assert_eq!(captured.get("Items"), items.as_ref());
                 }
@@ -425,11 +427,7 @@ mod tests {
                     .unwrap();
                 game.save.flush().unwrap();
                 let reloaded = game.save.load(0, 0, registry, game.res.biomes()).unwrap();
-                for (x, item) in [
-                    (1, Some("minecraft:dirt")),
-                    (2, None),
-                    (3, Some("minecraft:stone")),
-                ] {
+                for (x, items) in (1..=3).zip(&expected) {
                     let (_, BlockEntity::Mod(row)) = reloaded
                         .block_entities
                         .iter()
@@ -438,17 +436,16 @@ mod tests {
                     else {
                         panic!("missing saved holder at {x}");
                     };
-                    assert_eq!(
-                        row.items
-                            .first()
-                            .and_then(Option::as_ref)
-                            .map(|stack| stack.item.as_ref()),
-                        item
-                    );
-                    assert!(
-                        row.nbt.get(&"Items".into()).is_none(),
-                        "Items survived as opaque data at {x}"
-                    );
+                    if x == 3 {
+                        assert_eq!(row.nbt.get(&items_key), None);
+                        let [Some(stack)] = row.items.as_slice() else {
+                            panic!("expected one saved stack at {x}");
+                        };
+                        assert_eq!((stack.item.as_ref(), stack.count), ("minecraft:stone", 1));
+                    } else {
+                        assert_eq!(row.nbt.get(&items_key), items.as_ref());
+                        assert!(row.items.is_empty());
+                    }
                 }
             });
         });
@@ -460,7 +457,7 @@ mod tests {
     impl Hooks for BreakObserver {
         fn player_destroyed_block(
             &self,
-            _: &mut dyn mod_api::ServerHost,
+            _: mod_api::HostSide<'_>,
             event: &mut mod_api::PlayerDestroyedBlockEvent,
         ) {
             let stored = event
@@ -550,7 +547,7 @@ mod tests {
                         game.set_mode(mode);
                         game.inventory[game.selected] = tool;
                         place(game, name);
-                        assert!(game.break_block_as_player([7, 64, 4]).unwrap());
+                        assert!(game.break_block_as_player([7, 64, 4], None).unwrap());
                         assert_eq!(count.load(Ordering::Relaxed), serials, "{mode:?}, {name}");
                     }
                     let seen = seen.lock().unwrap();

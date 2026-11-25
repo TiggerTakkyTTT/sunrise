@@ -11,6 +11,23 @@ impl Tags for LootTags<'_> {
         let item = mod_api::__private::item_key_id(item)?;
         mod_api::__private::with_tag_name(tag, |tag| Some(self.0.contains("item", tag?, item)))
     }
+    fn damage_type_in_tag(&self, damage_type: &str, tag: TagKey) -> Option<bool> {
+        mod_api::__private::with_tag_name(tag, |tag| self.0.damage_type_in_tag(damage_type, tag?))
+    }
+    fn item_tags(&self, item: ItemKey) -> Option<Vec<Identifier>> {
+        super::native_tags::item_tags(self.0, item)
+    }
+    fn item_tag_names(&self) -> Option<Vec<Identifier>> {
+        super::native_tags::item_tag_names(self.0)
+    }
+    fn block_in_tag(&self, block: BlockKey, tag: TagKey) -> Option<bool> {
+        let block = mod_api::__private::block_key_id(block)?;
+        mod_api::__private::with_tag_name(tag, |tag| Some(self.0.contains("block", tag?, block)))
+    }
+    fn fluid_in_tag(&self, fluid: FluidKey, tag: TagKey) -> Option<bool> {
+        let fluid = mod_api::__private::fluid_id(fluid)?;
+        mod_api::__private::with_tag_name(tag, |tag| Some(self.0.contains("fluid", tag?, fluid)))
+    }
     fn items(&self, tag: TagKey) -> TagMembers<ItemKey> {
         super::native_tags::members(
             tag,

@@ -45,6 +45,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn built_ins_declared_with_another_type_read_zero() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

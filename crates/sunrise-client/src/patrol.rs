@@ -127,6 +127,10 @@ fn spawn_member<L: PatrolLevel, R: RandomSource>(
     if !spawn_rules::patrolling_monster_rules(pillager.species, level, Reason::Patrol, x, y, z) {
         return false;
     }
+    // EntityType.create checks canSpawn after the patrol's placement predicate.
+    if level.peaceful() && !pillager.allowed_in_peaceful() {
+        return false;
+    }
     spawn(level, Member { pos, leader }, random)
 }
 

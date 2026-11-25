@@ -615,7 +615,7 @@ fn a_column_too_large_to_wrap_is_not_counted_as_sent() {
     use super::send::batch_runs;
     let (hub, _rx) = hub_with(&[1], 2);
     let world = lit_columns(1);
-    let body = |key| hub.encoder.body_in(&world.chunks[&key], &world);
+    let body = |key| hub.encoder.body_in(&world.chunks[&key], &world).unwrap();
     // A LevelChunkWithLight id and 2 MiB after it: past a frame's limit once wrapped.
     let mut oversized = Writer::new();
     oversized.varint(ids::LEVEL_CHUNK_WITH_LIGHT);
@@ -712,7 +712,9 @@ fn a_travel_into_a_viewed_level_swaps_it_with_the_level_left() {
         9
     );
     in_ctx(&mut nether_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let g = &hub.guests[0];
     assert_eq!(g.dimension, NETHER);
@@ -774,7 +776,9 @@ fn a_travel_into_a_viewed_level_swaps_it_with_the_level_left() {
     hub.set_dimension("minecraft:the_end");
     let mut end_world = lit_columns(1);
     in_ctx(&mut end_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let g = &hub.guests[0];
     assert!(g.viewed.views.is_empty(), "the Nether left is not kept");
@@ -805,7 +809,9 @@ fn a_revision_1_client_is_not_switched() {
         "a revision-1 client still views levels"
     );
     in_ctx(&mut nether_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let g = &hub.guests[0];
     assert!(g.viewed.views.is_empty(), "no view kept, none taken over");
@@ -1010,7 +1016,7 @@ fn open_levels(hub: &mut Hub, ids: &[&'static str]) {
             shape: crate::chunk::LevelShape::OVERWORLD,
         })
         .collect();
-    hub.config.levels.extra = extra.leak();
+    hub.config.levels.extra = crate::chunk::ExtraLevels::new(extra);
 }
 
 /// Guest `i`'s client logged in now: it was told the levels open now.
@@ -1136,7 +1142,9 @@ fn a_travel_out_of_a_level_opened_after_login_does_not_swap_an_older_client() {
         9
     );
     in_ctx(&mut nether_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let g = &hub.guests[0];
     assert_eq!(g.dimension, NETHER);
@@ -1363,7 +1371,9 @@ fn a_travel_is_followed_by_a_swap_from_revision_4() {
     let sent = got_bound(&rx[0]);
     assert_eq!(bound_opens(&sent), vec![(0, 0, 2048, NETHER)]);
     in_ctx(&mut nether_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let sent = got_bound(&rx[0]);
     let respawn = sent.iter().position(|g| *g == Bound::Plain(ids::RESPAWN));
@@ -1402,7 +1412,9 @@ fn a_travel_with_the_epochs_spent_closes_the_view_first() {
     hub.guests
         .update(0, |g| g.viewed.epochs = i64::from(i32::MAX) + 1);
     in_ctx(&mut nether_world, |ctx| {
-        hub.change_level(0, [8.5, 64.0, 8.5], 0.0, None, false, 0, ctx);
+        let change = hub.begin_level_change(0, [8.5, 64.0, 8.5], 0.0, None, 0, ctx);
+        hub.send_commands(0, hub.commands_packet(hub.guests[0].permission));
+        hub.finish_level_change(0, change, false, ctx);
     });
     let sent = got_bound(&rx[0]);
     let close = sent

@@ -17,7 +17,6 @@ use mod_api::{
     SCENE_MAX_ENTITIES, SCENE_MAX_PARTICLES, Scene, SceneClock, SceneError, SceneView,
 };
 use std::{
-    cell::Cell,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
 };
@@ -456,31 +455,27 @@ impl Game<'_> {
             creaking_active: false,
             sky_darken: 0,
             marker: None,
+            ambient_particles: None,
             model_offset: &model_offset,
             gateway_particles: &|_, _| 0,
             thundering: false,
             ultrawarm: false,
             block_parts: None,
         };
+        let level = ParticleLevel::new(world, facts, self.collision);
         for tick in first..=last {
             let seed = tick_seed(clock.id, tick);
             engine.seed_randoms(seed, seed.rotate_left(21), seed.rotate_left(42));
             engine.seed_particle_randoms(seed.rotate_left(53));
             if tick == first {
                 for (options, at, velocity) in added {
-                    engine.add_with_world(Some(world), options, *at, *velocity, false, false);
+                    engine.add_with(Some(&level), options, *at, *velocity, false, false);
                 }
             }
             if clock.animate_blocks {
                 animate_scene(self.res.animate(), engine, &ctx, picks, SCENE_ANIMATE_PICKS);
             }
-            engine.tick(&ParticleLevel {
-                world,
-                facts,
-                collision: self.collision,
-                player: None,
-                cached_chunk: Cell::new(None),
-            });
+            engine.tick(&level);
             engine.sounds.clear();
         }
         l.tick = clock.tick;

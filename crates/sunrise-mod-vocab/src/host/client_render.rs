@@ -4,23 +4,6 @@ use crate::*;
 /// The client host's methods of the `client_render` area, implemented by the game and reached through [`crate::ClientHost`].
 #[sunrise_mod_api_macros::host_area]
 pub trait ClientRenderClientHost {
-    /// Atomically overwrite retained model copies; use [`InstanceGroupRef::write`].
-    fn instance_group_write(
-        &self,
-        group: InstanceGroupRef,
-        first: u32,
-        instances: &[ModelInstance],
-    ) -> Result<(), GroupError>;
-    /// Set the drawn length; use [`InstanceGroupRef::set_len`].
-    fn instance_group_set_len(&self, group: InstanceGroupRef, len: u32) -> Result<(), GroupError>;
-    /// Replace the group pose; use [`InstanceGroupRef::set_group_transform`].
-    fn instance_group_set_transform(
-        &self,
-        group: InstanceGroupRef,
-        transform: [f32; 12],
-    ) -> Result<(), GroupError>;
-    /// Retire retained model copies; use [`InstanceGroupRef::destroy`].
-    fn instance_group_destroy(&self, group: InstanceGroupRef) -> Result<(), GroupError>;
     /// Side: client.
     /// `ItemStackRenderState.usesBlockLight` of `stack`'s model resolved for `context`
     /// (`ItemModelResolver.updateForTopItem`, no owner or level): whether the model is lit as a
@@ -191,4 +174,32 @@ pub trait ClientRenderClientHost {
     /// For a client mod: changes each time the resources load (a resource pack turned on or off can move every
     /// sprite): ask `native_block_sprites` again then. API 380.
     fn block_sprites_version(&self) -> u64;
+}
+
+/// The retained instance-group operations behind [`InstanceGroupRef`].
+// hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
+#[doc(hidden)]
+#[sunrise_mod_api_macros::host_area]
+pub trait ClientRenderClientBackend {
+    /// Atomically overwrite retained model copies; called through [`InstanceGroupRef::write`].
+    #[manual_handle]
+    fn instance_group_write(
+        &self,
+        group: InstanceGroupRef,
+        first: u32,
+        instances: &[ModelInstance],
+    ) -> Result<(), GroupError>;
+    /// Set the drawn length; called through [`InstanceGroupRef::set_len`].
+    #[manual_handle]
+    fn instance_group_set_len(&self, group: InstanceGroupRef, len: u32) -> Result<(), GroupError>;
+    /// Replace the group pose; called through [`InstanceGroupRef::set_group_transform`].
+    #[manual_handle]
+    fn instance_group_set_transform(
+        &self,
+        group: InstanceGroupRef,
+        transform: [f32; 12],
+    ) -> Result<(), GroupError>;
+    /// Retire retained model copies; called through [`InstanceGroupRef::destroy`].
+    #[manual_handle]
+    fn instance_group_destroy(&self, group: InstanceGroupRef) -> Result<(), GroupError>;
 }

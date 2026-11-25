@@ -1,7 +1,9 @@
 """Dyna's switch routes only supported, same-repository events to its pool."""
+import ast
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -318,7 +320,6 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertNotIn("cargo test", static)
         self.assertNotIn("Swatinem/rust-cache", static)
         self.assertNotIn("runner-packages.txt", static)
-        self.assertIn("python3 tools/ci/ignored_shards.py --prepare sunrise-mod-package $JOBS", runtime)
         self.assertIn("cc -shared -fPIC -O2 -Wall -Wextra -Werror tools/ci/network_guard.c -o target/network_guard.so", runtime)
         self.assertIn("python3 tools/ci/run_test_binaries.py --jobs 3 --time-limits 2,5 --network-guard target/network_guard.so --no-data-skips -- cargo test $JOBS --profile test --workspace --lib --bins --tests", runtime)
         self.assertIn("cargo test $JOBS --no-fail-fast --profile test --workspace --doc", runtime)
@@ -408,7 +409,7 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertLess(runtime.index("- name: Use persistent verify build artifacts"),
                         runtime.index("- name: Restore unchanged source timestamps"))
         self.assertLess(runtime.index("- name: Restore unchanged source timestamps"),
-                        runtime.index("- name: Build the runtime holder test actor"))
+                        runtime.index("- name: Build Rust core test binaries"))
         for case in ("absent", "correct-link", "directory", "file", "wrong-link", "dangling-link"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -618,6 +619,19 @@ class DynaRoutingTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", parity)
         self.assertIn("ref: ${{ inputs.commit }}", parity)
 
+    def test_no_parity_harness_builds_the_client_lib_test(self):
+        # Its one rustc outgrew the 16 GiB parity runner (#4896): a harness runs a sunrise-client fixture from
+        # lab.parity_fixtures() instead.
+        def builds_client_lib_test(path):
+            # Any command list holding cargo, test and sunrise-client, whatever its flags and their order.
+            return any(isinstance(node, ast.List)
+                       and {"cargo", "test", "sunrise-client"} <= {item.value for item in node.elts
+                                                                   if isinstance(item, ast.Constant)}
+                       for node in ast.walk(ast.parse(path.read_text())))
+
+        self.assertEqual([path.name for path in sorted((ROOT / "tools").glob("test_*_parity.py"))
+                          if builds_client_lib_test(path)], [])
+
     def test_daily_harnesses_client_lib_tests_are_built_before_the_harnesses(self):
         from test_ci_runners import jobs
         parity = dict(jobs(PARITY.read_text()))["vanilla-parity"]
@@ -636,17 +650,41 @@ class DynaRoutingTests(unittest.TestCase):
                 'run(["cargo", "test", "--locked", "-p", "sunrise-client-lib", "--lib", "x"])\n')
             (tree / "tools" / "test_game_parity.py").write_text(
                 "run(['cargo', 'test', '-p', 'sunrise-client', '--lib', 'y'])\n")
+            # sunrise-client's fixtures: their own binary, in each variant a harness asks lab for.
+            (tree / "tools" / "test_fixture_parity.py").write_text("run([lab.parity_fixtures(), 'v'])\n")
+            (tree / "tools" / "test_vanilla_fixture_parity.py").write_text(
+                "run([lab.parity_fixtures(default_features=False), 'u'])\n")
             (tree / "tools" / "test_fast_parity.py").write_text(
                 'run(["cargo", "test", "--profile", "fast", "-p", "sunrise-world", "--lib", "z"])\n')
             # A package beside the client's, as dragon_contacts runs sunrise-gameplay's lib tests.
             (tree / "tools" / "test_gameplay_parity.py").write_text(
                 "run(['cargo', 'test', '--locked', '-p', 'sunrise-gameplay', '--lib', 'w'])\n")
             env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-                   "PARITY_LOG_DIR": temporary}
+                   "PARITY_LOG_DIR": temporary, "RUNNER_TEMP": temporary, "BUCKET": "1"}
             subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
-            self.assertEqual(calls.read_text().splitlines(), ["test --locked --no-run -p sunrise-client --lib",
-                                                             "test --locked --no-run -p sunrise-client-lib --lib",
-                                                             "test --locked --no-run -p sunrise-gameplay --lib"])
+            fixtures = "build --locked --profile test -p sunrise-parity-fixtures"
+            self.assertEqual(calls.read_text().splitlines(), [
+                "test --locked --no-run -p sunrise-client --lib",
+                "test --locked --no-run -p sunrise-client-lib --lib",
+                "test --locked --no-run -p sunrise-gameplay --lib",
+                f"{fixtures} --features fixtures,client-defaults --bin sunrise-parity-fixtures",
+                f"{fixtures} --features fixtures --bin sunrise-parity-fixtures"])
+            # A share builds only for the harnesses its plan gives it (a shard named NAME#N), and nothing for none.
+            calls.unlink()
+            (Path(temporary, "plan")).mkdir()
+            Path(temporary, "plan", "bucket-1.json").write_text('["gameplay#2", "fast"]\n')
+            subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
+            self.assertEqual(calls.read_text().splitlines(), ["test --locked --no-run -p sunrise-gameplay --lib"])
+            calls.unlink()
+            Path(temporary, "plan", "bucket-1.json").write_text("[]\n")
+            subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, check=True)
+            self.assertFalse(calls.exists())
+            # A plan it cannot read fails the step with a fixed annotation, not a silent empty build.
+            Path(temporary, "plan", "bucket-1.json").write_text("not json\n")
+            failed = subprocess.run(["bash", "-e", "-c", script], cwd=tree, env=env, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(failed.stdout, "::error::Could not read the game-probe plan for this parity share.\n")
+            self.assertFalse(calls.exists())
 
 class PersistentTargetTests(unittest.TestCase):
     def test_every_job_that_can_build_on_a_self_hosted_runner_keeps_the_source_snapshot_first(self):
@@ -671,6 +709,66 @@ class PersistentTargetTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, job=name):
                     self.assertTrue(any("tools/ci/source_mtimes.py" in run for run in steps[:first]))
         self.assertGreater(checked, 8)
+
+
+class IgnoredTestsKeepTests(unittest.TestCase):
+    STEP = "Keep a failed run's full output beyond this slot"
+
+    def setUp(self):
+        from test_ci_concurrency import yaml
+        steps = yaml.load((ROOT / ".github/workflows/ignored-tests.yml").read_text(),
+                          Loader=yaml.BaseLoader)["jobs"]["ignored-tests-shards"]["steps"]
+        self.steps = {step.get("name"): step for step in steps}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.keep = self.root / "keep"
+        self.private = self.root / "private"
+        self.env = {**os.environ, "DYNA_CI_KEEP": str(self.keep), "PRIVATE_LOGS": str(self.private),
+                    "NAME": "77-2-3"}
+
+    def keep_step(self):
+        return subprocess.run(["bash", "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root, env=self.env,
+                              capture_output=True, text=True)
+
+    def test_the_run_step_writes_where_the_keep_step_reads(self):
+        run = self.steps["Run the ignored tests that need prepared data"]["env"]
+        step = self.steps[self.STEP]
+        self.assertEqual(step["if"], "always()")
+        self.assertEqual(run["IGNORED_TESTS_PRIVATE_LOGS"], step["env"]["PRIVATE_LOGS"])
+        self.assertEqual(step["env"]["NAME"],
+                         "${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}")
+
+    def test_a_failed_runs_output_is_kept_under_its_run_attempt_and_job(self):
+        self.private.mkdir()
+        (self.private / "sunrise-client#1of2.test.log").write_text("synthetic private payload")
+        result = self.keep_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kept = self.keep / "ignored-tests-failed-logs/77-2-3"
+        self.assertEqual([path.name for path in kept.iterdir()], ["sunrise-client#1of2.test.log"])
+        self.assertEqual((kept / "sunrise-client#1of2.test.log").read_text(), "synthetic private payload")
+        self.assertIn("ignored-tests-failed-logs/77-2-3", result.stdout)
+        self.assertNotIn("synthetic private payload", result.stdout + result.stderr)
+
+    def test_expired_entries_are_pruned_and_a_clean_run_adds_none(self):
+        root = self.keep / "ignored-tests-failed-logs"
+        stale, fresh = root / "70-1-0", root / "76-1-0"
+        for path in (stale, fresh):
+            path.mkdir(parents=True)
+        os.utime(stale, (0, 0))
+        # Nothing captured (a clean run, or no private directory at all).
+        result = self.keep_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([path.name for path in root.iterdir()], ["76-1-0"])
+        self.private.mkdir()
+        result = self.keep_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([path.name for path in root.iterdir()], ["76-1-0"])
+        # A host with no keep variable is left alone.
+        result = subprocess.run(["bash", "-e", "-c", self.steps[self.STEP]["run"]], cwd=self.root,
+                                env={key: value for key, value in self.env.items() if key != "DYNA_CI_KEEP"},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class ParityWorkflowTests(unittest.TestCase):
@@ -698,6 +796,60 @@ class ParityWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.env.update([line.split("=", 1) for line in (self.root / "env").read_text().splitlines()])
         self.assertEqual(Path(self.env["PARITY_LOG_DIR"]), self.slot)
+
+    def test_a_failed_probe_build_shows_its_error_headings_not_its_text(self):
+        step = self.steps["Show a failed probe build's compiler errors"]
+        self.assertEqual(self.steps["Build the daily harnesses' game probes"]["id"], "game-probes")
+        self.assertEqual(self.steps["Build parity probes"]["id"], "probes")
+        self.assertIn("steps.game-probes.outcome == 'failure'", step["if"])
+        self.initialise()
+        (self.slot / "game-probes.log").write_text(
+            "   Compiling sunrise-client-lib\nerror[E0425]: cannot find value `PRIVATE` in this scope\n"
+            "  --> crates/sunrise-client/src/lib.rs:1:1\nprivate source excerpt\n"
+            "error[E0609]: no field `PRIVATE`\n  --> crates/sunrise-client/src/untracked_generated_probe.rs:3:9\n"
+            "error: could not compile\n")
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=ROOT, capture_output=True, text=True,
+                                env=dict(self.env, FAILED="game-probes"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("game-probes failed:", result.stdout)
+        self.assertIn("compiler: error[E0425]: custom diagnostic payload withheld", result.stdout)
+        self.assertIn("compiler:   --> crates/sunrise-client/src/lib.rs:1:1", result.stdout)
+        self.assertIn("compiler:   --> location withheld (not a tracked Rust source)", result.stdout)
+        for private in ("PRIVATE", "private source excerpt", "Compiling", "untracked_generated_probe"):
+            self.assertNotIn(private, result.stdout)
+
+    def test_a_failed_shares_logs_are_kept_beyond_the_slot(self):
+        step = self.steps["Keep a failed share's logs beyond this slot"]
+        self.assertEqual(step["if"], "failure()")
+        self.initialise()
+        (self.slot / "parity.log").write_text("private mismatch")
+        keep = self.root / "keep"
+        self.env["DYNA_CI_KEEP"] = str(keep)
+        result = self.step("Keep a failed share's logs beyond this slot")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((keep / "parity-failed-logs/77-2-bucket-0/parity.log").read_text(), "private mismatch")
+        self.assertEqual([path.name for path in (keep / "parity-failed-logs").iterdir()], ["77-2-bucket-0"])
+        self.assertNotIn("private", result.stdout)
+
+    def test_every_share_prunes_expired_kept_logs_and_keeps_fresh_ones(self):
+        cleanup = self.steps["Delete this job's vanilla-derived scratch"]
+        self.assertEqual(cleanup["if"], "always()")
+        keep = self.root / "keep"
+        stale, fresh = keep / "parity-failed-logs/70-1-bucket-0", keep / "parity-failed-logs/77-2-bucket-0"
+        for path in (stale, fresh):
+            path.mkdir(parents=True)
+        os.utime(stale, (0, 0))
+        # A green share: nothing captured, the expired copy still goes.
+        result = subprocess.run(["bash", "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
+                                env=dict(self.env, DYNA_CI_KEEP=str(keep)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+        # A host whose keep holds no captured logs is left as it is.
+        result = subprocess.run(["bash", "-e", "-c", cleanup["run"]], cwd=self.root, capture_output=True, text=True,
+                                env=dict(self.env, DYNA_CI_KEEP=str(self.root / "empty-keep")))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "empty-keep").exists())
 
     def test_an_early_failure_cannot_report_a_previous_slots_result(self):
         # Both an older attempt and stale state in the current directory survive until the first workflow step.

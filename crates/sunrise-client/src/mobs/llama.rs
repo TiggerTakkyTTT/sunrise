@@ -136,12 +136,15 @@ pub fn breed_offspring(m: &mut Mob, partner: &Seen) -> equine::Offspring {
 struct LlamaHurtBy(HurtByTarget);
 impl Goal for LlamaHurtBy {
     goal_clone!();
+    #[inline]
     fn flags(&self) -> u8 {
         self.0.flags()
     }
+    #[inline]
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         self.0.can_use(m, cx)
     }
+    #[inline]
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         if m.extra.flag2 {
             m.extra.flag2 = false;
@@ -149,9 +152,11 @@ impl Goal for LlamaHurtBy {
         }
         self.0.can_continue(m, cx)
     }
+    #[inline]
     fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.0.start(m, cx)
     }
+    #[inline]
     fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
         self.0.stop(m, cx)
     }

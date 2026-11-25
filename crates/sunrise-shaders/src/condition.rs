@@ -251,7 +251,7 @@ fn tokens(expr: &str, macros: &Macros) -> Result<(Vec<Token>, bool), String> {
 }
 
 /// Decimal, `0x` hexadecimal or leading-zero octal, with an optional `u` suffix.
-fn int_literal(text: &str) -> Result<i64, String> {
+pub(crate) fn int_literal(text: &str) -> Result<i64, String> {
     let digits = text.strip_suffix(['u', 'U']).unwrap_or(text);
     let parsed = if let Some(hex) = digits.strip_prefix("0x").or(digits.strip_prefix("0X")) {
         i64::from_str_radix(hex, 16)

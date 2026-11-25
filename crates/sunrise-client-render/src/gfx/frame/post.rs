@@ -9,6 +9,9 @@ pub(in crate::gfx) struct PostPassArgs<'a> {
     pub(in crate::gfx) fg_frames: Option<&'a (wgpu::Texture, wgpu::Texture)>,
     pub(in crate::gfx) pack_post: bool,
     pub(in crate::gfx) native_post: bool,
+    pub(in crate::gfx) after_pack_sky: bool,
+    pub(in crate::gfx) after_pack_features: bool,
+    pub(in crate::gfx) after_pack_custom_geometry: bool,
     pub(in crate::gfx) pack_draws_weather: bool,
     pub(in crate::gfx) pack_draws_terrain: bool,
     pub(in crate::gfx) pack_draws_shadow: bool,
@@ -41,6 +44,8 @@ pub(in crate::gfx) struct PostPassArgs<'a> {
     pub(in crate::gfx) gpu_frame: bool,
     pub(in crate::gfx) serial: u64,
     pub(in crate::gfx) cpu: [usize; 3],
+    pub(in crate::gfx) sourced_frame: bool,
+    pub(in crate::gfx) sourced_cpu: [usize; 3],
     pub(in crate::gfx) lifts_world: bool,
 }
 
@@ -55,6 +60,7 @@ impl Renderer {
         &mut self,
         mut encoder: wgpu::CommandEncoder,
         args: PostPassArgs<'_>,
+        mut hooks: Option<&mut dyn world_primitives::FrameHooks>,
     ) -> std::result::Result<(wgpu::CommandEncoder, PostPassResult), String> {
         let PostPassArgs {
             frame,
@@ -65,6 +71,9 @@ impl Renderer {
             fg_frames,
             pack_post,
             native_post,
+            after_pack_sky,
+            after_pack_features,
+            after_pack_custom_geometry,
             pack_draws_weather,
             pack_draws_terrain,
             pack_draws_shadow,
@@ -97,6 +106,8 @@ impl Renderer {
             gpu_frame,
             serial,
             cpu,
+            sourced_frame,
+            sourced_cpu,
             lifts_world,
         } = args;
 
@@ -106,6 +117,33 @@ impl Renderer {
             && pack_post
             && let Some((dimension, Some(mut post))) = self.pack_post.take()
         {
+            let format = post.formats[0];
+            // The standard primitive blend cannot target an integer or unblendable colortex0.
+            // On that route the pack world stages have no compatible pass, rather than firing
+            // early.
+            let pack_blendable = post.colortex0_blendable(&self.device);
+            let pack_features = after_pack_features && pack_blendable;
+            let pack_opaque_blocks = hooks.is_some() && pack_draws_terrain && pack_blendable;
+            let pack_translucent_blocks = hooks.is_some() && pack_draws_terrain && pack_blendable;
+            let pack_weather = hooks.is_some() && pack_draws_weather && pack_blendable;
+            let pack_custom_geometry = after_pack_custom_geometry && pack_blendable;
+            if pack_features
+                || pack_opaque_blocks
+                || pack_translucent_blocks
+                || pack_weather
+                || pack_custom_geometry
+            {
+                self.world_primitives
+                    .as_mut()
+                    .expect("world primitives")
+                    .prepare_pack_pass(
+                        &self.device,
+                        format,
+                        post.rgb & 1 != 0,
+                        self.output.frame.linear_light,
+                    );
+            }
+
             let size = self.world_post.size().unwrap_or([1, 1]);
             let weather = match &self.hud.atlas_texture {
                 Some(atlas) if pack_draws_weather => self
@@ -125,7 +163,10 @@ impl Renderer {
             post.set_weather(weather);
             let flat = self.flat.as_ref().filter(|_| flat_frame);
             self.pack_pages.clear();
-            if flat.is_some() && (pack_draws_terrain || pack_draws_shadow) {
+            // The pack's terrain programs read their pages: flat, or per section where vertex
+            // shaders read storage (`pack_terrain_draws`).
+            let reads_pages = flat.is_some() || self.pack_terrain_draws().reads_pages();
+            if reads_pages && (pack_draws_terrain || pack_draws_shadow) {
                 self.pack_pages.extend(
                     self.arena
                         .page_buffers()
@@ -133,6 +174,9 @@ impl Renderer {
                 );
             }
             let pages = &self.pack_pages;
+            // The pack's terrain programs read the normal stream beside each run's vertices
+            // (`pack_atlas::TerrainDraws::Normals`).
+            let normals = self.pack_terrain_draws() == pack_atlas::TerrainDraws::Normals;
             let mut terrain =
                 |rp: &mut wgpu::RenderPass<'_>,
                  list: pack_post::TerrainList,
@@ -193,7 +237,15 @@ impl Renderer {
                                     (shadow_first + shadow_solid, shadow_translucent)
                                 }
                             };
-                            self.draw_sections(rp, &self.indirect, 0, first, count);
+                            if normals {
+                                let bind = |rp: &mut wgpu::RenderPass<'_>, key: u32| {
+                                    rp.set_vertex_buffer(2, self.normals_binding(key));
+                                    page(rp, key);
+                                };
+                                self.draw_sections_paged(rp, &self.indirect, first, count, &bind);
+                            } else {
+                                self.draw_sections_paged(rp, &self.indirect, first, count, page);
+                            }
                         }
                     }
                 };
@@ -209,6 +261,16 @@ impl Renderer {
                 indices: self.indices.clone(),
                 quads: cloud_quads,
             }));
+            if let Some(wp) = self.world_primitives.as_ref() {
+                for &(name, value) in wp.pack_uniforms() {
+                    post.set_mod_uniform(name, crate::mod_pipelines::mod_uniform_value(value));
+                }
+                post.fill_mod_draws(|bound_slots, out| {
+                    wp.pack_bound_chunks_into(bound_slots, out);
+                });
+            } else {
+                post.fill_mod_draws(|_, _| {});
+            }
             // Fails only on a wait that found the device lost: the frame stops here, with
             // the pack kept for the next one and nothing more encoded.
             let ran = post.run(
@@ -224,6 +286,69 @@ impl Renderer {
                 [self.config.width, self.config.height],
                 pages,
                 &mut terrain,
+                pack_post::WorldBoundaries {
+                    sky: after_pack_sky,
+                    opaque_blocks: pack_opaque_blocks,
+                    features: pack_features,
+                    translucent_blocks: pack_translucent_blocks,
+                    weather: pack_weather,
+                    custom_geometry: pack_custom_geometry,
+                },
+                |encoder, boundary| {
+                    use pack_post::WorldBoundary;
+                    if let WorldBoundary::CustomGeometry { color, depth } = boundary {
+                        return self
+                            .world_primitives
+                            .as_ref()
+                            .expect("world primitives")
+                            .draw_pack_custom(encoder, color, depth);
+                    }
+                    if let Some(hooks) = hooks.as_deref_mut() {
+                        let sections = &self.visible_renderable_sections;
+                        let (stage, color, depth) = match boundary {
+                            WorldBoundary::AfterSky => {
+                                hooks.on_after_sky(sections, false);
+                                return false;
+                            }
+                            WorldBoundary::AfterLevel => {
+                                hooks.on_after_level(sections, false);
+                                return false;
+                            }
+                            WorldBoundary::AfterOpaqueBlocks { color, depth } => {
+                                (mod_api::RenderLevelStage::AfterOpaqueBlocks, color, depth)
+                            }
+                            WorldBoundary::Features {
+                                translucent,
+                                color,
+                                depth,
+                            } => (
+                                if translucent {
+                                    mod_api::RenderLevelStage::AfterTranslucentFeatures
+                                } else {
+                                    mod_api::RenderLevelStage::AfterOpaqueFeatures
+                                },
+                                color,
+                                depth,
+                            ),
+                            WorldBoundary::AfterTranslucentBlocks { color, depth } => (
+                                mod_api::RenderLevelStage::AfterTranslucentBlocks,
+                                color,
+                                depth,
+                            ),
+                            WorldBoundary::AfterWeather { color, depth } => {
+                                (mod_api::RenderLevelStage::AfterWeather, color, depth)
+                            }
+                            WorldBoundary::CustomGeometry { .. } => unreachable!(),
+                        };
+                        let draws = hooks.on_render_stage(stage, sections, false);
+                        return self
+                            .world_primitives
+                            .as_ref()
+                            .expect("world primitives")
+                            .draw_pack_prepared(encoder, color, depth, draws);
+                    }
+                    false
+                },
                 &self.device_lost,
                 super::super::in_flight::poll_live,
             );
@@ -355,9 +480,14 @@ impl Renderer {
         if culling && let Some(cull) = &mut self.cull {
             cull.end(&self.device, &mut encoder);
         }
-        // GPU culling's counts once its world passes are done (phase 2's too).
+        // GPU culling's counts once its world passes are done (phase 2's too), and sourced
+        // geometry's beside them; whether the frame drew sourced geometry rides the near
+        // copy, so its half waits for sourced geometry's (`in_flight::collect_stats`).
         if gpu_frame && let Some(gpu) = &mut self.gpu_culling {
-            gpu.copy_stats(&mut encoder, serial, cpu);
+            gpu.copy_stats(&mut encoder, serial, cpu, sourced_frame);
+        }
+        if sourced_frame {
+            self.sourced.copy_stats(&mut encoder, serial, sourced_cpu);
         }
         if let Some(timer) = &mut self.gpu_timer {
             timer.end(&self.device, &mut encoder, (&view_target, overlay_format));

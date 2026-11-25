@@ -107,8 +107,8 @@ mod tests {
     use super::super::{native::tests::Scene, *};
     use super::{Group, ParticleGroup, freeze};
     use mod_api::{
-        __private::game::RegistrationContextNew, Identifier, ParticleBatch, ParticleLevelView,
-        ParticleProvider, RegistrationContext,
+        __private::game::RegistrationContextNew, CustomParticle, Identifier, ParticleLevelView,
+        ParticleProvider, ParticleSpawn, ParticleTickView, RegistrationContext,
     };
     use std::{collections::BTreeMap, sync::Mutex};
     use sunrise_assets::resource_source::Resource;
@@ -306,10 +306,17 @@ mod tests {
     /// Moves a particle to a fixed spot on each tick, so a drawn quad says where it is.
     struct Stay;
     impl ParticleProvider for Stay {
-        fn tick(&self, particles: &mut ParticleBatch, _: &dyn ParticleLevelView) {
-            for particle in particles {
-                particle.position = particle.previous;
-            }
+        fn create_particle(
+            &self,
+            _: &mut ParticleSpawn<'_, ()>,
+            _: &mut dyn ParticleTickView,
+        ) -> Option<Box<dyn CustomParticle>> {
+            Some(Box::new(Stay))
+        }
+    }
+    impl CustomParticle for Stay {
+        fn tick(&mut self, particle: &mut dyn ParticleTickView, _: &dyn ParticleLevelView) {
+            particle.advance_age();
         }
     }
 
@@ -370,11 +377,11 @@ mod tests {
         }
     }
 
-    fn spawn(e: &mut ParticleEngine, world: &World, options: &ParticleOptions, x: f64) {
+    fn spawn(e: &mut ParticleEngine, level: &ParticleLevel<'_>, options: &ParticleOptions, x: f64) {
         let at = [x, 0.0, 0.0];
         let mut p = match &options.typed_particle {
             Some((value, _)) => e
-                .make_typed_particle(world, value, at, [0.0; 3], 1)
+                .make_typed_particle(level, value, at, [0.0; 3], 1)
                 .unwrap(),
             None => e.make(options, at, [0.0; 3], 1),
         }
@@ -437,24 +444,19 @@ mod tests {
         e.set_block_state_source(|| Some(Arc::new(Vec::<mod_api::BlockState>::new())));
         e.providers.insert(
             shade.key(),
-            mod_api::__private::bind_particle_provider(shade.key(), Arc::new(Stay)),
+            mod_api::__private::particle_provider_factory(shade, |_| Stay),
         );
         let typed = ParticleOptions::typed(shade.options(()).typed().unwrap().clone()).unwrap();
         pack.reload(&mut e);
         // Spawned in the reverse of the order the groups draw in.
-        spawn(&mut e, level.world, &typed, 3.0);
+        spawn(&mut e, &level, &typed, 3.0);
         for (name, x) in [("mymod:glow", 2.0), ("mymod:orbit", 4.0)] {
-            spawn(&mut e, level.world, &ParticleOptions::named(name), x);
+            spawn(&mut e, &level, &ParticleOptions::named(name), x);
         }
+        spawn(&mut e, &level, &ParticleOptions::named("mymod:plain"), 1.0);
         spawn(
             &mut e,
-            level.world,
-            &ParticleOptions::named("mymod:plain"),
-            1.0,
-        );
-        spawn(
-            &mut e,
-            level.world,
+            &level,
             &ParticleOptions::simple(ParticleType::Flame),
             0.0,
         );
@@ -495,17 +497,21 @@ mod tests {
         e.set_block_state_source(|| Some(Arc::new(Vec::<mod_api::BlockState>::new())));
         e.providers.insert(
             shade.key(),
-            mod_api::__private::bind_particle_provider(shade.key(), Arc::new(Stay)),
+            mod_api::__private::particle_provider_factory(shade, |_| Stay),
         );
         let typed = ParticleOptions::typed(shade.options(()).typed().unwrap().clone()).unwrap();
         pack.reload(&mut e);
         let options = ParticleOptions::named("mymod:glow");
-        let mut full = e.make(&options, [0.0; 3], [0.0; 3], 1).unwrap();
-        full.lifetime = 100;
-        e.groups[0].particles = vec![full; MAX_PARTICLES];
-        spawn(&mut e, level.world, &typed, 0.0);
+        e.groups[0].particles = std::iter::repeat_with(|| {
+            let mut particle = e.make(&options, [0.0; 3], [0.0; 3], 1).unwrap();
+            particle.lifetime = 100;
+            particle
+        })
+        .take(MAX_PARTICLES)
+        .collect();
+        spawn(&mut e, &level, &typed, 0.0);
         for name in ["mymod:glow", "mymod:plain"] {
-            spawn(&mut e, level.world, &ParticleOptions::named(name), 0.0);
+            spawn(&mut e, &level, &ParticleOptions::named(name), 0.0);
         }
         e.tick(&level);
         // Group 0 is full, so its newcomer is refused; the other groups and the built-in one

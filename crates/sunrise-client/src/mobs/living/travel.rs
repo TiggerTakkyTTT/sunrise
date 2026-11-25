@@ -64,7 +64,7 @@ impl Mob {
         ) {
             return ControlFlow::Continue(());
         }
-        self.velocity = velocity;
+        self.set_velocity(velocity);
         // Camel.travel: on the ground, a camel that sits or changes pose keeps
         // the vertical part of its motion and drops the horizontal input.
         if super::super::camel::is_camel(self.species())
@@ -72,7 +72,7 @@ impl Mob {
             && super::super::camel::refuse_to_move(self)
         {
             let vertical = Vec3::new(0.0, 1.0, 0.0);
-            self.velocity = self.velocity.multiply(vertical);
+            self.set_velocity(self.velocity.multiply(vertical));
             input = input.multiply(vertical);
         }
         match route {

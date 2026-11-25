@@ -6,11 +6,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 spec = importlib.util.spec_from_file_location("pr_gate", ROOT / "tools/ci/pr_gate.py")
 pr_gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pr_gate)

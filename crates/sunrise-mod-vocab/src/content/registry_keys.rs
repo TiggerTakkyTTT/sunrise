@@ -403,10 +403,10 @@ pub fn item_key_by_identifier(id: &crate::Identifier) -> Option<ItemKey> {
     Some(ItemKey(*resolved_items().get()?.identifiers.get(id)?))
 }
 
-/// Entity types use the same requested-slot and immutable resolved-table lifecycle as items.
+/// Entity names and classification are published together, using the same keys.
 pub(crate) fn resolved_entity_types()
--> &'static std::sync::OnceLock<sunrise_mod_runtime::registry_keys::Names> {
-    static EMPTY: std::sync::OnceLock<sunrise_mod_runtime::registry_keys::Names> =
+-> &'static std::sync::OnceLock<sunrise_mod_runtime::registry_keys::EntityTypes> {
+    static EMPTY: std::sync::OnceLock<sunrise_mod_runtime::registry_keys::EntityTypes> =
         std::sync::OnceLock::new();
     crate::parts::installed().map_or(&EMPTY, |installed| &installed.resolved_entity_types)
 }
@@ -493,17 +493,23 @@ fn ordered_slot_is_live(
         .unwrap_or(false)
 }
 
-/// Complete the entity-type registry in the order supplied by the game.
-/// An existing frozen registry must match the accepted resources.
-pub fn resolve_entity_types<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), Vec<String>> {
+/// Complete the entity-type registry in the order supplied by the game, with the registered
+/// living classification of each type (None if the resource table did not describe it).
+/// The accepted resources must match the existing frozen registry's keys and order.
+pub fn resolve_entity_types<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    is_living: impl FnMut(&str) -> Option<bool>,
+) -> Result<(), Vec<String>> {
     let names = crate::parts::requested_keys()
         .entity_types
         .complete(ids, |mod_id, id| {
             format!("mod {mod_id} requested unknown entity type {id}")
         })?;
     let names = share_names(names);
-    let published = resolved_entity_types().get_or_init(|| names.clone());
-    if *published != names {
+    let published = resolved_entity_types().get_or_init(|| {
+        sunrise_mod_runtime::registry_keys::EntityTypes::new(names.clone(), is_living)
+    });
+    if published.names() != &names {
         return Err(vec![
             "the accepted resources' entity types differ from the frozen entity-type registry"
                 .to_owned(),
@@ -545,14 +551,14 @@ pub fn resolved_entity_type_key(id: &str) -> Option<EntityTypeKey> {
     if !id.contains(':') {
         return resolved_entity_type_key_parts(&["minecraft:", id]);
     }
-    let names = resolved_entity_types().get()?;
-    Some(EntityTypeKey(*names.slots.get(id)?))
+    let types = resolved_entity_types().get()?;
+    Some(EntityTypeKey(*types.names().slots.get(id)?))
 }
 
 /// Resolve a composed engine name (notably boat/raft types) without heap formatting.
 pub fn resolved_entity_type_key_parts(parts: &[&str]) -> Option<EntityTypeKey> {
-    let names = resolved_entity_types().get()?;
-    names.slots.iter().find_map(|(name, slot)| {
+    let types = resolved_entity_types().get()?;
+    types.names().slots.iter().find_map(|(name, slot)| {
         name.bytes()
             .eq(parts.iter().flat_map(|part| part.bytes()))
             .then_some(EntityTypeKey(*slot))
@@ -563,8 +569,9 @@ pub fn resolved_entity_type_key_parts(parts: &[&str]) -> Option<EntityTypeKey> {
 pub fn entity_type_keys() -> Vec<EntityTypeKey> {
     resolved_entity_types()
         .get()
-        .map_or_else(Vec::new, |names| {
-            names
+        .map_or_else(Vec::new, |types| {
+            types
+                .names()
                 .order
                 .iter()
                 .map(|slot| EntityTypeKey(*slot))
@@ -589,7 +596,7 @@ impl EntityTypeKey {
             .unwrap_or_else(|| {
                 resolved_entity_types()
                     .get()
-                    .is_some_and(|names| names.id(slot).is_some())
+                    .is_some_and(|types| types.names().id(slot).is_some())
             })
             .then_some(Self(slot))
             .ok_or("unknown EntityTypeKey slot")
@@ -616,7 +623,7 @@ impl EnchantmentKey {
 
 /// The canonical load-owned name of a resolved entity type, without allocating.
 pub fn entity_type_name(key: EntityTypeKey) -> Option<&'static str> {
-    resolved_entity_types().get()?.id(key.0)
+    resolved_entity_types().get()?.names().id(key.0)
 }
 
 /// The canonical name of an entity-type slot, available from requests during registration.
@@ -839,21 +846,32 @@ pub(crate) fn block_entity_type_display_name(key: BlockEntityTypeKey) -> Registr
 }
 
 /// Resolve requested effects once, after every mod's content has been registered.
+/// A request an optional dependent made of a provider package that was not admitted
+/// (`provider_admitted` says by package id) is dropped, not refused; a request of an admitted
+/// provider that does not supply the effect keeps its refusal.
 pub fn resolve_effects<'a>(
     ids: impl IntoIterator<Item = &'a str>,
     resolve: impl FnMut(&str) -> Option<usize>,
+    provider_admitted: impl Fn(&str) -> bool,
 ) -> Result<(), Vec<String>> {
-    let effects = sunrise_mod_runtime::registry_keys::resolve_effects(
-        &crate::parts::requested_keys().effects,
-        ids,
-        resolve,
-    )
-    .map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-    })?;
+    let mut requests = crate::parts::requested_keys().effects.clone();
+    if let Some(installed) = crate::parts::installed() {
+        requests.withdraw_where(|mod_id, id| {
+            crate::parts::optional_provider_lost(
+                &installed.dependencies,
+                &provider_admitted,
+                mod_id,
+                id,
+            )
+        });
+    }
+    let effects = sunrise_mod_runtime::registry_keys::resolve_effects(&requests, ids, resolve)
+        .map_err(|errors| {
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+        })?;
     let _ = crate::parts::resolved_effects().set(effects);
     Ok(())
 }

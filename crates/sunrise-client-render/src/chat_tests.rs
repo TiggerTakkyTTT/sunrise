@@ -869,7 +869,12 @@ fn a_deleted_message_shows_60_ticks_then_becomes_the_marker() {
     assert_eq!(lines(&chat), ["<Alex> hi".to_owned(), marker.clone()]);
     assert!(chat.deletions.is_empty());
     let line = &chat.lines[1];
-    assert_eq!(line.tag.as_ref().map(|t| t.color), Some(SYSTEM_INDICATOR));
+    let tag = line.tag.as_ref().expect("a deleted marker has a tag");
+    assert_eq!(tag.color, 0xD0D0D0);
+    assert_eq!(tag.text.translation_key(), Some("chat.tag.system"));
+    assert!(!tag.icon);
+    assert_eq!(chat.messages[1].source, ChatSource::Server);
+    assert!(chat.messages[1].signature.is_none());
     assert_eq!(line.added, 100, "the marker keeps the message's time");
     assert!(
         line.content

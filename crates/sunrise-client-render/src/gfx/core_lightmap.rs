@@ -4,10 +4,10 @@
 //! texture is computed natively ([`native_lightmap`]). `Renderer::update_lightmap` is the one
 //! entry point for the frame's light texture, either way.
 
-use crate::core_shader::{CoreProgram, Glue};
 use crate::polytone_post::ExpressionUniform;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use sunrise_glsl::{Glue, Translated};
 
 /// `core/screenquad`: no vertex input, three vertices from `gl_VertexIndex`. GL's framebuffer
 /// rows run from the bottom and wgpu's from the top: the flip keeps row `n` at sky level `n`.
@@ -17,6 +17,8 @@ pub(crate) const GLUE: Glue = Glue {
     setup: "",
     finish: "gl_Position.y = -gl_Position.y;",
     vertex_id: "int(gl_VertexIndex)",
+    fragment_finish: None,
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// The block `Lightmap.render` fills, beside the vanilla ones.
@@ -191,14 +193,14 @@ impl CoreLightmap {
     /// block is bound only to the stages that read it: one only declared takes no binding.
     pub(super) fn new(
         device: &wgpu::Device,
-        program: &CoreProgram,
+        program: &Translated,
         expressions: &[ExpressionUniform],
     ) -> Option<Self> {
         let info_binding = program
             .other
             .iter()
             .position(|n| n == INFO_BLOCK)
-            .map(crate::core_shader::other_binding);
+            .map(|i| program.other_binding(i));
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -499,7 +501,7 @@ impl super::Renderer {
     /// (they decode their result at the end, `linear_blend`), as they do the native one.
     pub fn set_lightmap_shader(
         &mut self,
-        program: Option<&CoreProgram>,
+        program: Option<&Translated>,
         expressions: &[ExpressionUniform],
     ) {
         self.core_lightmap = program.and_then(|p| CoreLightmap::new(&self.device, p, expressions));

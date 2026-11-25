@@ -38,22 +38,19 @@ pub struct NativeClientHooks {
         BlockPos,
         BlockStateId,
         &mod_api::CollisionQuery,
-        &mut Option<Vec<[f64; 6]>>,
+        &mut Option<sunrise_core::geometry::VoxelShape>,
     ),
-    /// A part's answer to `collision_shape` was refused by the bounds: the game switches that
-    /// block's part off for the session and logs it once.
-    pub collision_shape_refused: fn(BlockStateId, &str),
     pub player_stays_on_ground_surface: fn(&LoopContext, u32, &mut bool),
     pub ender_entity_teleport: fn(&LoopContext, u32, &str, [f64; 3], &mut [f64; 3], &mut bool),
     pub fluid_flow: fn(&LoopContext, &str, BlockPos, &mut [f64; 3]),
     pub sound_type: fn(
-        &LoopContext,
+        FrictionLevel<'_>,
         BlockPos,
         BlockStateId,
         Option<(u32, &str)>,
         BlockSoundCause,
-        &mut BlockSoundType,
-    ),
+        &BlockSoundType,
+    ) -> Option<BlockSoundType>,
     /// `ItemPart::can_grindstone_repair` of the stack's item; `can_repair` arrives with
     /// vanilla's.
     pub can_grindstone_repair: fn(&LoopContext, &ItemStack, &mut bool),
@@ -283,16 +280,10 @@ pub(crate) fn collision_shape(
     pos: BlockPos,
     state: BlockStateId,
     query: &mod_api::CollisionQuery,
-    shape: &mut Option<Vec<[f64; 6]>>,
+    shape: &mut Option<sunrise_core::geometry::VoxelShape>,
 ) {
     if let Some(hooks) = HOOKS.get() {
         (hooks.collision_shape)(context, pos, state, query, shape);
-    }
-}
-
-pub(crate) fn collision_shape_refused(state: BlockStateId, error: &str) {
-    if let Some(hooks) = HOOKS.get() {
-        (hooks.collision_shape_refused)(state, error);
     }
 }
 
@@ -326,16 +317,15 @@ pub(crate) fn fluid_flow(context: &LoopContext, fluid: &str, pos: BlockPos, flow
 }
 
 pub(crate) fn sound_type(
-    context: &LoopContext,
+    level: FrictionLevel<'_>,
     pos: BlockPos,
     state: BlockStateId,
     entity: Option<(u32, &str)>,
     cause: BlockSoundCause,
-    sound: &mut BlockSoundType,
-) {
-    if let Some(hooks) = HOOKS.get() {
-        (hooks.sound_type)(context, pos, state, entity, cause, sound);
-    }
+    own: &BlockSoundType,
+) -> Option<BlockSoundType> {
+    let hooks = HOOKS.get()?;
+    (hooks.sound_type)(level, pos, state, entity, cause, own)
 }
 
 /// Ask the installed adapter for the name the parts of `stack`'s item give it (`item_name`); with

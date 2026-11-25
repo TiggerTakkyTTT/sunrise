@@ -800,16 +800,8 @@ impl Title {
             } else {
                 "widget/button"
             };
-            // Nine-slice approximation: left and right halves of the 200-wide sprite.
-            if let Some(r) = atlas.gui_rect(sprite).copied() {
-                let half = b.w / 2.0;
-                let mut left = r;
-                left.u1 = r.u0 + (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x, b.y, half, 20.0, left, u32::MAX);
-                let mut right = r;
-                right.u0 = r.u1 - (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x + half, b.y, half, 20.0, right, u32::MAX);
-            }
+            // `AbstractButton.extractDefaultSprite`: `blitSprite`, as the sprite's `gui.scaling` says.
+            crate::ui::nine_slice(batch, atlas, sprite, b.x, b.y, b.w, 20.0, u32::MAX);
             let color = if b.enabled {
                 u32::MAX
             } else {
@@ -876,9 +868,6 @@ impl Title {
         if let Some((key, rect)) = button_tooltip {
             let lines = atlas.font.split(&Text::translate(key, &[]), 170.0);
             crate::ui::tooltip_menu(batch, atlas, &lines, cursor, rect);
-        }
-        if let Some(toast) = &self.toast {
-            toast.draw(atlas, batch, 0.0);
         }
     }
 }

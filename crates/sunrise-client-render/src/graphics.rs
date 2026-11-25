@@ -12,7 +12,7 @@ pub const FILE: &str = "sunrise-graphics.txt";
 pub const HDR_MARKER: &str = "sunrise-hdr-pending";
 /// The marker's text for a window whose HDR output starts on `driver`
 /// (`gfx::output::window_driver`).
-pub fn hdr_marker_text(driver: &str) -> String {
+pub(crate) fn hdr_marker_text(driver: &str) -> String {
     format!("driver:{driver}\n")
 }
 /// The driver a marker names; empty for one written before markers named it.
@@ -53,7 +53,7 @@ pub enum HdrSetup {
 pub const PEAK_STEPS: u32 = 52;
 /// Peak Brightness's value at `step` of its scale, the slider's and calibration's: 200 to
 /// 2000 nits by 50, where most displays' peaks are, then up to PQ's 10 000 by 500.
-pub fn peak_nits_at(step: u32) -> u32 {
+pub(crate) fn peak_nits_at(step: u32) -> u32 {
     match step.min(PEAK_STEPS) {
         s @ 0..=36 => 200 + s * 50,
         s => 2000 + (s - 36) * 500,
@@ -61,7 +61,7 @@ pub fn peak_nits_at(step: u32) -> u32 {
 }
 /// Where `nits` sits on Peak Brightness's scale ([`peak_nits_at`]), between steps for a value
 /// off it.
-pub fn peak_step_of(nits: f32) -> f32 {
+pub(crate) fn peak_step_of(nits: f32) -> f32 {
     let step = if nits <= 2000.0 {
         (nits - 200.0) / 50.0
     } else {
@@ -72,11 +72,11 @@ pub fn peak_step_of(nits: f32) -> f32 {
 /// The steps of Paper White's and UI Brightness's scale: Auto (0), then 10 to 480 nits by 10.
 pub const NITS_STEPS: u32 = 48;
 /// Paper White's or UI Brightness's setting at slider position `v`, 0 to 1 ([`NITS_STEPS`]).
-pub fn nits_at(v: f32) -> u32 {
+pub(crate) fn nits_at(v: f32) -> u32 {
     (v * NITS_STEPS as f32).round() as u32 * 10
 }
 /// Where a Paper White or UI Brightness setting sits on its slider, 0 to 1.
-pub fn nits_position(nits: u32) -> f32 {
+pub(crate) fn nits_position(nits: u32) -> f32 {
     nits as f32 / (NITS_STEPS * 10) as f32
 }
 /// A saved Paper White or UI Brightness: Auto (0), or 10 to 480 nits.
@@ -525,10 +525,10 @@ impl Upscaling {
 static REDUCED_SUGGESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Whether the settings suggest Reduced far detail: set when the renderer
 /// starts, on the GPUs `lod_capped` names (far terrain slows them most).
-pub fn suggest_reduced_far_detail(on: bool) {
+pub(crate) fn suggest_reduced_far_detail(on: bool) {
     REDUCED_SUGGESTED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
-pub fn reduced_far_detail_suggested() -> bool {
+pub(crate) fn reduced_far_detail_suggested() -> bool {
     REDUCED_SUGGESTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -573,10 +573,10 @@ static TRANSLUCENT_BATCHING_OFFERED: std::sync::atomic::AtomicBool =
 /// the renderer starts; not without indirect multi-draw or on OpenGL, which loops over a
 /// multi-draw's entries on the CPU, nor where vanilla frames draw flat (they read the section
 /// arena's translucent quads). Where it can't, the settings grey its switch out.
-pub fn offer_translucent_batching(on: bool) {
+pub(crate) fn offer_translucent_batching(on: bool) {
     TRANSLUCENT_BATCHING_OFFERED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
-pub fn translucent_batching_offered() -> bool {
+pub(crate) fn translucent_batching_offered() -> bool {
     TRANSLUCENT_BATCHING_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -704,7 +704,7 @@ impl GpuCullingOffer {
 }
 static GPU_CULLING_OFFER: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(GpuCullingOffer::Unsupported as u8);
-pub fn offer_gpu_culling(offer: GpuCullingOffer) {
+pub(crate) fn offer_gpu_culling(offer: GpuCullingOffer) {
     GPU_CULLING_OFFER.store(offer as u8, std::sync::atomic::Ordering::Relaxed);
 }
 pub fn gpu_culling_offer() -> GpuCullingOffer {
@@ -724,7 +724,7 @@ static GPU_CULLING_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 pub fn lose_gpu_culling() {
     GPU_CULLING_LOST.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-pub fn gpu_culling_lost() -> bool {
+pub(crate) fn gpu_culling_lost() -> bool {
     GPU_CULLING_LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -734,7 +734,7 @@ pub fn gpu_culling_lost() -> bool {
 pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
 /// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
 /// are integrated too, with memory and bandwidth enough for every distance.
-pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
+pub(crate) fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
     info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
 }
 /// A LOD distance as far terrain uses it on this adapter.
@@ -754,7 +754,7 @@ impl Graphics {
     /// Whether the selected packs leave vanilla's block models in place.
     /// Sunrise's occlusion assumptions (entity and leaf culling) hold only
     /// for those: a pack can replace an opaque cube's model or a leaf's.
-    pub fn vanilla_models(&self, resource_packs: &[String]) -> bool {
+    pub(crate) fn vanilla_models(&self, resource_packs: &[String]) -> bool {
         resource_packs.iter().all(|id| id == "vanilla")
     }
     /// The same check including packs overlaid by the connected server.
@@ -840,7 +840,8 @@ pub struct Graphics {
     pub cache_copper_golem_statues: bool,
     /// Meshed sections uploaded per frame; 0 uploads all that are ready.
     pub chunk_updates: u32,
-    /// Section mesh bytes uploaded per frame, in KiB; 0 is unlimited.
+    /// Section mesh bytes uploaded per frame (`Renderer::mesh_upload_bytes`), in KiB; 0 is
+    /// unlimited.
     pub upload_budget_kib: u32,
     /// The block textures' video memory (their top mip level), in MiB; 0 leaves it to
     /// Sunrise (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources next load.
@@ -1024,7 +1025,7 @@ impl Graphics {
     /// Whether HDR output is held back on a window whose graphics driver is `driver`
     /// (`gfx::output::window_driver`): the last start on it ended before HDR output
     /// showed a frame ([`Graphics::hdr_failed_start`]).
-    pub fn hdr_held(&self, driver: &str) -> bool {
+    pub(crate) fn hdr_held(&self, driver: &str) -> bool {
         self.hdr_failed_start
             .as_deref()
             .is_some_and(|failed| failed.is_empty() || failed == driver)
@@ -1043,7 +1044,7 @@ impl Graphics {
     /// `before`, as Undo brings it back, but never the hold on a driver HDR output failed to
     /// start on: that stays as it is now, and goes when Undo changes the mode, as any change of
     /// the mode drops it.
-    pub fn undone_to(&self, before: &Self) -> Self {
+    pub(crate) fn undone_to(&self, before: &Self) -> Self {
         Self {
             hdr_failed_start: self
                 .hdr_failed_start
@@ -1263,14 +1264,14 @@ impl Graphics {
     }
     /// Paper white, in nits: the player's, or on Auto the desktop's SDR white as the
     /// system `reported` it for the renderer's display, else 203 (BT.2408's reference white).
-    pub fn paper_white_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn paper_white_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_paper_white {
             0 => reported.map_or(203, |r| r.paper_white),
             n => n,
         }
     }
     /// The HUD and menus' brightness, in nits: the player's, or on Auto paper white's.
-    pub fn ui_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn ui_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_ui_nits {
             0 => self.paper_white_nits(reported),
             n => n,
@@ -1278,14 +1279,14 @@ impl Graphics {
     }
     /// The peak the world's highlights reach, in nits: the player's, or on Auto
     /// what the system `reported`, else 1000.
-    pub fn peak_nits(&self, reported: Option<Reported>) -> u32 {
+    pub(crate) fn peak_nits(&self, reported: Option<Reported>) -> u32 {
         match self.hdr_peak {
             0 => reported.map_or(1000, |r| r.peak),
             n => n,
         }
     }
     /// How HDR is set up for the display the system `reported`.
-    pub fn hdr_setup(&self, reported: Option<Reported>) -> HdrSetup {
+    pub(crate) fn hdr_setup(&self, reported: Option<Reported>) -> HdrSetup {
         match reported {
             None => HdrSetup::Unknown,
             Some(_) if self.hdr_peak != 0 || self.hdr_paper_white != 0 => HdrSetup::Changed,
@@ -1295,7 +1296,7 @@ impl Graphics {
     }
     /// The black level, in nits. Not the system's: files from before saved 0 for that
     /// (Auto), and a reported black would lift every display's shadows by default.
-    pub fn black_level_nits(&self) -> f32 {
+    pub(crate) fn black_level_nits(&self) -> f32 {
         self.hdr_black_level as f32 / 100.0
     }
     /// Worker threads for chunk generation and meshing.

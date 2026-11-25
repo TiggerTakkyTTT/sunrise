@@ -1,7 +1,11 @@
 # Placing a block from code
 
 `level.set_block(host, pos, state, flags)` writes a state without running `Block.setPlacedBy`.
-These are all server operations on the level in place.
+The placement operations below run on the server level in place. To change one property
+instead of replacing the whole state, use `level.set_block_property(host, pos, key, value, flags)`.
+It preserves the holder and the other properties. It returns `Ok(false)` if there is no
+change or the position refuses the write. This property write also works in parked server
+levels, except inside an open Host transaction (`LevelWriteError::InTransaction`).
 
 - `level.update_from_neighbour_shapes(host, pos, state)` is `Block.updateFromNeighbourShapes`: it returns
   the state fitted to the blocks around `pos` (a fence gets its connections, a stair its corner). Nothing
@@ -26,8 +30,15 @@ let fitted = level.update_from_neighbour_shapes(host, pos, door)?;
 level.place_block(host, pos, fitted, true)?;
 ```
 
-`place_block` is `player.place_block` without a player: `setPlacedBy` gets no placer and no item. Nothing
-else of `BlockItem.place` runs: no survival or obstruction check, item placement sound, placement
+`level.place_block` is playerless: it does not fire `entity_place`, and `setPlacedBy` gets no placer or
+item. Use `player.place_block(host, level, pos, state, face, update_neighbour_shapes)` to let placement
+listeners veto a chosen state attributed to a real player. The face tells the hook which adjacent block
+it was placed against. The hook reads that neighbour after staging, and sees the states and block
+entities of every cell written by `setPlacedBy`. A veto restores them. If a listener panics, only
+that listener's tentative writes roll back; later eligible listeners still run. The block callback
+still gets no placer or item.
+
+Neither handle runs an item use. Nothing else of `BlockItem.place` runs: no survival or obstruction check, item placement sound, placement
 game event or advancement. `place_block` and `update_from_neighbour_shapes` refuse with `LevelWriteError`:
 `Stale` for a dead handle, `Unavailable` on a client or for a level that is not the one in place, and
 `InvalidState` for a state the world lacks.
@@ -53,5 +64,6 @@ The server's `block_changed` hook hears a successful state change before its blo
 and neighbour updates. `event.flags` gives the flags applied to that write. For example,
 `event.flags.contains(BlockUpdateFlags::KNOWN_SHAPE)` tells you that this write skips the
 neighbour shape passes, even though the state change itself is still reported. If a transaction
-staged changes, the notice describes the write applied at commit, not each intermediate change.
+staged changes, the notice describes the write applied at commit. Ordinary changes can coalesce;
+a captured placement or a strict edit sharing its cell is replayed in call order.
 Rebuild listeners against the version 2 hook.

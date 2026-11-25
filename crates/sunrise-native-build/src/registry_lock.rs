@@ -140,13 +140,35 @@ impl RegistryLock {
         game: &Self,
         names: &std::collections::BTreeSet<String>,
     ) {
-        self.packages.retain(|id, _| {
-            !names.contains(&id.name)
-                || !game
-                    .local
-                    .keys()
-                    .any(|sdk| sdk.name == id.name && sdk.version == id.version)
-        });
+        self.packages
+            .retain(|id, _| !names.contains(&id.name) || !game.supplies(id));
+    }
+
+    /// Whether a package of the mods' own (local, and not one the SDK builds) depends on `id`
+    /// directly. The lock resolves every target and feature of the workspace, so such a
+    /// package, and a release of `id`'s line, is in every graph of it.
+    pub(super) fn required_locally(&self, game: &Self, id: &Identity) -> bool {
+        let version = id.version.to_string();
+        self.local
+            .iter()
+            .filter(|(local, _)| !game.supplies(local))
+            .filter_map(|(_, record)| record.raw.get("dependencies")?.as_array())
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            // Cargo writes `name`, or `name version` (and its source) when the lock holds
+            // more than one release of the name.
+            .any(|dependency| {
+                let mut words = dependency.split(' ');
+                words.next() == Some(id.name.as_str())
+                    && words.next().is_none_or(|word| word == version)
+            })
+    }
+
+    /// Whether the SDK builds `id`'s name at `id`'s version from its own source.
+    pub(super) fn supplies(&self, id: &Identity) -> bool {
+        self.local
+            .keys()
+            .any(|sdk| sdk.name == id.name && sdk.version == id.version)
     }
 
     /// Checks a resolved build graph against these pins (the game's and the mods'): each registry

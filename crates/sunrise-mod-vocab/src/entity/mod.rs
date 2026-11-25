@@ -1,9 +1,11 @@
 //! Entities, mobs, players, effects and their handles.
 
+pub(crate) mod account_profile;
 pub(crate) mod attachment_holder;
 pub(crate) mod attachment_query;
 pub(crate) mod chunk_areas;
 pub(crate) mod collider;
+pub(crate) mod death_loot;
 pub(crate) mod entity_reach;
 pub(crate) mod entity_tags;
 pub(crate) mod entity_type_defaults;
@@ -13,6 +15,7 @@ pub(crate) mod player_data;
 pub(crate) mod player_world;
 pub(crate) mod ride_player;
 pub(crate) mod start_riding;
+pub(crate) mod swimming_check;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod behaviors;

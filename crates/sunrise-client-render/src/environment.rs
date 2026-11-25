@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 use sunrise_assets::resource_source::ResourceSource;
 use sunrise_world::environment_attributes::{
-    Attribute, AttributeMap, Entry, Kind, Value, attribute,
+    AMBIENT_PARTICLES, Attribute, AttributeMap, Entry, Kind, Value, attribute,
 };
 use sunrise_world::environment_system::{BiomeBlend, Builder, Conditions, System};
 use sunrise_world::environment_timeline::Timeline;
@@ -54,6 +54,9 @@ pub struct Sky {
     /// Environmental fog (`visual/fog_start_distance` / `fog_end_distance`).
     pub fog_start: f32,
     pub fog_end: f32,
+    /// `visual/sky_fog_end_distance`.
+    #[serde(default)]
+    pub sky_fog_end: f32,
     /// `visual/cloud_fog_end_distance`.
     pub cloud_fog_end: f32,
     /// `visual/cloud_height`.
@@ -335,7 +338,7 @@ fn as_number(value: &Value) -> f64 {
         Value::Argb([r, g, b, a]) => {
             f64::from((byte(*a) << 24 | byte(*r) << 16 | byte(*g) << 8 | byte(*b)) as i32)
         }
-        Value::Other(_) => 0.0,
+        Value::AmbientParticles(_) | Value::Other(_) => 0.0,
     }
 }
 
@@ -999,6 +1002,9 @@ impl Environment {
             biomes.insert(name, map);
         }
         builder.biome_layer(biomes.values());
+        // Ambient emission uses the active level's registry, including synchronized biomes.
+        builder
+            .biome_attribute(attribute(AMBIENT_PARTICLES).expect("registered ambient particles"));
         for id in timeline_ids(root, &json["timelines"]) {
             let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", &id));
             let file = format!("data/{namespace}/timeline/{path}.json");
@@ -1102,16 +1108,24 @@ impl Environment {
     /// `EnvironmentAttributeSystem.getValue` of one attribute, or its dimension value without
     /// a biome.
     pub fn value(&self, id: &str, at: &Sample) -> Option<Value> {
-        let attribute = attribute(id)?;
+        self.value_at(attribute(id)?, at, &|_| at.day_time)
+    }
+
+    /// Sample a known attribute with the level's clock values.
+    pub fn value_at(
+        &self,
+        attribute: &Attribute,
+        at: &Sample,
+        clock: &dyn Fn(&str) -> i64,
+    ) -> Option<Value> {
         let biome = |_full_resolution: bool| at.biome;
-        let clock = |_clock: &str| at.day_time;
         let post_biome = |_full_resolution: bool| at.post_biome;
         let conditions = Conditions {
             rain: at.rain,
             thunder: at.thunder,
             blend: at.blend,
             biome: &biome,
-            clock: &clock,
+            clock,
             post_blend: at.post_blend,
             post_biome: Some(&post_biome),
         };
@@ -1151,6 +1165,7 @@ impl Environment {
             sky_light_level: float("gameplay/sky_light_level"),
             fog_start: float("visual/fog_start_distance"),
             fog_end: float("visual/fog_end_distance"),
+            sky_fog_end: float("visual/sky_fog_end_distance"),
             cloud_fog_end: float("visual/cloud_fog_end_distance"),
             cloud_height: float("visual/cloud_height"),
         }

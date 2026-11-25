@@ -3,9 +3,11 @@ mod order;
 pub(crate) use order::dependency_order;
 
 use crate::loot::PackOverlay;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::{io, path::Path};
+use sunrise_core::identifier::Identifier;
 
 /// A tag's entries over its layers, in pack order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,6 +20,23 @@ struct Entry {
     remove: bool,
 }
 
+#[derive(Deserialize)]
+struct TagFile {
+    values: Vec<Value>,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    remove: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+struct FileEntry {
+    id: String,
+    required: Option<bool>,
+    #[serde(default)]
+    remove: bool,
+}
+
 /// A tag file entry's id: a string, or an object's `id` (`TagEntry.CODEC`).
 pub fn entry_id(entry: &Value) -> Option<&str> {
     entry.as_str().or_else(|| entry.get("id")?.as_str())
@@ -25,44 +44,68 @@ pub fn entry_id(entry: &Value) -> Option<&str> {
 
 impl TagLayers {
     /// The layers of one file.
-    pub fn from_file(file: &Value) -> Self {
-        let mut layers = Self::default();
-        layers.push(file);
-        layers
+    pub fn from_file(file: Value) -> io::Result<Self> {
+        Self::decode(file).map(|(_, layer)| layer)
     }
 
-    /// One more file, over the layers below it (conditions already
-    /// checked): `replace` drops them, then its `values` and `remove` follow.
-    /// Inside `values`, an entry of `{"id": ..., "remove": true}`
-    /// (`TagLoader.EntryWithSource.remove`) removes like a `remove` entry.
-    pub fn push(&mut self, file: &Value) {
-        if file.get("replace").and_then(Value::as_bool) == Some(true) {
+    /// Decode the complete file before applying it over any lower layers
+    /// (`TagLoader.load`). Inside `values`, a content overlay's
+    /// `{"id": ..., "remove": true}` entry removes like a `remove` entry.
+    fn decode(file: Value) -> io::Result<(bool, Self)> {
+        // Serde also accepts positional arrays for structs; the tag codec requires an object.
+        if !file.is_object() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "expected a tag object",
+            ));
+        }
+        let TagFile {
+            values,
+            replace,
+            remove,
+        } = serde_json::from_value(file)?;
+        let entries = values
+            .into_iter()
+            .map(|entry| (entry, false))
+            .chain(remove.into_iter().map(|entry| (entry, true)))
+            .map(|(entry, removal)| {
+                let (id, required, remove) = match entry {
+                    Value::String(id) => (id, true, removal),
+                    Value::Object(_) => {
+                        let FileEntry {
+                            id,
+                            required,
+                            remove,
+                        } = serde_json::from_value(entry)?;
+                        (id, required.unwrap_or(true), removal || remove)
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "expected a tag entry string or object",
+                        ));
+                    }
+                };
+                let (prefix, name) = id
+                    .strip_prefix('#')
+                    .map_or(("", id.as_str()), |name| ("#", name));
+                let name = Identifier::parse(name)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                Ok(Entry {
+                    id: format!("{prefix}{name}"),
+                    required,
+                    remove,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        Ok((replace, Self(entries)))
+    }
+
+    fn push(&mut self, (replace, layer): (bool, Self)) {
+        if replace {
             self.0.clear();
         }
-        for (field, remove) in [("values", false), ("remove", true)] {
-            for entry in file
-                .get(field)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                let Some(id) = entry_id(entry) else {
-                    continue;
-                };
-                let (prefix, name) = id.strip_prefix('#').map_or(("", id), |name| ("#", name));
-                let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
-                let ns = if ns.is_empty() { "minecraft" } else { ns };
-                let id = format!("{prefix}{ns}:{path}");
-                self.0.push(Entry {
-                    id,
-                    required: entry
-                        .get("required")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true),
-                    remove: remove || entry.get("remove").and_then(Value::as_bool) == Some(true),
-                });
-            }
-        }
+        self.0.extend(layer.0);
     }
 
     /// The `#tags` the entries name, adding or removing.
@@ -171,13 +214,10 @@ pub(crate) fn layers(
         for file in &folder.files {
             match file
                 .bytes()
-                .and_then(|bytes| Ok(serde_json::from_slice(bytes)?))
+                .and_then(|bytes| TagLayers::decode(serde_json::from_slice(bytes)?))
             {
-                Ok(value) => {
-                    raw.insert(
-                        format!("{namespace}:{}", file.name),
-                        TagLayers::from_file(&value),
-                    );
+                Ok((_, layer)) => {
+                    raw.insert(format!("{namespace}:{}", file.name), layer);
                 }
                 Err(error) => log::warn!(
                     "Sunrise: couldn't read tag file {}: {error}",
@@ -188,12 +228,25 @@ pub(crate) fn layers(
     }
     for (id, files) in overlay.tag_kind(kind) {
         for bytes in files {
-            match serde_json::from_slice(bytes) {
-                Ok(value) => raw.entry(id.clone()).or_default().push(&value),
+            let layer = serde_json::from_slice(bytes)
+                .map_err(io::Error::from)
+                .and_then(TagLayers::decode);
+            match layer {
+                Ok(layer) => raw.entry(id.clone()).or_default().push(layer),
                 Err(error) => log::warn!("Sunrise: couldn't read {kind} tag {id}: {error}"),
             }
         }
     }
+    // A pack lists only files whose names are identifiers (`PathPackResources.listPath` skips
+    // and logs "Invalid path in pack"), so `TagLoader` never sees another name.
+    raw.retain(|id, _| {
+        let (namespace, path) = id.split_once(':').unwrap_or(("", id));
+        let valid = Identifier::from_parts(namespace, path).is_ok();
+        if !valid {
+            log::warn!("Sunrise: invalid {kind} tag name {id}: not an identifier, skipped");
+        }
+        valid
+    });
     Ok(raw)
 }
 
@@ -225,19 +278,72 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A tag file whose name is not an identifier (`Bad.json`) is skipped, as a pack never
+    /// lists it, so the valid tag beside it binds with its members and no invalid name binds.
+    #[test]
+    fn a_tag_file_name_that_is_not_an_identifier_is_skipped() {
+        let root = std::env::temp_dir().join(format!("sunrise-tag-names-{}", std::process::id()));
+        let dir = root.join("data/test/tags/item");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Bad.json"), r#"{"values":["minecraft:stick"]}"#).unwrap();
+        std::fs::write(dir.join("sticks.json"), r#"{"values":["minecraft:stick"]}"#).unwrap();
+        let overlay_files = [(
+            "tags/test:item/Worse".to_owned(),
+            vec![br#"{"values":["minecraft:stick"]}"#.to_vec()],
+        )];
+        let bound = load(
+            &root,
+            "item",
+            &crate::loot::PackOverlay::new(&overlay_files),
+            |id| id == "minecraft:stick",
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        let bound = bound.unwrap();
+        assert_eq!(
+            bound,
+            HashMap::from([("test:sticks".to_owned(), vec!["minecraft:stick".to_owned()])])
+        );
+    }
+
     #[test]
     fn removals_apply_in_layer_order_and_replace_drops_them() {
-        let mut things = TagLayers::from_file(&json!({"values": ["stone", "dirt", "#test:other"]}));
-        things.push(&json!({"values": [], "remove": ["dirt", "#test:other"]}));
-        things.push(&json!({"values": ["gravel", "sand", {"id":"stone", "remove":true}]}));
+        let mut things =
+            TagLayers::from_file(json!({"values": ["stone", "dirt", "#test:other"]})).unwrap();
+        let decode = |file| TagLayers::decode(file).unwrap();
+        things.push(decode(
+            json!({"values": [], "remove": ["dirt", "#test:other"]}),
+        ));
+        things.push(decode(
+            json!({"values": ["gravel", "sand", {"id":"stone", "remove":true}]}),
+        ));
         let other = ["minecraft:sand".into()];
         let members = |tag: &str| (tag == "test:other").then_some(other.as_slice());
         assert_eq!(
             things.build(|_| true, members).unwrap(),
             ["minecraft:gravel", "minecraft:sand"]
         );
-        things.push(&json!({"replace": true, "values": ["dirt"]}));
+        things.push(decode(json!({"replace": true, "values": ["dirt"]})));
         assert_eq!(things.build(|_| true, members).unwrap(), ["minecraft:dirt"]);
+    }
+
+    #[test]
+    fn malformed_replacements_leave_lower_entity_tag_layers_bound() {
+        let key = "tags/test:entity_type/living";
+        let lower = br#"{"values":["minecraft:cow"]}"#;
+        let root = std::path::PathBuf::new();
+        for malformed in [
+            br#"{"replace":true,"values":"minecraft:pig"}"#.as_slice(),
+            br#"[["minecraft:pig"],true,[]]"#,
+            br#"{"replace":true,"values":[["minecraft:pig",true,false]]}"#,
+            br#"{"replace":true,"values":["minecraft:pig",false]}"#,
+            br#"{"replace":true,"values":["minecraft:pig",{"id":"INVALID"}]}"#,
+            br##"{"replace":true,"values":["minecraft:pig","#INVALID"]}"##,
+            br#"{"replace":true,"values":[],"remove":{}}"#,
+        ] {
+            let files = [(key.into(), vec![lower.to_vec(), malformed.to_vec()])];
+            let bound = load(&root, "entity_type", &PackOverlay::new(&files), |_| true).unwrap();
+            assert_eq!(bound["test:living"], ["minecraft:cow"]);
+        }
     }
 
     #[test]
@@ -248,7 +354,7 @@ mod tests {
             ("test:dependent", json!({"values":["#test:required"]})),
             ("test:optional", json!({"values":[{"id":"test:absent", "required":false}, {"id":"#test:required", "required":false}], "remove":["#test:required", "test:absent"]})),
             ("test:admitted", json!({"values":["#test:empty", "test:pinned", "test:pinned"]})),
-        ].into_iter().map(|(name, file)| (name.to_owned(), TagLayers::from_file(&file))).collect();
+        ].into_iter().map(|(name, file)| (name.to_owned(), TagLayers::from_file(file).unwrap())).collect();
         assert_eq!(
             TagLayers::bind("item", &raw, |id| id == "test:pinned"),
             HashMap::from([
@@ -266,12 +372,13 @@ mod tests {
             let child = format!("#test:{}", i + 1);
             raw.insert(
                 format!("test:{i}"),
-                TagLayers::from_file(&json!({"values":[child,child]})),
+                TagLayers::from_file(json!({"values":[child,child]})).unwrap(),
             );
         }
         raw.insert(
             "test:128".into(),
-            TagLayers::from_file(&json!({"values":["minecraft:stick", "minecraft:potion"]})),
+            TagLayers::from_file(json!({"values":["minecraft:stick", "minecraft:potion"]}))
+                .unwrap(),
         );
         let calls = std::cell::Cell::new(0);
         let tags = TagLayers::bind("item", &raw, |_| {
@@ -288,14 +395,16 @@ mod tests {
             (
                 "test:a".into(),
                 TagLayers::from_file(
-                    &json!({"values": ["sand", {"id":"#test:b", "required":false}]}),
-                ),
+                    json!({"values": ["sand", {"id":"#test:b", "required":false}]}),
+                )
+                .unwrap(),
             ),
             (
                 "test:b".into(),
                 TagLayers::from_file(
-                    &json!({"values": ["dirt", {"id":"#test:a", "required":false}]}),
-                ),
+                    json!({"values": ["dirt", {"id":"#test:a", "required":false}]}),
+                )
+                .unwrap(),
             ),
         ]);
         let bound = TagLayers::bind("block", &raw, |_| true);
@@ -309,13 +418,14 @@ mod tests {
         let raw = HashMap::from([
             (
                 "test:a".into(),
-                TagLayers::from_file(&json!({"values": ["#test:b", "sand"]})),
+                TagLayers::from_file(json!({"values": ["#test:b", "sand"]})).unwrap(),
             ),
             (
                 "test:b".into(),
                 TagLayers::from_file(
-                    &json!({"values": [{"id":"#test:a", "required":false}, "dirt"]}),
-                ),
+                    json!({"values": [{"id":"#test:a", "required":false}, "dirt"]}),
+                )
+                .unwrap(),
             ),
         ]);
         let bound = TagLayers::bind("block", &raw, |_| true);

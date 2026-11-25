@@ -397,17 +397,19 @@ impl Game<'_> {
             (sunrise_items::equipment::MAINHAND, false),
             (sunrise_items::equipment::OFFHAND, true),
         ] {
-            let Some(item) = mob.extra.slot_stack(slot).map(|s| &s.item) else {
+            let Some(stack) = mob.extra.slot_stack(slot) else {
                 continue;
             };
+            let item = &stack.item;
             let left = off_hand != mob.main_arm_left();
             // PlayerItemInHandLayer.submitArmWithItem (avatars only): a spyglass
             // in use, with no swing in progress, is held to the eye (`heldOnHead`).
-            let spyglass_to_eye = &**item == "minecraft:spyglass"
-                && (&*mob.kind.id == "minecraft:player" || mob.species() == Species::Mannequin)
+            let spyglass_to_eye = (&*mob.kind.id == "minecraft:player"
+                || mob.species() == Species::Mannequin)
                 && off_hand == mob.extra.using_off_hand
                 && mob.extra.using_item > 0
-                && sunrise_client::mobs::anim::state(mob, alpha as f32).swing < 1.0e-5;
+                && sunrise_client::mobs::anim::state(mob, alpha as f32).swing < 1.0e-5
+                && self.stack_scopes(stack);
             let t = if spyglass_to_eye {
                 render::held_to_eye_matrix(mob, alpha as f32, camera, self, left)
             } else {
@@ -468,7 +470,13 @@ impl Game<'_> {
                 fishing_cast_item(
                     mob.id,
                     active.map(|hook| hook.owner),
-                    mob.extra.main_hand_id() == Some("minecraft:fishing_rod"),
+                    mob.extra.main_hand_stack().is_some_and(|s| {
+                        self.stack_can_perform(
+                            s,
+                            super::item_abilities::ability::FISHING_ROD_CAST,
+                            &*s.item == "minecraft:fishing_rod",
+                        )
+                    }),
                     off_hand,
                 )
             };

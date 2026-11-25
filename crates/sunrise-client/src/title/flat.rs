@@ -614,19 +614,20 @@ pub(super) fn row_target(name: &str, rect: [f32; 4], top: f32, bottom: f32) {
         crate::widgets::target_as(rect, crate::widgets::Kind::Row);
     }
 }
-pub(super) fn wheel(state: &mut State, delta: f32, cursor: (f32, f32), size: (f32, f32)) {
+pub(super) fn wheel(state: &mut State, delta: f32, cursor: (f32, f32), size: (f32, f32)) -> bool {
     let (top, bottom, _, content) = list_area(state, size);
     if cursor.1 < top || cursor.1 >= bottom {
-        return;
+        return false;
     }
     match state.page {
         Page::Layers => state.scroll.wheel(delta, LAYER_ROW, top, bottom, content),
         Page::Presets => state
             .preset_scroll
             .wheel(delta, PRESET_ROW, top, bottom, content),
-    }
+    };
+    true
 }
-pub(super) fn drag(state: &mut State, cursor: (f32, f32), size: (f32, f32)) {
+pub(super) fn drag(state: &mut State, cursor: (f32, f32), size: (f32, f32)) -> bool {
     let (top, bottom, _, content) = list_area(state, size);
     match state.page {
         Page::Layers => state.scroll.drag(cursor.1, top, bottom, content),

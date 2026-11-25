@@ -306,7 +306,7 @@ fn loot_kill_asks_with_a_non_living_source_and_with_none() {
             let source = game.player_source();
             game.command_source = Some(super::super::commands::execute::Source {
                 entity: None,
-                ..source
+                ..source.clone()
             });
             assert!(game.run_command(kill));
             assert_eq!(

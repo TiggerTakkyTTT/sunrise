@@ -160,26 +160,44 @@ impl Game<'_> {
         mob.previous_head_yaw = yaw;
         let id = mob.id;
         self.mobs.push(mob);
-        self.native_mobs_joined(self.mobs.len() - 1, false);
+        self.admit_new_mobs(self.mobs.len() - 1);
         Some(id)
     }
     /// `CarvedPumpkinBlock.clearPatternBlocks`: every cell of the match
     /// becomes air (flags 2) with its destroy event (2001).
     pub(super) fn clear_pattern_blocks(&mut self, cells: &[[i32; 3]]) -> Result<()> {
         let air = self.world.air;
+        let capture = self
+            .captures_placement()
+            .then(|| self.level(self.dim.id()).unwrap());
         for &p in cells {
             let state = self.world.block(p[0], p[1], p[2]);
             let pos = sunrise_core::position::BlockPos::new(p[0], p[1], p[2]);
-            self.with_level(|b, level, ticks| b.set_block(level, ticks, pos, air, 2));
-            self.level_events
-                .push(sunrise_world::level::LevelEvent::LevelEvent {
-                    id: 2001,
-                    pos,
-                    data: state.0 as i32,
-                    source: None,
-                });
+            let event = sunrise_world::level::LevelEvent::LevelEvent {
+                id: 2001,
+                pos,
+                data: state.0 as i32,
+                source: None,
+            };
+            if let Some(level) = capture {
+                use super::{journal_level_write::JournalLevelWrite, transactions::After};
+                use sunrise_world::level::ticks::PlacementEffect;
+                if let Some(mut writer) = JournalLevelWrite::new(self, level) {
+                    writer.write_block(p, air, 2);
+                }
+                self.after_commit(After::PlacementEffect(Box::new(
+                    PlacementEffect::LevelEvent(event),
+                )));
+            } else {
+                self.with_level(|b, level, ticks| b.set_block(level, ticks, pos, air, 2));
+                self.level_events.push(event);
+            }
         }
-        self.process_level_events()
+        if capture.is_some() {
+            Ok(())
+        } else {
+            self.process_level_events()
+        }
     }
     /// `CarvedPumpkinBlock.updatePatternBlocks`: neighbours of every cell
     /// hear that air arrived.
@@ -252,8 +270,7 @@ impl Game<'_> {
         if let Some(m) = id.and_then(|id| self.mobs.iter_mut().find(|m| m.id == id)) {
             m.extra.variant = weather;
             let p = [m.position.x, m.position.y, m.position.z];
-            self.audio
-                .play("minecraft:entity.copper_golem.spawn", Some(p), 1.0, 1.0);
+            self.play_audio("minecraft:entity.copper_golem.spawn", Some(p), 1.0, 1.0);
         }
         self.process_level_events()
     }

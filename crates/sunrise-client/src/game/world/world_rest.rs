@@ -23,6 +23,7 @@ pub(super) fn load_world_rest(
     let biomes = resources.biomes();
     let threads = resources.threads();
     let registry = assets.registry;
+    let builtin = super::remote::builtin_registries(root).unwrap_or_default();
     let content = sunrise_client::datapack::DataPack::from_source(
         "sunrise-content".into(),
         resource_root.data_changes().clone(),
@@ -45,6 +46,13 @@ pub(super) fn load_world_rest(
         api_values::resolve_item_registry(&items)?;
         log::info!("load items: {:.2}s", started.elapsed().as_secs_f32());
         progress.set(7);
+        // The recipes and the stations see the tags the items just bound
+        // (`neoforge:tag_empty`), as a world's own load does.
+        let conditions = overlay.conditions.with_tags(items.bound_tags());
+        let overlay = &sunrise_world::loot::PackOverlay {
+            conditions: &conditions,
+            ..*overlay
+        };
         // The recipe tables, the stations and the recipe book read one folder:
         // hold its files so it is read once.
         let _recipe_files = sunrise_client::json_folder::read(&root.join("data/minecraft/recipe"));
@@ -126,18 +134,18 @@ pub(super) fn load_world_rest(
             catalog,
             mod_api::__private::entity_attribute_modifications(),
         );
-        // The types mods name to `entity_tick_each` hear their ticks one entity at a time
-        // (game/modding/native_ticks.rs): marked once here, so a tick reads a flag.
-        let each = mod_api::__private::entity_tick_each();
         let mob_types: HashMap<_, _> = types
             .types
             .into_iter()
             .map(|(k, mut v)| {
-                v.flags.tick_alone = each.is_some_and(|each| each.names(&v.id));
+                // The entity-type registry is complete before the rest loads
+                // (`register_iterated_registries`): the type keeps its key from it.
+                v.type_key = mod_api::__private::resolved_entity_type_key(&v.id);
                 (k, Arc::new(v))
             })
             .collect();
-        let mut mob_data = sunrise_client::mobs::MobData::load(resource_root, facts);
+        let mut mob_data =
+            sunrise_client::mobs::MobData::load(resource_root, facts.states.len(), draws)?;
         // NeoForge keys placements by EntityType, not by the subset backed by MobTypes.
         // Use exactly the registry the spawners will consult, with facts already validated.
         mob_data
@@ -158,6 +166,9 @@ pub(super) fn load_world_rest(
     let load_transformers = || -> Result<_> {
         let _step = startup::step("rest.transformers_models");
         let transformers = sunrise_client::block_transform::Transformers::load(root, registry)?;
+        if !draws {
+            return Ok((transformers, (None, [None, None], [None, None], None)));
+        }
         let player_type = match entity_models {
             Some(document) => perspective::player_type_with_document(root, document),
             None => perspective::player_type(root),
@@ -206,12 +217,12 @@ pub(super) fn load_world_rest(
             });
             let music = named_scope(scope, "music", || {
                 startup::time("rest.music", || {
-                    sunrise_client::music::MusicTables::load(root)
+                    sunrise_client::music::MusicTables::load(root, builtin.clone())
                 })
             });
             let ambient = named_scope(scope, "ambient", || {
                 startup::time("rest.ambient", || {
-                    sunrise_client::ambience::AmbientTables::load(root)
+                    sunrise_client::ambience::AmbientTables::load(root, builtin.clone())
                 })
             });
             let nether_environment = named_scope(scope, "nether_environment", || {
@@ -258,10 +269,10 @@ pub(super) fn load_world_rest(
             text(load_transformers()),
             Providers::load(root),
             startup::time("rest.music", || {
-                sunrise_client::music::MusicTables::load(root)
+                sunrise_client::music::MusicTables::load(root, builtin.clone())
             }),
             startup::time("rest.ambient", || {
-                sunrise_client::ambience::AmbientTables::load(root)
+                sunrise_client::ambience::AmbientTables::load(root, builtin.clone())
             }),
             startup::time("rest.nether_environment", || {
                 text(Environment::load_dimension(
@@ -318,6 +329,7 @@ pub(super) fn load_world_rest(
         end_environment,
         behaviours: Arc::new(behaviours?),
         mob_types,
+        living_type_keys: sunrise_client::health::LivingTypeKeys::resolve(),
         mob_data,
         spawner_types,
         player_type,

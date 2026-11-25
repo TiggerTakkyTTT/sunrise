@@ -13,6 +13,11 @@ pub trait EntityPhysicsBackend {
     /// zero. On a client, another entity's is the motion the server last
     /// sent it (`Entity.lerpMotion`). API 379.
     fn entity_velocity(&self, entity: EntityRef) -> Option<[f64; 3]>;
+    /// Side: server.
+    /// The server's accumulated `Entity.fallDistance`, in blocks. For a player this is
+    /// the distance tracked from accepted moves. Zero for a kind that does not keep a fall
+    /// distance; None when the handle is stale or its body is unavailable.
+    fn entity_fall_distance(&self, entity: EntityRef) -> Option<f64>;
     /// Side: both.
     /// How the entity reacts to a piston (`Entity.getPistonPushReaction`), including
     /// the current marker flag of an armor stand. `Ok(None)` for a stale handle;
@@ -31,9 +36,13 @@ pub trait EntityPhysicsBackend {
     fn entity_is_hanging(&self, entity: EntityRef) -> Result<Option<bool>, LevelReadError>;
     /// Side: both.
     /// The entity's box (`Entity.getBoundingBox`): its lowest and highest
-    /// corner. Displays and markers have zero-sized physical boxes; interactions use
-    /// their saved dimensions. End crystals have their 2 x 2 box. None for the dragon; a dragon part's is its own. On a client, reads
-    /// its own copy of a tracked entity, or the local player's predicted box.
+    /// corner. A display's physical box on either side is two coincident corners at its
+    /// position. On the client this is the current tick position after movement
+    /// interpolation, not the packet destination or the render culling box.
+    /// Markers also have zero-sized boxes; interactions use their saved dimensions.
+    /// End crystals have a 2 x 2 box and dragon parts have their own boxes. Returns
+    /// `None` for the dragon itself or an unresolved handle. The local client player
+    /// uses its predicted box.
     fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]>;
     /// Side: server.
     /// The entity's width and height (`Entity.getBbWidth`, `getBbHeight`):
@@ -64,10 +73,10 @@ pub trait EntityPhysicsBackendMut {
     /// the level in place; true for a kind that keeps no fall distance, which has none to forget.
     fn entity_reset_fall_distance(&mut self, entity: EntityRef) -> bool;
     /// Side: server.
-    /// Sets the entity's velocity (`Entity.setDeltaMovement`); clients see it
-    /// as they see the entity move. False for a player (its client moves
-    /// it), an entity Sunrise doesn't simulate, a value that isn't finite,
-    /// or on a client. API 379.
+    /// Replaces the entity's velocity in blocks per tick (`Entity.setDeltaMovement`).
+    /// A player's own client receives a motion packet and replaces its velocity too.
+    /// False without changing motion for an unavailable body (including a player whose turn
+    /// is suspended), a stale handle, an entity Sunrise doesn't simulate, or a non-finite value.
     fn entity_set_velocity(&mut self, entity: EntityRef, velocity: [f64; 3]) -> bool;
     /// Side: server.
     /// Adds `delta` to the entity's velocity (`Entity.push`,
@@ -84,8 +93,8 @@ pub trait EntityPhysicsBackendMut {
     /// the last set; an empty slice clears it, and so do a change of level, a respawn and
     /// leaving. Nothing is saved, and nothing reaches the player's client: its own half sets the
     /// same boxes with `ClientHost::set_collision_exclusions`. Refused, keeping the set there
-    /// was: more than 64 boxes, a value that isn't finite, a minimum above its maximum, an
-    /// entity that isn't a player, a stale handle.
+    /// was: a value that isn't finite, a minimum above its maximum, an entity that isn't a
+    /// player, a stale handle.
     fn entity_set_collision_exclusions(
         &mut self,
         entity: EntityRef,

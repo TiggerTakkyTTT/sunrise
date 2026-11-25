@@ -1,6 +1,7 @@
 //! The optional shared allocation budget of a typed payload, not a second codec.
 use super::WireError;
 use std::alloc::Layout;
+use sunrise_core::identifier::IDENTIFIER_DATA_LAYOUT;
 
 /// The deepest a typed payload may nest in Wire.
 pub const PAYLOAD_MAX_DEPTH: u16 = 64;
@@ -26,11 +27,19 @@ impl Budget {
     }
 
     pub(super) fn arc<T>(&mut self, count: usize) -> Result<(), WireError> {
-        self.bytes(arc_bytes::<T>(count)?)
+        self.bytes(arc_bytes(
+            Layout::array::<T>(count).map_err(|_| WireError::Budget)?,
+        )?)
     }
 
     pub(super) fn arc_str_overhead(&mut self, len: usize) -> Result<(), WireError> {
-        self.bytes(arc_bytes::<u8>(len)? - len as u64)
+        self.bytes(
+            arc_bytes(Layout::array::<u8>(len).map_err(|_| WireError::Budget)?)? - len as u64,
+        )
+    }
+
+    pub(super) fn identifier_data(&mut self) -> Result<(), WireError> {
+        self.bytes(arc_bytes(IDENTIFIER_DATA_LAYOUT)?)
     }
 
     pub(super) fn btree<T>(&mut self, len: usize) -> Result<(), WireError> {
@@ -80,11 +89,10 @@ impl Budget {
     }
 }
 
-fn arc_bytes<T>(count: usize) -> Result<u64, WireError> {
+fn arc_bytes(value: Layout) -> Result<u64, WireError> {
     // An Arc allocation holds both counts and the aligned value, even for a ZST.
-    let values = Layout::array::<T>(count).map_err(|_| WireError::Budget)?;
     let (layout, _) = Layout::new::<[usize; 2]>()
-        .extend(values)
+        .extend(value)
         .map_err(|_| WireError::Budget)?;
     (layout.pad_to_align().size() as u64)
         .checked_mul(8 / std::mem::size_of::<usize>() as u64)

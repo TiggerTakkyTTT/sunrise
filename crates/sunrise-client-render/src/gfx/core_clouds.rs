@@ -6,7 +6,7 @@
 //! each `OitStage` (`CloudRenderer.renderOit`, in `Oit`'s cloud passes). Without one the clouds
 //! draw natively (`clouds.rs`, `vs_cloud`).
 
-use crate::core_shader::{CoreProgram, Glue};
+use sunrise_glsl::{Glue, Translated};
 
 /// `core/clouds`: no vertex input, the face and its corner from `gl_VertexIndex`.
 pub(crate) const GLUE: Glue = Glue {
@@ -16,6 +16,8 @@ pub(crate) const GLUE: Glue = Glue {
     // 26.3's ProjMat already has wgpu's reversed 0 to 1 depth.
     finish: "",
     vertex_id: "int(gl_VertexIndex)",
+    fragment_finish: None,
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// The pipeline's own block and texel buffer, beside the vanilla blocks.
@@ -54,16 +56,13 @@ pub(crate) struct OitStageSource {
 /// The stage samplers, in the order [`super::oit::CloudSamples::views`] gives their textures.
 const STAGE_SAMPLERS: [&str; 3] = ["DepthBoundsSampler", "Coeff0", "Coeff1"];
 
-/// What `GlslCompiler` defines for every program on a backend whose depth runs from 0 to 1, as
-/// wgpu's does.
-const DEPTH_ZERO_TO_ONE: &str = "RENDERPEARL_DEPTH_IS_ZERO_TO_ONE";
-
-/// The defines of `CLOUDS` and `FLAT_CLOUDS`: the backend's alone.
-pub(crate) const CLASSIC_DEFINES: [&str; 1] = [DEPTH_ZERO_TO_ONE];
+/// The defines of `CLOUDS` and `FLAT_CLOUDS`: none of their own. The backend's, which every
+/// program has, the translator adds (`core_shader::DEPTH_ZERO_TO_ONE`).
+pub(crate) const CLASSIC_DEFINES: [&str; 0] = [];
 
 /// `OitStage`'s order. `OIT_COEFF_COUNT` is `LevelRenderer.OIT_COEFFICIENT_COUNT` (8), its
-/// attachments `OIT_TRANSMITTANCE_TARGET_COUNT` (2), as `oit.rs` draws them; then the backend's
-/// [`DEPTH_ZERO_TO_ONE`].
+/// attachments `OIT_TRANSMITTANCE_TARGET_COUNT` (2), as `oit.rs` draws them. The backend's
+/// define, which every program has, the translator adds.
 pub(crate) const OIT_STAGES: [OitStageSource; 3] = [
     OitStageSource {
         pipeline: "minecraft:pipeline/oit_depth_bounds_clouds",
@@ -72,7 +71,6 @@ pub(crate) const OIT_STAGES: [OitStageSource; 3] = [
             "OIT_WAVELET_RANK 2",
             "OIT_COEFF_COUNT 8",
             "OIT_COEFF_ATTACHMENT_COUNT 2",
-            DEPTH_ZERO_TO_ONE,
             "OIT_ALPHA_ONLY",
             "OIT_DEPTH_BOUNDS",
         ],
@@ -85,7 +83,6 @@ pub(crate) const OIT_STAGES: [OitStageSource; 3] = [
             "OIT_WAVELET_RANK 2",
             "OIT_COEFF_COUNT 8",
             "OIT_COEFF_ATTACHMENT_COUNT 2",
-            DEPTH_ZERO_TO_ONE,
             "OIT_ALPHA_ONLY",
             "OIT_TRANSMITTANCE",
         ],
@@ -98,7 +95,6 @@ pub(crate) const OIT_STAGES: [OitStageSource; 3] = [
             "OIT_WAVELET_RANK 2",
             "OIT_COEFF_COUNT 8",
             "OIT_COEFF_ATTACHMENT_COUNT 2",
-            DEPTH_ZERO_TO_ONE,
             "OIT_ACCUMULATE",
         ],
         samplers: &STAGE_SAMPLERS,
@@ -117,11 +113,13 @@ pub(crate) fn oit_targets(i: usize) -> usize {
 /// the pipeline is made: it reads one of vanilla's samplers (`Sampler0` to `Sampler2`), which no
 /// clouds pass binds; or its fragment stage writes one of the pipeline's `targets` colour
 /// targets with anything but floats. Checked when the packs load, so the load fails as
-/// vanilla's compile failure fails its reload.
-pub(crate) fn check(program: &CoreProgram, targets: usize) -> Result<(), String> {
+/// vanilla's compile failure fails its reload. The error names the declaration it is about.
+pub(crate) fn check(program: &Translated, targets: usize) -> Result<(), sunrise_glsl::Error> {
     for (name, binding) in crate::core_shader::SAMPLERS {
         if !(program.stages_reading(binding) | program.stages_reading(binding + 1)).is_empty() {
-            return Err(format!("{name} is not a sampler of this pipeline"));
+            return Err(program
+                .declared_at(binding)
+                .error(format!("{name} is not a sampler of this pipeline")));
         }
     }
     let module = &program.fragment;
@@ -148,9 +146,9 @@ pub(crate) fn check(program: &CoreProgram, targets: usize) -> Result<(), String>
             _ => false,
         };
         if (location as usize) < targets && !float {
-            return Err(format!(
+            return Err(program.output_at(location).error(format!(
                 "its fragment stage writes colour target {location} with something other than floats"
-            ));
+            )));
         }
     }
     Ok(())
@@ -219,7 +217,7 @@ impl Draw {
     /// as `writes` says; `samplers` are the stage's.
     fn new(
         device: &wgpu::Device,
-        program: &CoreProgram,
+        program: &Translated,
         targets: &[Option<wgpu::ColorTargetState>],
         writes: [bool; 2],
         samplers: &[&str],
@@ -229,7 +227,7 @@ impl Draw {
                 .other
                 .iter()
                 .position(|n| n == name)
-                .map(crate::core_shader::other_binding)
+                .map(|i| program.other_binding(i))
         };
         let faces_binding = binding(FACES);
         let info_binding = binding(INFO_BLOCK);
@@ -396,7 +394,7 @@ impl CoreClouds {
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        (classic, stages): (Option<&CoreProgram>, Option<&[CoreProgram; 3]>),
+        (classic, stages): (Option<&Translated>, Option<&[Translated; 3]>),
     ) -> Result<Self, String> {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Resource pack clouds"),

@@ -15,7 +15,7 @@ queue (the hub, or `/suggest` on Discord) rather than to issues, which are for b
 
 **Mod-related pull requests come here too.** Sunrise is where the mod API is built: the mod API, native hooks and
 events for mods, native mods, content mods (`.smod`), mixins, `cargo sunrise-mod`, `sunrise-mods`, mod
-builds and the registry, and their docs ([mods](docs/mods.md), [native mods](docs/native-mods.md)). A change to the mod
+builds and the registry, and their docs ([modding book](docs/modding/src/introduction.md), [native mods](docs/modding/src/how-to/native-mods.md)). A change to the mod
 API follows its clean-break rules ([AGENTS.md](AGENTS.md#mod-api-the-clean-break)).
 
 When adding a native hook, keep its declaration under `crates/sunrise-mod-vocab/src/hooks/` and wire the engine
@@ -35,8 +35,11 @@ checkout fails the wiring check.
 
 - **Prerequisites:** Rust (stable), Python 3.11+, JDK 25, git 2.38 or newer, and on Linux the ALSA and udev headers
   (`libasound2-dev libudev-dev`).
-- **Resources:** Sunrise never downloads the game; it prepares its resources from your own copy of Minecraft 26.3, as
-  described in [Build from source](README.md#build-from-source).
+- **Resources:** Client preparation reads your own copy of Minecraft 26.3, as in [Build from source](README.md#build-from-source).
+  Only the launcher downloads client files, for a signed-in account that owns the game. For a dedicated server,
+  `sunrise-prepare --server` and `sunrise-server init` may download Mojang's free `server.jar` and Java runtime from
+  Mojang's URLs, with SHA-1 checks, on the server owner's machine or in CI. Never commit, publish or ship Mojang's
+  files or data derived from them.
 - **Commands:**
 
   ```sh
@@ -139,7 +142,8 @@ python3 tools/pr_ready.py --base upstream/main   # or origin/main if you work on
 ```
 
 It looks at what your branch changes and runs what matters: rustfmt, clippy with warnings denied, the tests of the
-crates you touched (and the launcher's), generated files, `Cargo.lock` and the Python tests. It runs the
+crates you touched (and the launcher's), generated files, `Cargo.lock` and the Python tests (one test file per
+worker; `--serial-python` runs them in one process, as CI does). It runs the
 vanilla harnesses locally only when your branch changes a harness, an oracle, a probe or the runner; otherwise it
 lists the ones your change can affect. The daily checks the automatic harnesses after the merge. `--harnesses` runs them on your
 machine anyway, and a change to mod content, assets, blocks or items also runs the `#[ignore]`d content-root tests;
@@ -207,10 +211,10 @@ claimed whole: claim one of the issues a tracker lists, or open one for the part
 A claim with no open pull request linking the issue (`Fixes #123` in the description, or a draft) is released after
 5 days, with a comment: open a draft early. Agents claim the same way.
 
-You can hold at most 5 claimed issues that no open pull request of yours links. A sixth `/claim` is refused with a
+You can hold at most 10 claimed issues that no open pull request of yours links. An eleventh `/claim` is refused with a
 comment that gives the count; opening a pull request for one of them, or `/unclaim` on one, frees a slot. The
-repository's collaborators, and the trusted contributors listed in the repository variable `CLAIM_LIMIT_EXEMPT`, are
-not limited.
+repository's owners, members and collaborators, the council and the trusted reviewers, and the trusted contributors
+listed in the repository variable `CLAIM_LIMIT_EXEMPT`, are not limited.
 
 When your pull request changes the same functions as another open one, or closes the same issue, a bot comment names
 it (edited on every push, never repeated): talk to its author in the thread before you both finish the same work.

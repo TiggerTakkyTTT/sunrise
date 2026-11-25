@@ -57,6 +57,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn higher_shadowcolor_buffers_are_written_read_and_cleared() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

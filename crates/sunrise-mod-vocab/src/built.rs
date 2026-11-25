@@ -81,14 +81,14 @@ impl<'a> From<LootDrops<'a>> for super::LootDrops<'a> {
 // exhaustive: the game builds it with a literal; mods only read it
 // no wire: borrowed game-to-hook adapter; its call fields cross separately.
 pub struct ExplosionStart<'a> {
-    pub dimension: &'a str,
+    pub dimension: DimensionKey,
     pub center: [f64; 3],
     pub radius: f32,
     pub fire: bool,
     pub interaction: BlockInteraction,
     pub damage_type: &'a str,
-    pub source: Option<u32>,
-    pub owner: Option<u32>,
+    pub source: Option<EntityRef>,
+    pub owner: Option<EntityRef>,
 }
 impl<'a> From<ExplosionStart<'a>> for super::ExplosionStart<'a> {
     fn from(v: ExplosionStart<'a>) -> Self {
@@ -130,6 +130,7 @@ impl From<ItemFished> for super::ItemFished {
 // no wire: borrowed game-to-hook adapter; its call fields cross separately.
 pub struct ScreenView<'a> {
     pub id: &'static str,
+    pub mod_screen: Option<&'a str>,
     pub menu: Option<&'a str>,
     pub title: Option<&'a Text>,
     pub rect: [f32; 4],
@@ -142,6 +143,7 @@ impl<'a> From<ScreenView<'a>> for super::ScreenView<'a> {
     fn from(v: ScreenView<'a>) -> Self {
         let ScreenView {
             id,
+            mod_screen,
             menu,
             title,
             rect,
@@ -152,6 +154,7 @@ impl<'a> From<ScreenView<'a>> for super::ScreenView<'a> {
         } = v;
         Self {
             id,
+            mod_screen,
             menu,
             title,
             rect,
@@ -231,8 +234,8 @@ impl<'a> From<BlockClick<'a>> for super::BlockClick<'a> {
         }
     }
 }
+// no wire: builds an in-process server lifecycle context.
 // exhaustive: the game builds it with a literal; mods only read it
-#[derive(sunrise_mod_api_macros::Wire)]
 pub struct LifecycleContext {
     pub authority: Authority,
     pub epoch: super::WorldEpoch,
@@ -358,51 +361,6 @@ impl From<PlayerAbilities> for super::PlayerAbilities {
     }
 }
 // exhaustive: the game builds it with a literal; mods only read it
-// no wire: borrowed game-to-hook adapter; its call fields cross separately.
-pub struct ServerPlayer {
-    pub uuid: u128,
-    pub name: String,
-    pub permission: u8,
-    pub dimension: String,
-    pub position: [f64; 3],
-    pub game_mode: i32,
-    pub health: f32,
-    pub yaw: f32,
-    pub pitch: f32,
-    pub entity_id: i32,
-    pub address: String,
-}
-impl From<ServerPlayer> for super::ServerPlayer {
-    fn from(v: ServerPlayer) -> Self {
-        let ServerPlayer {
-            uuid,
-            name,
-            permission,
-            dimension,
-            position,
-            game_mode,
-            health,
-            yaw,
-            pitch,
-            entity_id,
-            address,
-        } = v;
-        Self {
-            uuid,
-            name,
-            permission,
-            dimension,
-            position,
-            game_mode,
-            health,
-            yaw,
-            pitch,
-            entity_id,
-            address,
-        }
-    }
-}
-// exhaustive: the game builds it with a literal; mods only read it
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct ChannelRef {
     pub id: u64,
@@ -414,7 +372,7 @@ impl From<ChannelRef> for super::ChannelRef {
     }
 }
 // exhaustive: the game builds it with a literal; mods read it and edit its fields
-#[derive(sunrise_mod_api_macros::Wire)]
+// no wire: native game-to-hook staging record for local SoundPlay.
 pub struct SoundPlay {
     pub identifier: String,
     pub source: super::SoundSource,
@@ -657,6 +615,47 @@ impl<'a> From<ContainerLootFilled<'a>> for super::ContainerLootFilled<'a> {
             block,
             entity,
             opener,
+        }
+    }
+}
+// exhaustive: the game builds it with a literal; mods only read it
+// no wire: borrowed game-to-hook adapter; call-scoped observation view.
+pub struct StructureTemplateBlockView<'a> {
+    pub pos: [i32; 3],
+    pub state: BlockState,
+    pub nbt: Option<&'a Compound>,
+}
+impl<'a> From<StructureTemplateBlockView<'a>> for super::StructureTemplateBlockView<'a> {
+    fn from(v: StructureTemplateBlockView<'a>) -> Self {
+        let StructureTemplateBlockView { pos, state, nbt } = v;
+        Self { pos, state, nbt }
+    }
+}
+
+// exhaustive: the game builds it with a literal; mods only read it
+#[derive(sunrise_mod_api_macros::Wire)]
+pub struct RespawnTarget {
+    pub level: super::LevelRef,
+    pub position: [f64; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub missing_respawn_block: bool,
+}
+impl From<RespawnTarget> for super::RespawnTarget {
+    fn from(v: RespawnTarget) -> Self {
+        let RespawnTarget {
+            level,
+            position,
+            yaw,
+            pitch,
+            missing_respawn_block,
+        } = v;
+        Self {
+            level,
+            position,
+            yaw,
+            pitch,
+            missing_respawn_block,
         }
     }
 }

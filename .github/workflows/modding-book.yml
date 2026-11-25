@@ -2,12 +2,12 @@ name: modding-book
 on:
   push:
     branches: [main]
-    paths: ["docs/modding/**", "crates/sunrise-mod-api/**", "crates/sunrise-mod-api-gen/**", "xtask/**", "tools/*modding*", "tests/test_modding_*.py", "tools/ci/nightly.py", "crates/sunrise-mod-package/src/sdk/**", "crates/sunrise-mod-surface/**", "crates/sunrise-mod-call/**"]
+    paths: ["docs/modding/**", "crates/sunrise-mod-vocab/**", "crates/sunrise-mod-api/**", "crates/sunrise-mod-api-gen/**", "crates/sunrise-stage/**", "xtask/**", "tools/*modding*", "tests/test_modding_*.py", "tools/ci/nightly.py", "crates/sunrise-mod-package/src/sdk/**", "crates/sunrise-mod-surface/**", "crates/sunrise-mod-call/**", "crates/sunrise-client/src/mobs/villager_secondary.extension-tags.json", ".github/workflows/modding-book.yml"]
   # A PR gets the book itself (concept-pages preprocessor and mdBook build), not the API doc and example builds.
   pull_request:
     # The generator and xtask render the hook-notes and NeoForge counterparts chapters at build time, from the
     # mod API's surface and catalog.
-    paths: ["docs/modding/**", "crates/sunrise-mod-api/**", "crates/sunrise-mod-api-gen/**", "xtask/**", "tools/*modding*", "tests/test_modding_*.py", "tools/ci/nightly.py", "crates/sunrise-mod-package/src/sdk/**", "crates/sunrise-mod-surface/**", "crates/sunrise-mod-call/**", ".github/workflows/modding-book.yml"]
+    paths: ["docs/modding/**", "crates/sunrise-mod-vocab/**", "crates/sunrise-mod-api/**", "crates/sunrise-mod-api-gen/**", "crates/sunrise-stage/**", "xtask/**", "tools/*modding*", "tests/test_modding_*.py", "tools/ci/nightly.py", "crates/sunrise-mod-package/src/sdk/**", "crates/sunrise-mod-surface/**", "crates/sunrise-mod-call/**", "crates/sunrise-client/src/mobs/villager_secondary.extension-tags.json", ".github/workflows/modding-book.yml"]
   workflow_dispatch:
 # A newer push to a pull request or to main replaces the older run: only the newest head's book matters.
 concurrency:

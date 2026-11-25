@@ -64,8 +64,8 @@ pub(in crate::game) struct PreparedFunctionCall {
     call: std::sync::Arc<FunctionCall>,
 }
 impl PreparedFunctionCall {
-    fn matches(&self, ctx: &Context, source: Source) -> bool {
-        let s = self.source;
+    fn matches(&self, ctx: &Context, source: &Source) -> bool {
+        let s = &self.source;
         self.invocation == ctx as *const Context as usize
             && s.entity == source.entity
             && s.pos.map(f64::to_bits) == source.pos.map(f64::to_bits)
@@ -169,16 +169,24 @@ pub(super) fn overlay_files(
 }
 
 impl FnState {
+    pub(super) fn enabled_packs(&self) -> impl DoubleEndedIterator<Item = &DataPack> {
+        self.enabled.iter().filter_map(|id| {
+            self.packs
+                .iter()
+                .find(|pack| &pack.id == id)
+                .map(Arc::as_ref)
+        })
+    }
+
     /// The enabled world packs in resource priority order, highest first: a
     /// later selected pack overrides an earlier one (`PackRepository` order).
-    pub(in crate::game) fn pack_sources(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = &sunrise_assets::resource_source::ResourceSource> {
-        self.enabled
-            .iter()
-            .rev()
-            .filter_map(|id| self.packs.iter().find(|pack| &pack.id == id))
-            .map(|pack| pack.source())
+    pub(in crate::game) fn enabled_packs_highest_first(&self) -> impl Iterator<Item = &DataPack> {
+        self.enabled.iter().rev().filter_map(|id| {
+            self.packs
+                .iter()
+                .find(|pack| &pack.id == id)
+                .map(Arc::as_ref)
+        })
     }
 
     /// The highest enabled world pack providing this data resource.
@@ -186,7 +194,8 @@ impl FnState {
         &self,
         name: &str,
     ) -> Option<sunrise_assets::resource_source::Resource> {
-        self.pack_sources()
+        self.enabled_packs_highest_first()
+            .map(DataPack::source)
             .find(|source| source.contains(name))
             .map(|source| {
                 sunrise_assets::resource_source::Resource::file(source.clone(), name.to_owned())
@@ -225,11 +234,12 @@ impl Game<'_> {
     pub(super) fn open_world_datapacks(
         &mut self,
         enabled_features: &[String],
-    ) -> Result<PackStack, ReloadStageError> {
+        prepared: Option<&mut super::world_loading::PreparedWorld>,
+    ) -> Result<(PackStack, Option<super::world_loading::PreparedTerrain>), ReloadStageError> {
         // Function admission parses commands immediately, including block arguments.
         // Populate static registries on first open; admission synchronizes pack IDs.
         self.build_registries();
-        self.reload_datapacks(false, enabled_features)
+        self.load_datapacks(false, enabled_features, prepared)
     }
 
     pub(super) fn reload_datapacks(
@@ -237,6 +247,16 @@ impl Game<'_> {
         run_load: bool,
         enabled_features: &[String],
     ) -> Result<PackStack, ReloadStageError> {
+        self.load_datapacks(run_load, enabled_features, None)
+            .map(|(stack, _)| stack)
+    }
+
+    fn load_datapacks(
+        &mut self,
+        run_load: bool,
+        enabled_features: &[String],
+        opening: Option<&mut super::world_loading::PreparedWorld>,
+    ) -> Result<(PackStack, Option<super::world_loading::PreparedTerrain>), ReloadStageError> {
         let opening_world = !run_load;
         sunrise_client::mod_content::check_jars(
             &self.options.resources,
@@ -259,13 +279,14 @@ impl Game<'_> {
             .map_or(&self.pack.data_source, |root| root.data());
         let changes = next_root
             .as_ref()
-            .map_or(&self.pack.data_changes, |root| root.data_changes());
+            .map_or(&self.pack.data_changes, |root| root.data_changes())
+            .clone();
         let additional = super::pack_finders::data_packs(&self.mods);
         let stack = pack_stack(
             &self.world_root,
             &resources,
             data,
-            changes,
+            &changes,
             self.cmds.vanilla_disabled,
             enabled_features,
             &additional,
@@ -282,22 +303,42 @@ impl Game<'_> {
         } else {
             None
         };
+        let mut terrain = None;
         let initial = if opening_world {
             // This load warns again about saved attribute bases clamped to their bounds (#3728).
             sunrise_client::living_attributes::LOAD_CLAMPS.begin_load();
             let tables = self
                 .stage_world_tables(&stack, false, &resources)
                 .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
-            let wire_items = tables
-                .tables
-                .as_ref()
-                .map_or_else(|| self.res.items(), |tables| &tables.items);
+            let biomes = tables.tables.as_ref().map(|tables| &tables.biomes);
+            if let Some(opening) = opening {
+                let mut options = self.options.clone();
+                options.resources.clone_from(&resources);
+                let mut pack = self.pack.clone();
+                pack.data_changes = changes;
+                pack.additional_data = additional.clone().into();
+                terrain = Some(
+                    opening
+                        .prepare_terrain(
+                            &self.res,
+                            &pack,
+                            &options,
+                            &self.settings,
+                            biomes.expect("opening stages the biome registry"),
+                        )
+                        .map_err(|error| ReloadStageError::DataSource(error.to_string()))?,
+                );
+            }
             let wire = super::lan::sync::prepare_world_sync_data(
                 &resources,
                 &self.res.core.item_data,
-                wire_items,
                 &super::pack_files(&tables.tables),
                 &tables.health.damage,
+                biomes.map(|biomes| (biomes.table.clone(), biomes.differs_from_preload())),
+                tables
+                    .tables
+                    .as_ref()
+                    .map_or_else(|| self.res.shared_items(), |tables| tables.items.clone()),
                 tables
                     .tables
                     .as_ref()
@@ -336,6 +377,11 @@ impl Game<'_> {
         if let Some(world) = world {
             self.install_world_tables(world);
         } else if let Some((initial, wire)) = initial {
+            if let Some(terrain) = &terrain {
+                self.level_shapes = terrain.shapes.clone();
+                self.end.set_locator(terrain.locator.clone());
+                self.share_spawn_conditions();
+            }
             self.open_world_tables(initial)
                 .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
             super::lan::sync::install_world_sync_data(wire);
@@ -351,7 +397,7 @@ impl Game<'_> {
             self.fns.schedule_loaded = true;
             self.load_schedule();
         }
-        Ok(stack)
+        Ok((stack, terrain))
     }
     /// `CommandFunction.parseCommand`: compile ordinary lines without running them.
     /// Macro lines are parsed
@@ -532,6 +578,23 @@ impl Game<'_> {
             }
         }
         entry.tags.sort();
+        if let Some(tables) = &self.world_tables {
+            entry.ids = tables
+                .biomes
+                .table
+                .registry_order()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            entry.ids.sort();
+            entry.tags = tables
+                .pack_tags
+                .get("worldgen/biome")
+                .into_iter()
+                .flat_map(|tags| tags.keys().cloned())
+                .collect();
+            entry.tags.sort();
+        }
         let entry = reg
             .by_registry
             .entry("minecraft:worldgen/structure".to_owned())
@@ -622,16 +685,19 @@ impl Game<'_> {
         if self.remote.is_some() {
             return;
         }
+        // Vanilla's SavedData is already loaded. Read our lazy scoreboard and storage
+        // before a load tag writes to them.
+        self.load_scoreboard();
         self.exec = ExecState::default();
         let source = self.server_source();
         if self.fns.load_pending {
             self.fns.load_pending = false;
             for f in self.fns.store.tag_functions("minecraft:load") {
-                self.run_function_by_id(&f, None, source);
+                self.run_function_by_id(&f, None, source.clone());
             }
         }
         for f in self.fns.store.tag_functions("minecraft:tick") {
-            self.run_function_by_id(&f, None, source);
+            self.run_function_by_id(&f, None, source.clone());
         }
     }
     /// `ServerLevel.tickTime`'s `getScheduledEvents().tick`: the scheduled
@@ -658,10 +724,10 @@ impl Game<'_> {
             match event.id.strip_prefix('#') {
                 Some(tag) => {
                     for f in self.fns.store.tag_functions(tag) {
-                        self.run_function_by_id(&f, None, source);
+                        self.run_function_by_id(&f, None, source.clone());
                     }
                 }
-                None => self.run_function_by_id(&event.id, None, source),
+                None => self.run_function_by_id(&event.id, None, source.clone()),
             }
         }
     }
@@ -747,7 +813,7 @@ impl Game<'_> {
             ..source
         };
         for line in lines {
-            let _ = self.execute_line(&line, inner);
+            let _ = self.execute_line(&line, inner.clone());
             if self.exec.returned.is_some() {
                 break;
             }
@@ -838,10 +904,13 @@ impl Game<'_> {
         args: Option<&Tag>,
     ) -> R<Vec<Option<i32>>> {
         let functions = self.functions_named(name)?;
-        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        let source = self
+            .command_source
+            .clone()
+            .unwrap_or_else(|| self.player_source());
         let mut out = Vec::new();
         for f in functions {
-            out.push(match self.run_function(&f, args, source)? {
+            out.push(match self.run_function(&f, args, source.clone())? {
                 Outcome::NoReturn => None,
                 Outcome::Value(v) => Some(v),
                 Outcome::Fail => Some(0),
@@ -855,12 +924,15 @@ impl Game<'_> {
     /// `FunctionCommand.decorateOutputIfNeeded`: consume only this invocation's
     /// prepared call before its body can invoke another function.
     pub(super) fn cmd_function(&mut self, ctx: &Context) -> R<i32> {
-        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        let source = self
+            .command_source
+            .clone()
+            .unwrap_or_else(|| self.player_source());
         let call = if self
             .exec
             .prepared_function
             .as_ref()
-            .is_some_and(|p| p.matches(ctx, source))
+            .is_some_and(|p| p.matches(ctx, &source))
         {
             std::sync::Arc::unwrap_or_clone(self.exec.prepared_function.take().unwrap().call)
         } else {
@@ -939,12 +1011,15 @@ impl Game<'_> {
     /// `FunctionCommand.decorateOutputIfNeeded`: retain body, result and callback delivery.
     fn execute_function_call(&mut self, call: FunctionCall) -> R<i32> {
         let FunctionCall { functions, args } = call;
-        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        let source = self
+            .command_source
+            .clone()
+            .unwrap_or_else(|| self.player_source());
         let mut sum: i32 = 0;
         let mut any = false;
         let mut failed = false;
         for f in functions {
-            match self.run_function(&f, args.as_ref(), source)? {
+            match self.run_function(&f, args.as_ref(), source.clone())? {
                 Outcome::NoReturn => {}
                 Outcome::Value(v) => {
                     any = true;
@@ -1007,19 +1082,21 @@ impl Game<'_> {
         }
         // No start or slot is published until the existing validation succeeds.
         let call = self
-            .with_source(sources[0], |g| g.prepare_function_call(ctx))
+            .with_source(sources[0].clone(), |g| g.prepare_function_call(ctx))
             .ok()??;
         let call = std::sync::Arc::new(call);
         let tasks: Vec<_> = sources
             .iter()
-            .map(|&source| PreparedFunctionCall {
+            .map(|source| PreparedFunctionCall {
                 invocation: ctx as *const Context as usize,
-                source,
+                source: source.clone(),
                 call: call.clone(),
             })
             .collect();
         for task in &tasks {
-            self.with_source(task.source, |g| g.start_function_call(&task.call.functions));
+            self.with_source(task.source.clone(), |g| {
+                g.start_function_call(&task.call.functions)
+            });
         }
         Some(tasks)
     }
@@ -1267,8 +1344,7 @@ impl Game<'_> {
             _ => None,
         };
         let selected = self.selected_packs();
-        let previous_enabled = self.fns.enabled.clone();
-        let previous_vanilla_disabled = self.cmds.vanilla_disabled;
+        let mut enabled = self.fns.enabled.clone();
         // `DataPackCommand.listAvailablePacks`: a feature pack the world's
         // features do not cover is not available.
         let mut available: Vec<String> = std::iter::once("vanilla".to_owned())
@@ -1338,9 +1414,8 @@ impl Game<'_> {
                         &[&name, &missing.join(", ")],
                     ));
                 }
-                if name == "vanilla" {
-                    self.cmds.vanilla_disabled = false;
-                } else {
+                let vanilla_disabled = name != "vanilla" && self.cmds.vanilla_disabled;
+                if name != "vanilla" {
                     let existing = match ctx.get("existing") {
                         Some(Arg::Str(e)) => Some(e.clone()),
                         _ => None,
@@ -1348,7 +1423,7 @@ impl Game<'_> {
                     let position = if ctx.has("first") {
                         0
                     } else if let Some(e) = &existing {
-                        let Some(i) = self.fns.enabled.iter().position(|p| p == e) else {
+                        let Some(i) = enabled.iter().position(|p| p == e) else {
                             return Err(err("commands.datapack.unknown", &[e]));
                         };
                         if ctx.has("before") { i } else { i + 1 }
@@ -1365,15 +1440,15 @@ impl Game<'_> {
                     {
                         0
                     } else {
-                        self.fns.enabled.len()
+                        enabled.len()
                     };
-                    self.fns.enabled.insert(position, name.clone());
+                    enabled.insert(position, name.clone());
                 }
                 self.feedback(Text::translate(
                     "commands.datapack.modify.enable",
                     &[self.pack_link(&name, true)],
                 ));
-                self.apply_pack_change(previous_enabled, previous_vanilla_disabled)?;
+                self.apply_pack_change(&enabled, vanilla_disabled)?;
                 Ok(self.selected_packs().len() as i32)
             }
             _ => {
@@ -1411,16 +1486,13 @@ impl Game<'_> {
                         &[&name, &missing.join(", ")],
                     ));
                 }
-                if name == "vanilla" {
-                    self.cmds.vanilla_disabled = true;
-                } else {
-                    self.fns.enabled.retain(|p| p != &name);
-                }
+                let vanilla_disabled = name == "vanilla" || self.cmds.vanilla_disabled;
+                enabled.retain(|p| p != &name);
                 self.feedback(Text::translate(
                     "commands.datapack.modify.disable",
                     &[self.pack_link(&name, true)],
                 ));
-                self.apply_pack_change(previous_enabled, previous_vanilla_disabled)?;
+                self.apply_pack_change(&enabled, vanilla_disabled)?;
                 Ok(self.selected_packs().len() as i32)
             }
         }
@@ -1428,11 +1500,7 @@ impl Game<'_> {
     /// `ReloadCommand.reloadPacks`: no message of its own. It reloads the
     /// server's data as `/reload` does (`reload_datapacks`), the content
     /// tables with the functions.
-    fn apply_pack_change(
-        &mut self,
-        previous_enabled: Vec<String>,
-        previous_vanilla_disabled: bool,
-    ) -> R<()> {
+    fn apply_pack_change(&mut self, enabled: &[String], vanilla_disabled: bool) -> R<()> {
         // One resolve for the store and the tables, as `/reload`'s is: the
         // timers already in memory stay, and none come back from disk
         // (`ServerFunctionManager` keeps its queue over a pack change).
@@ -1442,45 +1510,27 @@ impl Game<'_> {
             &self.options.resources,
             &self.pack.data_source,
             &self.pack.data_changes,
-            self.cmds.vanilla_disabled,
+            vanilla_disabled,
             &self.level.enabled_features,
             &additional,
         );
-        stack.enabled =
-            datapack::selected_ids(stack.packs.iter().map(Arc::as_ref), &self.fns.enabled);
-        let prepared = match self.prepare_pack_condition_reload(&stack) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.fns.enabled = previous_enabled;
-                self.cmds.vanilla_disabled = previous_vanilla_disabled;
-                return Err(Self::reload_failure(error));
-            }
-        };
+        stack.enabled = datapack::selected_ids(stack.packs.iter().map(Arc::as_ref), enabled);
+        let prepared = self
+            .prepare_pack_condition_reload(&stack)
+            .map_err(Self::reload_failure)?;
         let root = self.options.resources.clone();
-        let context = match self.prepare_loop_context(&root) {
-            Ok(context) => context,
-            Err(error) => {
-                self.fns.enabled = previous_enabled;
-                self.cmds.vanilla_disabled = previous_vanilla_disabled;
-                return Err(Self::reload_failure(ReloadStageError::DataSource(
-                    error.to_string(),
-                )));
-            }
-        };
-        let world = match self.prepare_world_reload(&stack, &root) {
-            Ok(world) => world,
-            Err(error) => {
-                self.fns.enabled = previous_enabled;
-                self.cmds.vanilla_disabled = previous_vanilla_disabled;
-                return Err(Self::reload_failure(ReloadStageError::DataSource(
-                    error.to_string(),
-                )));
-            }
-        };
+        let context = self.prepare_loop_context(&root).map_err(|error| {
+            Self::reload_failure(ReloadStageError::DataSource(error.to_string()))
+        })?;
+        let world = self.prepare_world_reload(&stack, &root).map_err(|error| {
+            Self::reload_failure(ReloadStageError::DataSource(error.to_string()))
+        })?;
         prepared.bind_loot(&world);
+        // `MinecraftServer.reloadResources`: publish the selection only after preparation succeeds.
         self.install_loop_context(context);
         self.fns.packs = stack.packs.clone();
         self.fns.enabled = stack.enabled.clone();
+        self.cmds.vanilla_disabled = vanilla_disabled;
         self.pack.additional_data = additional.into();
         self.save_datapack_settings();
         self.fns.load_pending = true;
@@ -1527,7 +1577,10 @@ impl Game<'_> {
                 )
             })?
         };
-        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        let source = self
+            .command_source
+            .clone()
+            .unwrap_or_else(|| self.player_source());
         let view = source.entity.map(|t| self.entity_view_scored(t, &json));
         Ok(self.command_conditions_hold(&json, view.as_ref(), source.pos))
     }
@@ -1594,6 +1647,107 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn tick_functions_write_to_the_overworld_before_its_idle_environment_tick() {
+        crate::game::in_own_process(
+            "game::functions::tests::tick_functions_write_to_the_overworld_before_its_idle_environment_tick",
+            || {
+                crate::game::native_entity_refs::tests::with_game(|game| {
+                    use crate::game::Dim;
+                    game.world_root = game.options.game_dir.clone().unwrap();
+                    game.build_registries();
+                    game.enter_level(Dim::Nether).unwrap();
+                    game.streaming.forced.insert((0, 0));
+                    assert_eq!(game.levels_to_tick(), [Dim::Nether]);
+                    assert_eq!(
+                        game.levels
+                            .parked_world(Dim::Overworld)
+                            .unwrap()
+                            .weather
+                            .rain_level
+                            .1,
+                        0.0
+                    );
+                    let id = "test:change_environment";
+                    game.fns.loaded = true;
+                    game.fns.store.functions.insert(
+                        id.into(),
+                        Function {
+                            id: id.into(),
+                            lines: [
+                                "execute in minecraft:overworld run worldborder set 20 5t",
+                                "execute in minecraft:overworld run weather rain 40t",
+                            ]
+                            .into_iter()
+                            .map(|line| datapack::FunctionLine::Command(line.into()))
+                            .collect(),
+                            parameters: Vec::new(),
+                        },
+                    );
+                    game.fns
+                        .store
+                        .function_tags
+                        .insert("minecraft:tick".into(), vec![(id.into(), true, false)]);
+
+                    game.tick_server(false).unwrap();
+
+                    assert_eq!(game.levels_to_tick(), [Dim::Nether]);
+                    assert_eq!(game.dim, Dim::Nether);
+                    let border = game.levels.parked_border(Dim::Overworld).unwrap();
+                    assert_eq!((border.target_size(), border.remaining_ticks()), (20.0, 4));
+                    let world = game.levels.parked_world(Dim::Overworld).unwrap();
+                    assert!(world.chunks.is_empty());
+                    assert_eq!(world.weather.rain_level, (0.0, 0.01));
+                    assert_eq!(game.world.weather.rain_time, 39);
+                });
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn mob_entity_membership_follows_world_pack_reload() {
+        crate::game::in_own_process(
+            "game::functions::tests::mob_entity_membership_follows_world_pack_reload",
+            || {
+                crate::game::native_entity_refs::tests::with_game(|game| {
+                    let world = tempfile::tempdir().unwrap();
+                    game.world_root = world.path().to_owned();
+                    let pack = world.path().join("datapacks/snow_walkers");
+                    let tags = pack.join("data/minecraft/tags/entity_type");
+                    std::fs::create_dir_all(&tags).unwrap();
+                    let f = sunrise_core::version::DATA_PACK_FORMAT;
+                    std::fs::write(
+                        pack.join("pack.mcmeta"),
+                        serde_json::json!({"pack": {
+                            "description": "Snow walkers", "pack_format": f.0,
+                            "min_format": [f.0, f.1], "max_format": [f.0, f.1]
+                        }})
+                        .to_string(),
+                    )
+                    .unwrap();
+                    let tag_file = tags.join("powder_snow_walkable_mobs.json");
+                    std::fs::write(&tag_file, r#"{"replace":true,"values":["minecraft:cow"]}"#)
+                        .unwrap();
+                    game.reload_datapacks(false, &[]).unwrap();
+                    let walkable = "minecraft:powder_snow_walkable_mobs";
+                    let world = game.mob_world_base(&[]);
+                    assert!(world.entity_has(walkable, "minecraft:cow"));
+                    assert!(!world.entity_has(walkable, "minecraft:fox"));
+
+                    std::fs::write(&tag_file, r#"{"replace":true,"values":["minecraft:fox"]}"#)
+                        .unwrap();
+                    // This unopened-world fixture has no operator player. Run at console authority.
+                    assert!(game.as_console(|game| game.run_command("reload")));
+                    let world = game.mob_world_base(&[]);
+                    assert!(!world.entity_has(walkable, "minecraft:cow"));
+                    assert!(world.entity_has(walkable, "minecraft:fox"));
+                });
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn first_world_open_admits_block_function() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             let folder = "first-open-block-function";
@@ -1653,119 +1807,125 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn functions_name_mod_commands_from_the_first_world_open() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicBool, AtomicU32, Ordering},
-        };
-        struct Commands {
-            offered: Arc<AtomicBool>,
-            ran: Arc<AtomicU32>,
-        }
-        #[mod_api::__subscriptions]
-        impl mod_api::Hooks for Commands {
-            fn register_commands(
-                &self,
-                _: &mut dyn mod_api::ServerHost,
-                event: &mut mod_api::RegisterCommandsEvent<'_>,
-            ) {
-                if self.offered.load(Ordering::Relaxed) {
-                    let ran = self.ran.clone();
-                    event
-                        .commands
-                        .push(mod_api::Command::new("fnmod [n:integer]").executes(
-                            move |_, _, _| {
-                                ran.fetch_add(1, Ordering::Relaxed);
-                                Some(1)
-                            },
-                        ));
-                }
-            }
-        }
-        let offered = Arc::new(AtomicBool::new(true));
-        let ran = Arc::new(AtomicU32::new(0));
-        let mods = vec![mod_api::ModEntry::new(
-            "fnmod",
-            Box::new(Commands {
-                offered: offered.clone(),
-                ran: ran.clone(),
-            }),
-        )];
-        mod_platform::testing::with_mods(mods.into(), || {
-            crate::game::native_entity_refs::tests::with_game(|game| {
-                let scratch = tempfile::tempdir().unwrap();
-                let folder = "functions-name-mod-commands";
-                let world = scratch.path().join(folder);
-                let pack = world.join("datapacks/fnmod");
-                let functions = pack.join("data/fnmod/function");
-                std::fs::create_dir_all(&functions).unwrap();
-                let f = sunrise_core::version::DATA_PACK_FORMAT;
-                std::fs::write(
-                    pack.join("pack.mcmeta"),
-                    serde_json::json!({"pack":{
-                        "description":"Mod commands in functions", "pack_format":f.0,
-                        "min_format":[f.0,f.1], "max_format":[f.0,f.1]
-                    }})
-                    .to_string(),
-                )
-                .unwrap();
-                for (name, line) in [
-                    ("plain", "fnmod 1"),
-                    ("macro", "$fnmod $(n)"),
-                    ("unknown", "nosuchmodcommand"),
-                ] {
-                    std::fs::write(functions.join(format!("{name}.mcfunction")), line).unwrap();
-                }
-                let mut request = crate::game::world_loading::WorldRequest::new(
-                    folder,
-                    None,
-                    Some(3042),
-                    true,
-                    None,
-                    game.level.rule_registry.clone(),
-                )
-                .unwrap();
-                request.save_root = world;
-                game.load_world(request).unwrap();
-                let store = &game.fns.store;
-                assert!(
-                    store.functions.contains_key("fnmod:plain"),
-                    "{:?}",
-                    store.errors
-                );
-                assert!(
-                    store.functions.contains_key("fnmod:macro"),
-                    "{:?}",
-                    store.errors
-                );
-                assert!(!store.functions.contains_key("fnmod:unknown"));
-                let refusal = |game: &Game<'_>, id: &str| {
-                    game.fns
-                        .store
-                        .errors
-                        .iter()
-                        .find(|(f, _)| f == id)
-                        .map(|(_, e)| e.clone())
+        crate::game::in_own_process(
+            "game::functions::tests::functions_name_mod_commands_from_the_first_world_open",
+            || {
+                use std::sync::{
+                    Arc,
+                    atomic::{AtomicBool, AtomicU32, Ordering},
                 };
-                assert!(
-                    refusal(game, "fnmod:unknown")
-                        .unwrap()
-                        .starts_with("Invalid command \"nosuchmodcommand\": ")
-                );
-                game.ui.registries.permission = 4;
-                assert!(game.run_command("function fnmod:plain"));
-                assert!(game.run_command("function fnmod:macro {n:3}"));
-                assert_eq!(ran.load(Ordering::Relaxed), 2);
-                offered.store(false, Ordering::Relaxed);
-                let features = game.level.enabled_features.clone();
-                game.reload_datapacks(false, &features).unwrap();
-                assert!(!game.fns.store.functions.contains_key("fnmod:plain"));
-                assert!(
-                    refusal(game, "fnmod:plain")
-                        .unwrap()
-                        .starts_with("Invalid command \"fnmod 1\": ")
-                );
-            });
-        });
+                struct Commands {
+                    offered: Arc<AtomicBool>,
+                    ran: Arc<AtomicU32>,
+                }
+                #[mod_api::__subscriptions]
+                impl mod_api::Hooks for Commands {
+                    fn register_commands(
+                        &self,
+                        _: &mut dyn mod_api::ServerHost,
+                        event: &mut mod_api::RegisterCommandsEvent<'_>,
+                    ) {
+                        if self.offered.load(Ordering::Relaxed) {
+                            let ran = self.ran.clone();
+                            event.commands.push(
+                                mod_api::Command::new("fnmod [n:integer]").executes(
+                                    move |_, _, _| {
+                                        ran.fetch_add(1, Ordering::Relaxed);
+                                        Ok(1)
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
+                let offered = Arc::new(AtomicBool::new(true));
+                let ran = Arc::new(AtomicU32::new(0));
+                let mods = vec![mod_api::ModEntry::new(
+                    "fnmod",
+                    Box::new(Commands {
+                        offered: offered.clone(),
+                        ran: ran.clone(),
+                    }),
+                )];
+                mod_platform::testing::with_mods(mods.into(), || {
+                    crate::game::native_entity_refs::tests::with_game(|game| {
+                        let scratch = tempfile::tempdir().unwrap();
+                        let folder = "functions-name-mod-commands";
+                        let world = scratch.path().join(folder);
+                        let pack = world.join("datapacks/fnmod");
+                        let functions = pack.join("data/fnmod/function");
+                        std::fs::create_dir_all(&functions).unwrap();
+                        let f = sunrise_core::version::DATA_PACK_FORMAT;
+                        std::fs::write(
+                            pack.join("pack.mcmeta"),
+                            serde_json::json!({"pack":{
+                                "description":"Mod commands in functions", "pack_format":f.0,
+                                "min_format":[f.0,f.1], "max_format":[f.0,f.1]
+                            }})
+                            .to_string(),
+                        )
+                        .unwrap();
+                        for (name, line) in [
+                            ("plain", "fnmod 1"),
+                            ("macro", "$fnmod $(n)"),
+                            ("unknown", "nosuchmodcommand"),
+                        ] {
+                            std::fs::write(functions.join(format!("{name}.mcfunction")), line)
+                                .unwrap();
+                        }
+                        let mut request = crate::game::world_loading::WorldRequest::new(
+                            folder,
+                            None,
+                            Some(3042),
+                            true,
+                            None,
+                            game.level.rule_registry.clone(),
+                        )
+                        .unwrap();
+                        request.save_root = world;
+                        game.load_world(request).unwrap();
+                        let store = &game.fns.store;
+                        assert!(
+                            store.functions.contains_key("fnmod:plain"),
+                            "{:?}",
+                            store.errors
+                        );
+                        assert!(
+                            store.functions.contains_key("fnmod:macro"),
+                            "{:?}",
+                            store.errors
+                        );
+                        assert!(!store.functions.contains_key("fnmod:unknown"));
+                        let refusal = |game: &Game<'_>, id: &str| {
+                            game.fns
+                                .store
+                                .errors
+                                .iter()
+                                .find(|(f, _)| f == id)
+                                .map(|(_, e)| e.clone())
+                        };
+                        assert!(
+                            refusal(game, "fnmod:unknown")
+                                .unwrap()
+                                .starts_with("Invalid command \"nosuchmodcommand\": ")
+                        );
+                        game.ui.registries.permission = 4;
+                        assert!(game.run_command("function fnmod:plain"));
+                        assert!(game.run_command("function fnmod:macro {n:3}"));
+                        assert_eq!(ran.load(Ordering::Relaxed), 2);
+                        offered.store(false, Ordering::Relaxed);
+                        let features = game.level.enabled_features.clone();
+                        game.reload_datapacks(false, &features).unwrap();
+                        assert!(!game.fns.store.functions.contains_key("fnmod:plain"));
+                        assert!(
+                            refusal(game, "fnmod:plain")
+                                .unwrap()
+                                .starts_with("Invalid command \"fnmod 1\": ")
+                        );
+                    });
+                });
+            },
+        );
     }
 
     #[test]
@@ -2269,7 +2429,7 @@ mod tests {
             };
             game.exec.functions.push("test:outer".into());
             let source = game.server_source();
-            game.run_function(&inner, None, source).unwrap();
+            game.run_function(&inner, None, source.clone()).unwrap();
             assert_eq!(game.exec.functions, ["test:outer"]);
             game.exec.functions.clear();
             game.run_function(&inner, None, source).unwrap();
@@ -2359,9 +2519,13 @@ mod tests {
                 1002
             );
             assert_eq!(first_instance.priority().unwrap(), 1000);
+            let candidate = mod_api::__private::tag_key(
+                &mod_api::Identifier::parse("reload_test:candidate").unwrap(),
+            )
+            .unwrap();
             let live_stone = mod_platform::__private::part_tests::block_key("minecraft:stone");
             assert_eq!(
-                super::super::native_world_read::block_in_tag(live_stone, "reload_test:candidate"),
+                super::super::native_tags::block_in_tag(Some(game.items()), live_stone, candidate),
                 Some(true)
             );
             crate::game::api_values::install_parts(&[ModEntry::new(
@@ -2376,7 +2540,7 @@ mod tests {
             crate::game::api_values::resolve_block_definitions(&registry).unwrap();
             let stone = mod_platform::__private::part_tests::block_key("minecraft:stone");
             let old_tag =
-                super::super::native_world_read::block_in_tag(stone, "reload_test:candidate");
+                super::super::native_tags::block_in_tag(Some(game.items()), stone, candidate);
             let old_context = game.loop_context.clone();
             let old_root = game.options.resources.clone();
             let old_data = game.pack.data_source.clone();
@@ -2405,7 +2569,7 @@ mod tests {
             assert_eq!(game.damage_tag_generation, old_generation);
             assert_eq!(game.fns.enabled, old_enabled);
             assert_eq!(
-                super::super::native_world_read::block_in_tag(stone, "reload_test:candidate"),
+                super::super::native_tags::block_in_tag(Some(game.items()), stone, candidate),
                 old_tag
             );
             game.save_datapack_settings();
@@ -3751,7 +3915,7 @@ mod required_tag_tests {
                     }
                 }
             }
-            let previous = game.command_source;
+            let previous = game.command_source.clone();
             let server = game.server_source();
             assert!(server.entity.is_none());
             game.command_source = Some(server);
@@ -3759,7 +3923,7 @@ mod required_tag_tests {
             assert!(!game.check_predicate("h121:reference").unwrap());
             assert!(game.check_predicate("h121:inverted").unwrap());
             assert!(game.check_predicate("h121:absent").is_err());
-            game.command_source = previous;
+            game.command_source = previous.clone();
             // Defensive evaluator controls only. Java rejects these graphs at
             // world load (a reload refuses a dangling or cyclic reference, so they cannot come from a
             // pack): they are put in the loaded store directly. This does not establish

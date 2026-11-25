@@ -32,7 +32,7 @@ pub fn entity_type_default_attribute(entity_type: &str, attribute: &str) -> Opti
     let suppliers = installed.entity_type_defaults.read().ok()?.clone()?;
     let keys = installed.resolved_entity_types.get()?;
     lookup(&suppliers, entity_type, attribute, |id| {
-        keys.slots.contains_key(id)
+        keys.names().slots.contains_key(id)
     })
 }
 

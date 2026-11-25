@@ -250,6 +250,7 @@ fn a_raw_declaration_colliding_with_a_typed_payload_refuses_load() {
 #[derive(Clone, Copy)]
 enum Fault {
     Failed,
+    Panic,
     Disconnect,
 }
 struct FaultHandler {
@@ -270,6 +271,10 @@ impl IPayloadHandler for FaultHandler {
                 Err(mod_api::PayloadHandleError::Failed(
                     "deliberate failure".into(),
                 ))
+            }
+            Some(Fault::Panic) => {
+                context.disconnect(mod_api::Text::literal("must be discarded on panic"));
+                panic!("deliberate raw handler panic");
             }
             Some(Fault::Disconnect) => {
                 context.disconnect(mod_api::Text::literal("successful disconnect"));
@@ -293,7 +298,7 @@ impl Hooks for FaultRegistration {
 #[test]
 fn network_raw_failures_drop_only_the_failing_copy() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    for fault in [Fault::Failed, Fault::Disconnect] {
+    for fault in [Fault::Failed, Fault::Panic, Fault::Disconnect] {
         let calls = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
         let mods = [("faultfirst", Some(fault)), ("faultsecond", None)]
             .into_iter()
@@ -322,17 +327,20 @@ fn network_raw_failures_drop_only_the_failing_copy() {
                 endpoint: endpoint.clone(),
                 conn: Some(1),
             };
-            let Ok(Classified::Raw(deliveries)) =
-                Incoming::classify(&transport, Phase::Play, serverbound(CHANNEL, 1))
-            else {
-                panic!("raw fan-out expected");
+            let deliver = || {
+                let Ok(Classified::Raw(deliveries)) =
+                    Incoming::classify(&transport, Phase::Play, serverbound(CHANNEL, 1))
+                else {
+                    panic!("raw fan-out expected");
+                };
+                for mut incoming in deliveries {
+                    // Raw registration selects Main. Exercise the physical network executor
+                    // with the same per-owner receivers, whose main path has its own test.
+                    incoming.receiver.thread = mod_api::HandlerThread::Network;
+                    dispatch(incoming, endpoint.clone(), queue());
+                }
             };
-            for mut incoming in deliveries {
-                // Raw registration selects Main. Exercise the physical network executor
-                // with the same per-owner receivers, whose main path has its own test.
-                incoming.receiver.thread = mod_api::HandlerThread::Network;
-                dispatch(incoming, endpoint.clone(), queue());
-            }
+            deliver();
             assert_eq!(calls[0].load(Ordering::SeqCst), 1);
             if matches!(fault, Fault::Disconnect) {
                 assert!(transport.closed(), "successful raw handlers may disconnect");
@@ -348,6 +356,15 @@ fn network_raw_failures_drop_only_the_failing_copy() {
                     "the other mod's copy must run"
                 );
                 assert!(!transport.connection.as_ref().unwrap().payloads_pending());
+                // Only the panicking registration is quarantined; both ordinary errors
+                // and panics leave the other receiver and the transport alive.
+                deliver();
+                assert!(!transport.closed());
+                assert_eq!(
+                    calls[0].load(Ordering::SeqCst),
+                    if matches!(fault, Fault::Panic) { 1 } else { 2 }
+                );
+                assert_eq!(calls[1].load(Ordering::SeqCst), 2);
             }
         });
     }

@@ -4,8 +4,7 @@ Every successful resource load bakes each block state's models and the standalon
 into one store for that load. That store belongs to the game and never changes while it is
 published: the mesher, block entity drawing and a mod all read the same baked results. A mod
 holds keys into it and borrows the geometry and metadata it needs, never the renderer's model
-types. The [design](https://github.com/sunrise-org/sunrise/blob/main/docs/design/mod-api/baked-models.md)
-covers it; block-entity model data and editing a baking result are separate changes.
+types. Block-entity model data and editing a baking result are separate topics.
 
 [Register standalone files and bakers](model-drawing.md#standalone-model-bakers) once at
 client startup. During a resource load a baker appends its declared model files through a

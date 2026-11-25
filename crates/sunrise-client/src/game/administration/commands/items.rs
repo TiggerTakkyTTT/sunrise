@@ -433,7 +433,11 @@ impl Game<'_> {
             Slot::Contents(..) => None,
             Slot::ContentItem(parent, component, index) => {
                 let stack = self.slot_get(parent)?;
-                component.items(&stack).get(*index).cloned().flatten()
+                component
+                    .items(self.res.items(), &stack)
+                    .get(*index)
+                    .cloned()
+                    .flatten()
             }
             Slot::Guest(conn, slot) => self
                 .for_player(Target::Guest(*conn), |g| g.slot_get(slot))
@@ -500,7 +504,7 @@ impl Game<'_> {
     }
     fn block_slot_set(&mut self, p: [i32; 3], i: usize, stack: Option<ItemStack>) -> bool {
         let key = (p[0], p[1], p[2]);
-        let Some(size) = self.block_container_size(p).filter(|&size| i < size) else {
+        let Some(_) = self.block_container_size(p).filter(|&size| i < size) else {
             return false;
         };
         self.unpack_loot(crate::game::container_loot::LootTarget::Block(key), None);
@@ -542,10 +546,7 @@ impl Game<'_> {
                 c.items[i] = stack;
             }
             Some(BlockEntity::Mod(m)) => {
-                if m.items.len() < size {
-                    m.items.resize(size, None);
-                }
-                *m.item_slot_mut(i).unwrap() = stack;
+                *m.item_slot_mut(i) = stack;
             }
             Some(entity) => entity.slots_mut()[i] = stack,
             None => return false,
@@ -634,12 +635,12 @@ impl Game<'_> {
                 let Some(mut outer) = self.slot_get(parent) else {
                     return false;
                 };
-                let mut slots = component.items(&outer);
+                let mut slots = component.items(self.res.items(), &outer);
                 let Some(slot) = slots.get_mut(*index) else {
                     return false;
                 };
                 *slot = stack;
-                component.store(&mut outer, slots);
+                component.store(self.res.items(), &mut outer, slots);
                 self.slot_set(parent, Some(outer))
             }
             Slot::Guest(conn, slot) => self
@@ -1266,7 +1267,10 @@ impl Game<'_> {
             return Ok(0);
         };
         let modifier = self.item_modifier_arg(ctx, "modifier")?;
-        let source = self.command_source.unwrap_or_else(|| self.player_source());
+        let source = self
+            .command_source
+            .clone()
+            .unwrap_or_else(|| self.player_source());
         let view = source.entity.map(|t| self.entity_view_asked(t, &modifier));
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1430,7 +1434,10 @@ impl Game<'_> {
             // ItemCommands.applyModifier on each source stack.
             if ctx.get("modifier").is_some() {
                 let modifier = self.item_modifier_arg(ctx, "modifier")?;
-                let source = self.command_source.unwrap_or_else(|| self.player_source());
+                let source = self
+                    .command_source
+                    .clone()
+                    .unwrap_or_else(|| self.player_source());
                 let view = source.entity.map(|t| self.entity_view_asked(t, &modifier));
                 let mut rng = sunrise_core::random::LegacyRandom::new(0);
                 found = found

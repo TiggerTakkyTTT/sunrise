@@ -1,5 +1,5 @@
 manifest:
-refused: sunrise-mod.toml: data did not match any variant of untagged enum Dependency (line 5)
+refused: sunrise-mod.toml: unknown field `optionl`, expected one of `version`, `optional`, `side`, `reason`, `url`, `order` (line 5, column 26); did you mean `optional`?
 
 icon:
 unavailable

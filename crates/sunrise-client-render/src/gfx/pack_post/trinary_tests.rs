@@ -51,6 +51,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn trinary_min_max_and_median_per_component() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

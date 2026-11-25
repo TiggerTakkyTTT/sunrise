@@ -116,6 +116,49 @@ fn one_biome_shortcut_blends_like_the_full_square() {
 }
 
 #[test]
+fn biome_blend_wraps_signed_block_coordinates() {
+    let biomes = Biomes::from_jsons(&[
+        (
+            "minecraft:plains",
+            serde_json::json!({"effects": {"grass_color": 0x33_66_99}}),
+        ),
+        (
+            "fixture:desert",
+            serde_json::json!({"effects": {"grass_color": 0x97_61_33}}),
+        ),
+    ]);
+    let desert = biomes.id("fixture:desert");
+    let zoom = BiomeZoom::new(42);
+    let r = 3;
+    for x in [i32::MIN + 1, i32::MAX] {
+        let cx = x >> 4;
+        let center = filled(cx, 0, desert);
+        let mut region = [[None; 3]; 3];
+        region[1][1] = Some(&center);
+        let mut tints = Tints::new(&region, &biomes, zoom, r, [cx, 0, 64]);
+        let mut sum = [0u32; 3];
+        let mut distinct = [false; 2];
+        for dz in -r..=r {
+            for dx in -r..=r {
+                let bx = x.wrapping_add(dx);
+                let bz = 8 + dz;
+                let q = zoom.quart_at_block(BlockPos::new(bx, 64, bz));
+                let inside = q[0] >> 2 == cx && q[2] >> 2 == 0;
+                distinct[usize::from(inside)] = true;
+                let c = if inside { 0x97_61_33 } else { 0x33_66_99 };
+                for (total, shift) in sum.iter_mut().zip([16, 8, 0]) {
+                    *total += c >> shift & 255;
+                }
+            }
+        }
+        assert_eq!(distinct, [true, true]);
+        let n = ((2 * r + 1) * (2 * r + 1)) as u32;
+        let expected = (sum[0] / n) << 16 | (sum[1] / n) << 8 | (sum[2] / n);
+        assert_eq!(tints.get(Resolver::Grass, x & 15, 0, 8), expected);
+    }
+}
+
+#[test]
 fn a_client_tint_query_blends_grass_and_foliage_across_a_biome_edge() {
     let biomes = Biomes::from_jsons(&[
         (

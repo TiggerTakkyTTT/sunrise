@@ -4,26 +4,38 @@
 //! shader file (a resource pack's, possibly pushed by a server) could take the game or the
 //! check tool down.
 //!
-//! Three bounds, which together hold for any input:
+//! Two bounds and a thread, which together hold for any input. They are crash containment, not a
+//! limit on what a shader may do: a stack overflow aborts the process and cannot be caught, and
+//! anything a refused shader computes can be written within them (a long sum split over `let`
+//! statements). Vanilla and NeoForge have no counterpart, because their shaders' compiler is the
+//! driver's. The game's load and `cargo sunrise-mod check` apply the same bounds, through
+//! [`crate::check::check_stage`].
+//!
+//! Each value comes from the stack the whole check (parse, validation and translation for all
+//! three backends) was measured to take, on naga 30, for the deepest input the bound allows:
 //! - [`MAX_SOURCE_BYTES`]: a shader longer than that is refused before it is parsed. naga's
 //!   other recursion (a chain of structs, aliases or calls) grows with the length of the
-//!   source, and a shader this long is far inside what a thread's stack holds.
+//!   source. The deepest of these a shader this long can hold (5,117 structs, each holding the
+//!   one before) takes 575 KiB of a debug build's stack and 31 KiB of a release build's: over
+//!   100 times inside the checking thread's [`STACK_BYTES`].
 //! - [`MAX_CHAINED_OPERATORS`]: naga limits the nesting of parentheses, blocks and unary
 //!   operators itself, but not a chain of binary operators, member accesses or indexings,
 //!   which it lowers by recursion as deep as the chain is long. [`refusal`] counts them in
-//!   the text, before it is parsed. This is the bound that makes a shader which passes safe
-//!   to parse again on any thread, as wgpu does when it builds the pipeline.
-//! - [`guarded`]: the parse, validation and translation run on a thread with a large stack,
-//!   so a shape the two bounds above did not foresee still does not reach the limit of the
-//!   caller's own stack, and a panic comes back as a refusal.
+//!   the text, before it is parsed. This is the bound that makes a shader which passed safe
+//!   to parse again on another thread, as wgpu does when it builds the pipeline.
+//! - [`guarded`]: the check runs on a thread with a large stack, so a shape the two bounds
+//!   above did not foresee still does not reach the limit of the caller's own stack, and a
+//!   panic comes back as a refusal.
 
 /// The most bytes of WGSL a shader (the prelude, the files and the entry points as composed)
 /// may hold.
 pub const MAX_SOURCE_BYTES: usize = 128 * 1024;
 
-/// The most binary operators, member accesses and indexings one expression may chain. The
-/// count is generous for written code (a polynomial of 90 terms has about 180) and the deepest
-/// parse it allows takes about a megabyte of a debug build's stack.
+/// The most binary operators, member accesses and indexings one expression may chain. Measured,
+/// the longest chain the whole check survives is 3,339 operators on a release build's 2 MiB
+/// thread (a Rust thread's default, where wgpu may parse it again), 13,422 on 8 MiB, and 5,379
+/// on a debug build's checking thread ([`STACK_BYTES`]): 200 leaves a margin of 16 times or more
+/// on each. Written code stays well under it (a polynomial of 90 terms has about 180).
 pub const MAX_CHAINED_OPERATORS: usize = 200;
 
 /// The stack of the thread a shader is checked on. It is address space the system commits as

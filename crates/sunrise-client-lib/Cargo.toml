@@ -50,7 +50,7 @@ sunrise-shader-api = { path = "../sunrise-shader-api" }
 sunrise-narrator = { path = "../sunrise-narrator" }
 # Sunrise mods: native code and content packages (docs/modding/src/how-to/content-mods.md).
 # Their runtime is the `mods` feature.
-sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false, features = ["index"] }
+sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false, features = ["index-read"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -76,7 +76,7 @@ xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 # Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md).
 sunrise-telemetry = { path = "../sunrise-telemetry", default-features = false }
 sunrise-bench = { path = "../sunrise-bench" }
-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }
 # The DualSense's rumble, adaptive triggers and lights over HID (gilrs only reads it).
@@ -114,8 +114,12 @@ test-menu-validity = []
 test-payload-probe = []
 # Isolated server-publication slots for resource-backed game fixtures only.
 test-publication-scope = []
+# Thread-local tooltip component factories for isolated game unit tests only.
+test-tooltip-factories = []
 # Non-consuming residency journal observation for game fixtures only.
 test-residency-observer = []
+# Local server-pack feedback observation for game fixtures only.
+test-pack-feedback = []
 # A level side with no weather, tags or block entities, for tests and probes that never read them.
 test-dry-side = []
 default = ["audio", "controllers"]
@@ -231,6 +235,10 @@ path = "../sunrise-client/tests/custom_component_unregistered.rs"
 [[test]]
 name = "custom_component_wire"
 path = "../sunrise-client/tests/custom_component_wire.rs"
+
+[[test]]
+name = "custom_bundle_wire"
+path = "../sunrise-client/tests/custom_bundle_wire.rs"
 
 [[test]]
 name = "datapack_join"

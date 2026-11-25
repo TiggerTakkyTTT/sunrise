@@ -192,6 +192,7 @@ pub(super) fn player_type_with_document(
 fn load_player_type(models: &sunrise_client::mobs::EntityModelDocument) -> Option<Arc<MobType>> {
     models.model("minecraft:player#main").map(|model| {
         Arc::new(MobType {
+            type_key: Default::default(),
             shadow: None,
             id: "minecraft:player".into(),
             // Players render as a humanoid; the species only drives local AI.
@@ -201,7 +202,7 @@ fn load_player_type(models: &sunrise_client::mobs::EntityModelDocument) -> Optio
             eye_height: 1.62,
             category: "misc".into(),
             max_health: 20.0,
-            speed: 0.1,
+            speed: f64::from(0.1_f32), // Player.createAttributes' MOVEMENT_SPEED
             flying_speed: 0.02,
             attack_damage: 1.0,
             attack_knockback: 0.0,
@@ -250,15 +251,6 @@ fn load_player_type(models: &sunrise_client::mobs::EntityModelDocument) -> Optio
         })
     })
 }
-/// What sets the body's yaw of a player riding something (`Game::ridden_body`).
-#[derive(Clone, Copy)]
-enum RiddenBody {
-    /// The boat's yaw.
-    Boat(f32),
-    /// The living vehicle's body yaw.
-    Living(f32),
-}
-
 /// Whether a shadow pass that draws the player (`shadow_draws_player`: shadowPlayer, or a
 /// native pack's shadow) takes the player's own model in first person. A shader pack's shadow
 /// pass does, except for a spectator: in our probe packs' readings of Iris 1.11.7's shadow map
@@ -271,6 +263,13 @@ fn shadow_pass_takes_own_model(
     spectator: bool,
 ) -> bool {
     shadow_draws_player && !(shader_pack && spectator)
+}
+
+struct CameraAlignment {
+    entity: CameraEntity,
+    descending: bool,
+    entity_kind: sunrise_world::collision_context::EntityContextKind,
+    interpolating_minecart: bool,
 }
 
 fn wrap(d: f32) -> f32 {
@@ -311,50 +310,41 @@ impl Game<'_> {
         self.apply_camera_type(camera_type);
         changed
     }
-    /// `Camera.update` (`alignWithEntity` and `getMaxZoom`): the
-    /// interpolated eye, or a point up to the camera distance behind (or in
-    /// front of) it, pulled in where visual shapes are in the way. Returns the
-    /// position, yaw and pitch to render from.
-    pub(super) fn camera_view(&mut self, partial: f32) -> Option<(glam::DVec3, f32, f32)> {
-        if self.studio.flying() {
-            return Some((
-                self.studio.freecam.position,
-                self.studio.freecam.yaw,
-                self.studio.freecam.pitch,
-            ));
+    /// Resolve the camera entity snapshot and collision context inputs for `Camera.alignWithEntity`.
+    fn camera_alignment_source(&mut self, partial: f32) -> Option<CameraAlignment> {
+        let subject = self.camera_subject()?;
+        let mut entity = subject.camera;
+        let minecart_position = self.remote_minecart_camera_position(&subject, partial);
+        if let Some(position) = minecart_position {
+            // Already evaluated at partial: do not linearly interpolate
+            // between tick endpoints across a corner a second time.
+            entity.position = position;
+            entity.previous = position;
         }
-        // Minecraft.cameraEntity: a server's spectator camera on a mob or
-        // another player.
-        let (entity, descending, entity_kind) = match self.spectated_camera_snapshot() {
-            Some(e) => (
-                e,
-                false,
-                sunrise_world::collision_context::EntityContextKind::Living,
-            ),
-            None => {
-                let mut entity = self.player_camera_entity()?;
-                if let Some(position) = self.remote_minecart_rider_position(partial) {
-                    // Already evaluated at partial: do not linearly interpolate
-                    // between tick endpoints across a corner a second time.
-                    entity.position = position;
-                    entity.previous = position;
-                }
-                (
-                    entity,
-                    self.player.as_ref()?.shift_key_down,
-                    sunrise_world::collision_context::EntityContextKind::Player,
-                )
-            }
-        };
+        let descending =
+            subject.is_local_player && self.player.as_ref().is_some_and(|p| p.shift_key_down);
+        Some(CameraAlignment {
+            entity,
+            descending,
+            entity_kind: subject.collision_kind,
+            interpolating_minecart: minecart_position.is_some(),
+        })
+    }
+
+    fn align_view_with_angles(
+        &self,
+        source: &CameraAlignment,
+        partial: f32,
+        angles: (f32, f32, f32),
+    ) -> sunrise_client::camera::Camera {
         let mut view = self.view;
         let kind = self.camera_type;
-
         let context = CollisionContext::for_entity(
             CollisionEntity {
                 identity: EntityIdentity(0),
-                kind: entity_kind,
-                y: entity.position[1],
-                descending,
+                kind: source.entity_kind,
+                y: source.entity.position[1],
+                descending: source.descending,
                 main_hand: Some(CollisionItem::EMPTY),
             },
             false,
@@ -371,12 +361,18 @@ impl Game<'_> {
             },
             facts: self.res.facts(),
         };
-        view.align_with_entity_distance(
-            &entity,
+        view.align_with_entity_angles(
+            &source.entity,
             partial,
             kind,
+            angles,
             |mut distance| {
-                self.native_camera_distance(partial, kind.is_mirrored(), &entity, &mut distance);
+                self.native_camera_distance(
+                    partial,
+                    kind.is_mirrored(),
+                    &source.entity,
+                    &mut distance,
+                );
                 distance
             },
             |from, to| {
@@ -392,23 +388,110 @@ impl Game<'_> {
                 (!hit.miss).then_some([hit.hit.location.x, hit.hit.location.y, hit.hit.location.z])
             },
         );
-        self.view = view;
+        view
+    }
+
+    /// `Camera.update` (`alignWithEntity` and `getMaxZoom`): the
+    /// interpolated eye, or a point up to the camera distance behind (or in
+    /// front of) it, pulled in where visual shapes are in the way. Returns the
+    /// position, yaw and pitch to render from (without `compute_camera_angles`
+    /// or `camera_position` mod hooks).
+    pub(super) fn camera_view(&mut self, partial: f32) -> Option<(glam::DVec3, f32, f32)> {
+        if self.studio.flying() {
+            return Some((
+                self.studio.freecam.position,
+                self.studio.freecam.yaw,
+                self.studio.freecam.pitch,
+            ));
+        }
+        let source = self.camera_alignment_source(partial)?;
+        let view = self.align_view_with_angles(
+            &source,
+            partial,
+            (
+                source.entity.view_y_rot(partial),
+                source.entity.view_x_rot(partial),
+                0.0,
+            ),
+        );
+        self.view = sunrise_client::camera::Camera {
+            placed_position: view.position,
+            ..view
+        };
         Some((
             glam::DVec3::from_array(view.position),
             view.y_rot,
             view.x_rot,
         ))
     }
+
+    /// The authoritative frame camera. NeoForge posts `ComputeCameraAngles` only on ordinary
+    /// entity alignment, not in `Camera.alignWithEntity`'s interpolating minecart branch. The
+    /// final `camera_position` stage sees either placed entity view, or the studio's custom view.
+    /// Neither callback runs for the title panorama.
+    pub(super) fn frame_camera(&mut self, partial: f32) -> Option<(glam::DVec3, f32, f32, f32)> {
+        self.apply_requested_camera_type();
+        let run_hooks = !self.shows_panorama();
+        let (mut view, alignment) = if self.studio.flying() {
+            let mut view = self.view;
+            if let Some(source) = self.camera_alignment_source(partial) {
+                view.align_eye(&source.entity, partial);
+            }
+            let freecam = &self.studio.freecam;
+            // Studio stores roll with the opposite sign to NeoForge's camera angles.
+            view.set_rotation_with_roll(freecam.yaw, freecam.pitch, -freecam.roll);
+            view.position = freecam.position.to_array();
+            (view, None)
+        } else {
+            let source = self.camera_alignment_source(partial)?;
+            let (mut yaw, mut pitch, mut roll) = (
+                source.entity.view_y_rot(partial),
+                source.entity.view_x_rot(partial),
+                0.0,
+            );
+            if run_hooks && !source.interpolating_minecart {
+                self.native_compute_camera_angles(partial, &mut yaw, &mut pitch, &mut roll);
+                self.apply_requested_camera_type();
+            }
+            let angles = (yaw, pitch, roll);
+            let view = self.align_view_with_angles(&source, partial, angles);
+            (view, Some((source, angles)))
+        };
+        view.placed_position = view.position;
+        if run_hooks {
+            let mut position = mod_api::CameraPosition::placed_at(view.position);
+            self.native_camera_position(partial, &mut position);
+            if self.apply_requested_camera_type()
+                && let Some((source, angles)) = alignment
+            {
+                view = self.align_view_with_angles(&source, partial, angles);
+            }
+            view.placed_position = view.position;
+            for (coordinate, override_value) in view.position.iter_mut().zip(position.overrides()) {
+                if let Some(value) = override_value {
+                    *coordinate = value;
+                }
+            }
+        }
+        self.view = view;
+        Some((
+            glam::DVec3::from_array(view.position),
+            view.y_rot,
+            view.x_rot,
+            view.roll,
+        ))
+    }
+
     /// `Camera.rotation()` as the quads of particles take it: the frame's camera (a
     /// bed's, a front view's, a mod's), not the player's own yaw and pitch.
     pub(super) fn particle_rotation(&self) -> glam::Quat {
         if self.studio.flying() {
             return self.camera_orientation();
         }
-        let (yaw, pitch) = self
-            .posed_rotation
-            .unwrap_or((self.view.y_rot, self.view.x_rot));
-        super::camera_rotation(CameraType::FirstPerson, yaw, pitch)
+        let (yaw, pitch, roll) =
+            self.posed_rotation
+                .unwrap_or((self.view.y_rot, self.view.x_rot, self.view.roll));
+        super::camera_rotation_rolled(CameraType::FirstPerson, yaw, pitch, roll)
     }
     /// The player as `Camera.alignWithEntity` sees it.
     pub(super) fn player_camera_entity(&mut self) -> Option<CameraEntity> {
@@ -437,20 +520,10 @@ impl Game<'_> {
                 _ => None,
             })
         });
-        // Camera.setup: the living mount's scale and camera distance
-        // attributes (the happy ghast's is 8, the default 4).
         let mount = self
             .riding
             .and_then(|id| self.mobs.iter().find(|m| m.id == id))
-            .map(|m| {
-                let attribute = |name: &str, default: f64| {
-                    m.kind.attributes.get(name).copied().unwrap_or(default)
-                };
-                (
-                    attribute("minecraft:scale", 1.0) as f32,
-                    attribute("minecraft:camera_distance", 4.0),
-                )
-            });
+            .map(Mob::camera_scale_and_distance);
         // AbstractBoat.positionRider turns a passenger by the boat's
         // deltaRotation after its yRotO was saved, and LocalPlayer.getViewYRot
         // interpolates a passenger's yaw: the boat's turn is spread over the
@@ -490,9 +563,32 @@ impl Game<'_> {
         };
         Some(entity)
     }
+    /// Build the avatar for a newly installed local body, before any frame can read it.
+    pub(super) fn ensure_player_model(&mut self) {
+        if self.player_model.is_none()
+            && let (Some(p), Some(kind)) = (&self.player, self.res.player_type().clone())
+        {
+            let mut model = Mob::new(0, kind, p.position, self.yaw);
+            // The first position packet sets the look, not LivingEntity.yBodyRot.
+            model.body_yaw = 0.0;
+            model.previous_body_yaw = 0.0;
+            model.head_pitch = self.pitch;
+            model.previous_head_pitch = self.pitch;
+            // The render state starts with the profile's paired default skin and model.
+            let skin = sunrise_client::tab_list::default_skin(self.own_uuid());
+            model.skin = Some(skin.into());
+            model.slim = skin.contains("/slim/");
+            self.player_model = Some(model);
+        }
+    }
+
     /// Keep the player's model in step with the player (`LivingEntity.tick`
     /// body turning, `WalkAnimationState`, the swing and the pose).
     pub(super) fn tick_player_model(&mut self) {
+        self.tick_player_model_with_rider_movement(None);
+    }
+
+    pub(super) fn tick_player_model_with_rider_movement(&mut self, rider_movement: Option<Vec3>) {
         let (scale, nameplate) = self.player.as_mut().map_or_else(
             || (1.0, NameplateDistances::default()),
             |p| {
@@ -504,22 +600,12 @@ impl Game<'_> {
                 (scale, nameplate)
             },
         );
-        let Some(p) = self.player.as_ref() else {
+        if self.player.is_none() {
             self.player_model = None;
             return;
-        };
-        if self.player_model.is_none() {
-            let Some(kind) = self.res.player_type().clone() else {
-                return;
-            };
-            let mut m = Mob::new(0, kind, p.position, self.yaw);
-            m.head_pitch = self.pitch;
-            // The render state starts with the profile's paired default skin and model.
-            let skin = sunrise_client::tab_list::default_skin(self.own_uuid());
-            m.skin = Some(skin.into());
-            m.slim = skin.contains("/slim/");
-            self.player_model = Some(m);
         }
+        self.ensure_player_model();
+        let p = self.player.as_ref().unwrap();
         let pose = p.pose;
         let crouching = pose == Pose::Crouching;
         let position = p.position;
@@ -563,8 +649,11 @@ impl Game<'_> {
         // LivingEntity.getBedOrientation: the model lies in the bed as
         // another player's does (`villager::sleep_pose`).
         let bed = self.sleeping.map_or(0, |head| self.bed_facing(head));
-        let spectator = self.spectator();
-        let ridden = self.ridden_body();
+        let spectator = self.own_player_is_spectator();
+        let boat_yaw = self
+            .riding
+            .and_then(|id| self.boats.iter().find(|b| b.id == id).map(|b| b.yaw));
+        let blocking = boat_yaw.is_none() && self.player_blocking_component().is_some();
         let Some(m) = self.player_model.as_mut() else {
             return;
         };
@@ -576,7 +665,13 @@ impl Game<'_> {
             player_model_positions(previous_position, position, m.extra.crouching, crouching);
         m.previous = from;
         m.position = at;
-        let (dx, dz) = (at.x - m.previous.x, at.z - m.previous.z);
+        // The rider's own tick turns its body before the vehicle positions it
+        // (Entity.rideTick). Seat displacement only updates the drawn position.
+        let turn_movement = if riding {
+            rider_movement.unwrap_or(Vec3::ZERO)
+        } else {
+            at.subtract(from)
+        };
         let walked = player_walk_distance(m.previous, at);
         m.previous_yaw = m.yaw;
         m.previous_body_yaw = m.body_yaw;
@@ -585,41 +680,18 @@ impl Game<'_> {
         m.yaw = yaw;
         m.head_yaw = yaw;
         m.head_pitch = pitch;
-        match ridden {
-            // AbstractBoat.positionRider (clampRotation): the passenger's body
-            // is set to the boat's yaw each tick.
-            Some(RiddenBody::Boat(boat)) => m.body_yaw += wrap(boat - m.body_yaw),
-            // A living vehicle's rider is drawn from its body
-            // (`LivingEntityRenderer.solveBodyRot`).
-            Some(RiddenBody::Living(body)) => {
-                m.body_yaw +=
-                    wrap(sunrise_client::mobs::riders::solve_body_rot(yaw, body) - m.body_yaw);
-            }
-            // A minecart's, a cushion's: the body turns as on foot.
-            None => {
-                let mut target = m.body_yaw;
-                if dx * dx + dz * dz > 0.002_500_000_2 {
-                    // LivingEntity.tick: walking backwards the body faces away from
-                    // the walk direction, not along it.
-                    let walk = (dz.atan2(dx) as f32).to_degrees() - 90.0;
-                    let facing = (wrap(yaw) - walk).abs();
-                    target = if 95.0 < facing && facing < 265.0 {
-                        walk - 180.0
-                    } else {
-                        walk
-                    };
-                }
-                if swinging {
-                    target = yaw;
-                }
-                // tickHeadTurn: ease toward the target, within 50 degrees of the head.
-                m.body_yaw += wrap(target - m.body_yaw) * 0.3;
-                let diff = wrap(yaw - m.body_yaw);
-                if diff.abs() > 50.0 {
-                    m.body_yaw += diff - diff.signum() * 50.0;
-                }
-            }
-        }
+        // AbstractBoat.positionRider follows the rider tick and directly assigns
+        // the boat's yaw. A living vehicle affects only the extracted pose.
+        m.body_yaw = boat_yaw.unwrap_or_else(|| {
+            sunrise_client::mobs::living::player_body_yaw(
+                m.body_yaw,
+                yaw,
+                turn_movement.x,
+                turn_movement.z,
+                attack.1 > 0.0,
+                blocking,
+            )
+        });
         if riding {
             // LivingEntity.calculateEntityAnimation: a passenger stops the
             // walk animation (WalkAnimationState.stop), so the seat moving with
@@ -702,11 +774,22 @@ impl Game<'_> {
     /// agent's `turn`.
     /// The model's old pitch is the player's `xRotO`, which the turn moves
     /// with `xRot` (`turn_rotation`).
-    pub(super) fn turn_player(&mut self, xo: f64, yo: f64) {
+    pub(super) fn turn_player(&mut self, mut xo: f64, mut yo: f64) {
         if self.studio.flying() {
             self.studio
                 .freecam
                 .turn((xo * 0.15) as f32, (yo * 0.15) as f32);
+            return;
+        }
+        if self.player.is_some() && mod_api::__private::listened(mod_api::HookId::PlayerTurn) {
+            let (orig_x, orig_y) = (xo, yo);
+            self.native_player_turn(self.own_entity_id(), self.own_uuid(), &mut xo, &mut yo);
+            xo = finite_turn_delta("x", orig_x, xo);
+            yo = finite_turn_delta("y", orig_y, yo);
+        }
+        // `Entity.turn` adds the delta to the yaw and to `yRotO`: refuse a turn whose result
+        // either sum cannot represent, as a whole, so the two never disagree.
+        if !turn_yaw_representable(self.yaw, self.rope_rot_old.0, xo) {
             return;
         }
         let pitch_o = self.player_model.as_ref().map(|m| m.previous_head_pitch);
@@ -729,20 +812,12 @@ impl Game<'_> {
         {
             let (yaw, clamped) = sunrise_client::camera::clamp_boat_rotation(self.yaw, b.yaw);
             self.yaw = yaw;
+            if let Some(m) = self.player_model.as_mut() {
+                m.body_yaw = b.yaw;
+            }
             // clampRotation moves `yRotO` with the view.
             self.rope_rot_old.0 += clamped;
         }
-    }
-    /// What the player rides that sets their body's yaw: a boat's yaw, or a
-    /// living vehicle's body yaw. Minecarts and cushions leave it to the
-    /// player's own turn.
-    fn ridden_body(&self) -> Option<RiddenBody> {
-        let id = self.riding?;
-        if let Some(b) = self.boats.iter().find(|b| b.id == id) {
-            return Some(RiddenBody::Boat(b.yaw));
-        }
-        let m = self.mobs.iter().find(|m| m.id == id)?;
-        Some(RiddenBody::Living(m.body_yaw))
     }
     /// `Entity.setOldRot` after a server sets the player's rotation
     /// (`handleRotatePlayer`): the model's head snaps to it instead of easing
@@ -769,7 +844,7 @@ impl Game<'_> {
                 && shadow_pass_takes_own_model(
                     self.occlusion.shadow_casters.1,
                     self.pack_ids.is_some(),
-                    self.spectator(),
+                    self.own_player_is_spectator(),
                 )))
             && self
                 .player
@@ -794,6 +869,25 @@ impl Game<'_> {
     pub(super) fn own_body_visible(&self) -> bool {
         body_visible(self.own_invisible(), self.own_team())
     }
+    /// LivingEntityRenderer.solveBodyRot uses the current vehicle, even when a passenger
+    /// packet arrived between ticks. These pose inputs do not change the live body angle.
+    pub(super) fn extract_local_player_vehicle(&mut self) {
+        if self.player_model.is_none() {
+            return;
+        }
+        let vehicle_body = self.riding.and_then(|id| {
+            if let Some(mob) = self.mob_object(id).filter(|mob| !mob.removed) {
+                return Some((id, mob.previous_body_yaw, mob.body_yaw));
+            }
+            let stand = self.armor_stands.iter().find(|stand| stand.id == id)?;
+            Some((id, stand.previous_body_yaw, stand.body_yaw))
+        });
+        if let Some(model) = self.player_model.as_mut() {
+            model.extra.mount = self.riding;
+            model.extra.vehicle_body = vehicle_body;
+        }
+    }
+
     /// The local player's body in the ordered entity pass.
     pub(super) fn local_player_geometry(
         &self,
@@ -839,7 +933,7 @@ impl Game<'_> {
         let body = self.own_body_visible();
         // The mods' pre hooks (`render_player_pre`, then `render_living_pre`), as for the other
         // players: a cancel skips the rest of this player's drawing and its post hooks, and the
-        // frame's later passes (flames, name tag) leave it out too.
+        // frame's later name tag pass leaves it out too; its flames stay.
         let name = self.own_profile_name();
         let who = PlayerRender {
             name: &name,
@@ -872,7 +966,7 @@ impl Game<'_> {
         // visibility (set by player_model_visibility) hides body parts, and
         // translucent_body marks the body OIT for the ghostly look. Only first
         // person and dead players skip it.
-        if body || self.spectator() {
+        if body || self.own_player_is_spectator() {
             sunrise_client::mobs::render::render_with_frame(
                 m,
                 alpha as f32,
@@ -1006,7 +1100,7 @@ impl Game<'_> {
         let mut verts = Vec::new();
         // A spectator preview still draws its own model: the poses'
         // visibility hides body parts, leaving the head and its layers.
-        let body = self.own_body_visible() || self.spectator();
+        let body = self.own_body_visible() || self.own_player_is_spectator();
         let (data, armour) = (
             self as &dyn sunrise_client::mobs::render::RenderDataSource,
             self.player_armor_layers(),
@@ -1554,6 +1648,9 @@ pub(super) fn player_preview_quads_no_cull(
     }
     let mut quads: Vec<(f32, [[f32; 3]; 4], [[f32; 2]; 4], u32)> = Vec::new();
     for (index, q) in verts.as_chunks::<4>().0.iter().enumerate() {
+        if (q[0].layer & 0xffff) == sunrise_client::gfx::GLINT_ONLY_OVERLAY {
+            continue;
+        }
         let p: [glam::Vec3; 4] =
             std::array::from_fn(|i| gui.transform_point3(glam::Vec3::from_array(q[i].pos)));
         let n = (p[1] - p[0]).cross(p[2] - p[0]);
@@ -1613,7 +1710,10 @@ pub(super) fn preview_glint_quads(
     for (index, q) in verts.as_chunks::<4>().0.iter().enumerate() {
         let armor = match q[0].layer & 0xffff {
             sunrise_client::mobs::render::ARMOR_GLINT => true,
-            7 | 8 | sunrise_client::gfx::TRANSLUCENT_GLINT_ITEM_OVERLAY => false,
+            7
+            | 8
+            | sunrise_client::gfx::TRANSLUCENT_GLINT_ITEM_OVERLAY
+            | sunrise_client::gfx::GLINT_ONLY_OVERLAY => false,
             _ => continue,
         };
         let p: [glam::Vec3; 4] =
@@ -1659,6 +1759,13 @@ pub(super) fn emit_preview(
         batch.quad_3d_glint(p, uv, glint_uv, armor);
     }
     batch.depth_glint_since(start, glint, clip);
+}
+
+/// Whether `Entity.turn`'s yaw delta (`xo`, 0.15 degrees a unit) leaves both the yaw and `yRotO`
+/// finite: arithmetic stays plain for any turn that does, with no angular cap.
+fn turn_yaw_representable(yaw: f32, old_yaw: f32, xo: f64) -> bool {
+    let delta = (xo as f32) * 0.15;
+    (yaw + delta).is_finite() && (old_yaw + delta).is_finite()
 }
 
 /// `Entity.turn` adds the turn to `xRotO` as well as to `xRot`, so the local
@@ -1736,9 +1843,30 @@ fn player_walk_distance(from: Vec3, to: Vec3) -> f32 {
     (dx * dx + dz * dz).sqrt() as f32
 }
 
+/// Keeps a listener-edited `Entity.turn` axis delta when vanilla's `(delta as f32) * 0.15`
+/// cast produces a finite turn; logs and reverts that axis otherwise.
+fn finite_turn_delta(axis: &'static str, original: f64, proposed: f64) -> f64 {
+    if ((proposed as f32) * 0.15).is_finite() {
+        proposed
+    } else {
+        log::warn!("player_turn: refused non-finite {axis} delta ({proposed}); keeping {original}");
+        original
+    }
+}
+
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+
+    #[test]
+    fn finite_turn_delta_keeps_finite_values_and_reverts_non_finite_ones() {
+        assert_eq!(finite_turn_delta("x", 10.0, 2.5), 2.5);
+        assert_eq!(finite_turn_delta("y", -4.0, 0.0), 0.0);
+        assert_eq!(finite_turn_delta("x", 10.0, -3600.0), -3600.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300] {
+            assert_eq!(finite_turn_delta("x", 10.0, bad), 10.0, "{bad}");
+        }
+    }
     #[test]
     fn a_spectators_own_model_stays_out_of_a_shader_packs_shadow_pass() {
         // First person, a shader pack whose shadow pass draws the player: a spectator's head
@@ -1835,6 +1963,20 @@ mod preview_tests {
         // xRotO is clamped as xRot is.
         let old = rope_old_after_turn((0.0, 85.0), 0.0, 85.0, 0.0, 100.0);
         assert_eq!(old.1, 90.0);
+    }
+    /// Individually finite turns can overflow the old yaw while the current yaw still takes
+    /// them: such a turn is refused whole, and every turn that fits is plain arithmetic.
+    #[test]
+    fn a_turn_that_overflows_the_old_yaw_is_refused_whole() {
+        let big = f64::from(f32::MAX);
+        assert!(turn_yaw_representable(0.0, 0.0, big));
+        // The current yaw takes a second turn of the same size; the old yaw, already moved by
+        // one, would overflow.
+        let yaw = f32::MAX * 0.5;
+        let old = f32::MAX * 0.9;
+        assert!(!turn_yaw_representable(yaw, old, big));
+        assert!(turn_yaw_representable(yaw, old, 100.0));
+        assert!(turn_yaw_representable(yaw, old, -big));
     }
     #[test]
     fn preview_keeps_crossing_faces_depth_and_clips_without_dropping_faces() {
@@ -1936,7 +2078,7 @@ mod preview_tests {
         .flatten()
         .collect();
         let frame = GlintFrame {
-            millis: 1234.0,
+            millis: 1_234,
             speed: 0.5,
             alpha: 0.75,
             sprite: true,
@@ -1948,7 +2090,7 @@ mod preview_tests {
         let armor = sunrise_client::item_render::Glint {
             speed: 0.5,
             alpha: 0.75,
-            millis: 1234.0,
+            millis: 1_234,
             scale: 0.16,
         };
         let (pos, uv, glint_uv, is_armor) = glints[0];
@@ -2042,7 +2184,13 @@ mod preview_tests {
             return;
         };
         let m = Mob::new(1, kind.clone(), Vec3::ZERO, 0.0);
-        let armour = [(&*kind.model, [0.5, 0.5, 0.75, 0.75], u32::MAX, 0, false)];
+        let armour = [(
+            sunrise_client::mobs::render::WornModel::Vanilla(&kind.model),
+            [0.5, 0.5, 0.75, 0.75],
+            u32::MAX,
+            0,
+            false,
+        )];
         let atlas = |_: &str| Some([0.0, 0.0, 0.25, 0.25]);
         let data = sunrise_client::mobs::MobData {
             states: Vec::new(),
@@ -2050,7 +2198,6 @@ mod preview_tests {
             heightmaps: Default::default(),
             animations: Default::default(),
             biome_tags: Default::default(),
-            entity_tags: Default::default(),
             villager_hats: Default::default(),
             frame_models: Default::default(),
             cem: Default::default(),

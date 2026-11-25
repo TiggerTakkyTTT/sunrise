@@ -403,6 +403,8 @@ pub enum Action {
     },
     Connect {
         address: String,
+        /// The saved server list row's name, when the join came from that row.
+        name: Option<String>,
         lan: bool,
         realm: bool,
     },
@@ -479,7 +481,6 @@ pub struct Title {
     /// A Realm's checked address, once the Realms screen's join came back.
     connect_request: Option<String>,
     /// EditWorldScreen's and WorldOpenFlows' `SystemToast` and its slide.
-    toast: Option<crate::toasts::SystemToast>,
     pending_toast: Option<WorldToast>,
     icons: RefCell<std::collections::HashMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>>,
     splash: Option<String>,
@@ -945,7 +946,6 @@ impl Title {
             erase_check: Cell::new([0.0; 4]),
             open_request: None,
             connect_request: None,
-            toast: None,
             pending_toast: None,
             icons: RefCell::new(std::collections::HashMap::new()),
             splash: choose_splash(splashes, splash_index, (today.month(), today.day())),
@@ -1308,7 +1308,7 @@ impl Title {
         Some((row as usize, (x - left - 2.0, y - content_y)))
     }
     /// The pointer moved with the button held (`mouseDragged`).
-    pub fn drag(&mut self, cursor: (f32, f32), size: (f32, f32)) {
+    pub fn drag(&mut self, cursor: (f32, f32), size: (f32, f32)) -> bool {
         if let Some(rules) = self.rules.get_mut() {
             return rules.drag(cursor.1, size.1.ceil());
         }
@@ -1319,22 +1319,22 @@ impl Title {
             return screen.drag(cursor.1, size);
         }
         if let Mode::CreateFlat { flat, .. } = &mut self.mode {
-            flat::drag(flat, cursor, size);
-            return;
+            return flat::drag(flat, cursor, size);
         }
         if let Mode::CreateBuffet { buffet, .. } = &mut self.mode {
-            buffet::drag(buffet, cursor, size);
-            return;
+            return buffet::drag(buffet, cursor, size);
         }
-        if self.drag_missing_mods(cursor, size) {
-            return;
+        if matches!(self.mode, Mode::MissingMods { .. }) {
+            return self.drag_missing_mods(cursor, size);
         }
         if let Mode::Select { worlds, .. } = &self.mode {
             let (top, bottom, _, content) = self.world_list(worlds, size);
             let mut scroll = self.scroll.get();
-            scroll.drag(cursor.1, top, bottom, content);
+            let handled = scroll.drag(cursor.1, top, bottom, content);
             self.scroll.set(scroll);
+            return handled;
         }
+        false
     }
     /// The button was released (`onRelease`).
     pub fn release(&mut self) -> bool {
@@ -1359,30 +1359,25 @@ impl Title {
         scroll.release();
         handled
     }
-    /// Mouse wheel over the classic world and server lists, or cycle buttons. Returns true if a button was cycled.
+    /// Mouse wheel over the classic world and server lists, or cycle buttons. Returns true if a child accepted it.
     pub fn scroll_worlds(&mut self, delta: f32, cursor: (f32, f32), size: (f32, f32)) -> bool {
         if let Some(rules) = self.rules.get_mut() {
-            rules.wheel(delta, size.1.ceil());
-            return false;
+            return rules.wheel_at(delta, cursor.1, size.1.ceil());
         }
         if let Mode::Multiplayer(screen) = &mut self.mode {
-            screen.wheel(delta, cursor, size);
-            return false;
+            return screen.wheel(delta, cursor, size);
         }
         if let Mode::Realms(screen) = &mut self.mode {
-            screen.wheel(delta, cursor, size);
-            return false;
+            return screen.wheel(delta, cursor, size);
         }
         if let Mode::CreateFlat { flat, .. } = &mut self.mode {
-            flat::wheel(flat, delta, cursor, size);
-            return false;
+            return flat::wheel(flat, delta, cursor, size);
         }
         if let Mode::CreateBuffet { buffet, .. } = &mut self.mode {
-            buffet::wheel(buffet, delta, cursor, size);
-            return false;
+            return buffet::wheel(buffet, delta, cursor, size);
         }
-        if self.wheel_missing_mods(delta, size) {
-            return false;
+        if matches!(self.mode, Mode::MissingMods { .. }) {
+            return self.wheel_missing_mods(delta, cursor.1, size);
         }
         // CycleButton.mouseScrolled reads only the vertical wheel.
         if let Mode::Create {
@@ -1422,7 +1417,7 @@ impl Title {
         let mut scroll = self.scroll.get();
         scroll.wheel(delta, ROW_HEIGHT / 2.0, top, bottom, content);
         self.scroll.set(scroll);
-        false
+        true
     }
     pub fn failed(&mut self, error: impl std::fmt::Display) {
         let return_to = Box::new(self.mode.clone());
@@ -1438,26 +1433,7 @@ impl Title {
         let (title, message) = self.pending_toast.take()?.text();
         Some(crate::toasts::SystemToast::new(title, Some(message)))
     }
-    /// Apply a toast accepted by the game's toast admission hook.
-    pub fn apply_toast(&mut self, toast: crate::toasts::SystemToast) {
-        self.toast = Some(toast);
-    }
-    /// `ToastManager.update` for the system toast: slides it in, keeps it
-    /// for 5 s times the notification display time, slides it out. The
-    /// sound of a new visibility (`Toast.Visibility`), if any.
-    pub fn update_toast(&mut self, multiplier: f32) -> Option<&'static str> {
-        let (sound, finished) = self.toast.as_mut()?.update(f64::from(multiplier));
-        if finished {
-            self.toast = None;
-        }
-        sound.map(|show| {
-            if show {
-                "minecraft:ui.toast.in"
-            } else {
-                "minecraft:ui.toast.out"
-            }
-        })
-    }
+
     /// The server list's narration of LAN worlds found since the last call
     /// (`JoinMultiplayerScreen.tick`'s `updateNetworkServers`).
     pub fn lan_found_narrations(&self, size: (f32, f32)) -> Vec<Text> {
@@ -1465,10 +1441,6 @@ impl Title {
             Mode::Multiplayer(screen) => screen.lan_found_narrations(size),
             _ => Vec::new(),
         }
-    }
-    /// Whether the system toast holds the `ToastManager`'s first slot.
-    pub fn has_toast(&self) -> bool {
-        self.toast.is_some()
     }
     /// The world a finished backup made before its upgrade opens next.
     /// The Realms screen's workers: a join that came back connects (`GetServerDetailsTask`
@@ -1485,6 +1457,7 @@ impl Title {
         let address = self.connect_request.take()?;
         Some(Action::Connect {
             address,
+            name: None,
             lan: false,
             realm: true,
         })
@@ -2510,6 +2483,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     }
                     crate::realms::Outcome::Connect(address) => Action::Connect {
                         address,
+                        name: None,
                         lan: false,
                         realm: true,
                     },
@@ -2535,8 +2509,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     self.set_mode(Mode::Main);
                     Action::None
                 }
-                crate::multiplayer::Outcome::Connect { address, lan } => Action::Connect {
+                crate::multiplayer::Outcome::Connect { address, name, lan } => Action::Connect {
                     address,
+                    name,
                     lan,
                     realm: false,
                 },
@@ -3004,7 +2979,8 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
     }
     /// A left press after `click` focused a field: the cursor goes under the
-    /// pointer (`EditBox.onClick`).
+    /// pointer (`EditBox.onClick`). Returns `true` when the click hit the
+    /// focused field.
     pub fn press_field(
         &mut self,
         atlas: &HudAtlas,
@@ -3029,13 +3005,14 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         false
     }
     /// The pointer moved with the button held (`EditBox.onDrag`).
-    pub fn drag_field(&mut self, atlas: &HudAtlas, x: f32) {
+    pub fn drag_field(&mut self, atlas: &HudAtlas, x: f32) -> bool {
         if self.rules.get_mut().is_some() {
-            return;
+            return false;
         }
         if let Some(field) = caret_field(&mut self.mode, self.search_focused, &mut self.search) {
-            self.caret.get_mut().drag(atlas, field, x);
+            return self.caret.get_mut().drag(atlas, field, x);
         }
+        false
     }
     /// The button was released: drags stop selecting.
     pub fn release_field(&mut self) -> bool {
@@ -3089,6 +3066,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                 crate::realms::Outcome::Connect(address) => (
                     Action::Connect {
                         address,
+                        name: None,
                         lan: false,
                         realm: true,
                     },
@@ -3117,13 +3095,14 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         }
         match &self.mode {
             Mode::Multiplayer(screen) => match screen.confirm() {
-                crate::multiplayer::Outcome::Connect { address, lan } => {
+                crate::multiplayer::Outcome::Connect { address, name, lan } => {
                     if matches!(screen, crate::multiplayer::Screen::Direct { .. }) {
                         crate::multiplayer::remember_direct_join(&self.saves, &address);
                     }
                     (
                         Action::Connect {
                             address,
+                            name,
                             lan,
                             realm: false,
                         },

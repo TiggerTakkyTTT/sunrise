@@ -69,6 +69,7 @@ Content {
                 ignited_by_lava: None,
                 replaceable: None,
                 skip_same_block_faces: None,
+                spawn_rule: None,
                 vegetation: false,
             },
             shapes: None,
@@ -116,8 +117,20 @@ Content {
                     slope_find_distance: 3,
                     source_conversion: true,
                     bucket: false,
+                    flowing: Some(
+                        "fluid_full:brine_flowing",
+                    ),
                 },
             ),
+            bucket_item: Some(
+                "fluid_full:brine_jar",
+            ),
+            measures: FluidMeasures {
+                temperature: 295,
+                density: 1100,
+                viscosity: 1200,
+                light_level: 7,
+            },
         },
     ],
     fluid_interactions: [],

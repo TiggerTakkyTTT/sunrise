@@ -1,5 +1,4 @@
 //! The `dragon_egg_form` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0194
 
 pub trait Hooks {
     /// The Ender Dragon fight is about to place its first dragon egg at `pos`.

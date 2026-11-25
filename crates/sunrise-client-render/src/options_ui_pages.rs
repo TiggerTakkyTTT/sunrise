@@ -101,8 +101,8 @@ impl OptionsUi {
     pub(super) fn sunrise_rows(&self, s: &Settings) -> Vec<Row> {
         // Two to a row, as vanilla's OptionsList.addSmall lays out
         // buttons; each opens one of Sunrise's settings pages. Each page has
-        // one way in: graphics and shader packs are Video Settings' (the graphics
-        // screen), the controller is Controls', mods are the Options screen's. The
+        // one way in: graphics and shader packs are Extras' (Sunrise Graphics), the
+        // controller is Controls', mods are the Options screen's. The
         // registry's mod browser is Sunrise's own and opens from here, not from the
         // two-button Mods footer.
         let open = |key: &str, page: Page| button(0.0, 0.0, 150.0, tr(key), Act::Push(page));

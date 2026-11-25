@@ -109,6 +109,7 @@ pub struct State {
     /// The menu is a server's client's copy (its level no `ServerLevel`): `CraftingMenu` and
     /// `InventoryMenu.slotsChanged` work out no crafting result there; the server sends it.
     pub on_client: bool,
+    pub(super) drop_spam: Option<client_drops::DropSpamThrottler>,
     /// The selected hotbar slot (`Inventory.selected`).
     pub selected: usize,
     /// Dropped stacks (canonical text), `xp+N` and the like, in order.
@@ -145,13 +146,18 @@ pub struct State {
     /// Stacks taken from brewing stand bottle slots, for
     /// `PlayerBrewedPotionEvent`.
     pub brewed_potion_takes: Vec<ItemStack>,
-    /// Set by a server caller when a mod listens: every
+    /// Set by a caller when a mod listens: every nonzero
     /// `FurnaceResultSlot.checkTakeAchievements` then goes to `item_smelted`.
     pub item_smelted_hook: bool,
-    /// What each `checkTakeAchievements` of a furnace's result slot passed,
-    /// for `ItemSmeltedEvent`: the stack (`None` for vanilla's empty one)
-    /// and `removeCount`.
-    pub item_smelted: Vec<(Option<ItemStack>, u32)>,
+    /// `FurnaceResultSlot.checkTakeAchievements` ran on the server side, so
+    /// the furnace must award its used recipes and pop experience
+    /// (`AbstractFurnaceBlockEntity.awardUsedRecipesAndPopExperience`) even
+    /// when `removeCount == 0` (such as a hotbar swap) or no mod listens.
+    pub furnace_awarded: bool,
+    /// Each `FurnaceResultSlot.checkTakeAchievements` with `removeCount != 0`
+    /// and a non-empty stack, for `ItemSmeltedEvent` (`getSmelting`,
+    /// `getAmountRemoved`).
+    pub item_smelted: Vec<(ItemStack, u32)>,
     /// Set by a server caller when a mod listens: every smithing result
     /// taken then goes to `item_smithed`.
     pub item_smithed_hook: bool,

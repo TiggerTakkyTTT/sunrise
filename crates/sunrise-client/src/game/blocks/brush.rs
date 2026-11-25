@@ -80,7 +80,7 @@ impl Game<'_> {
             self.brush_dust(hit, slot == super::shield::OFFHAND_SLOT);
         }
         let at = hit.pos.map(|v| f64::from(v) + 0.5);
-        self.audio.play(sound, Some(at), 1.0, 1.0);
+        self.play_audio(sound, Some(at), 1.0, 1.0);
         if brushable && self.brush_block(hit.pos, hit.face, slot) {
             self.damage_held(1);
         }
@@ -313,6 +313,11 @@ impl Game<'_> {
     /// The items [`Self::brushable_geometry`] draws.
     pub(super) fn brushable_items(&self, camera: glam::DVec3, mut draw: impl FnMut(BlockItemDraw)) {
         use sunrise_assets::item_model::DisplayContext;
+        let _items = sunrise_client::spans::raw_flight_guard("block_entity_items");
+        let reach = Reach::Default;
+        sunrise_client::spans::note_block_entity_item_visits(|| {
+            self.world.block_entities.len() as u64
+        });
         for (key, entity) in &self.world.block_entities {
             let BlockEntity::Brushable(b) = entity else {
                 continue;
@@ -320,7 +325,7 @@ impl Game<'_> {
             let (Some(stack), Some(face)) = (&b.item, b.hit_direction) else {
                 continue;
             };
-            if !Reach::Default.should_render([key.0, key.1, key.2], camera, 0) {
+            if !reach.should_render([key.0, key.1, key.2], camera, 0) {
                 continue;
             }
             let state = self.world.block(key.0, key.1, key.2);
@@ -387,7 +392,7 @@ impl Game<'_> {
         if !sound.is_empty() {
             let at = pos.map(|v| f64::from(v) + 0.5);
             // Each client plays it from the event itself.
-            self.audio.play_unshared(sound, Some(at), 1.0, 1.0);
+            self.play_audio_unshared(sound, Some(at), 1.0, 1.0);
         }
         self.destroy_particles(pos, state);
     }

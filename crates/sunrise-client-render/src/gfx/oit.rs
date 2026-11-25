@@ -174,7 +174,7 @@ pub struct Extras<'a> {
     /// "Features, World Border, Weather": draws what the entity, weather and
     /// border shaders put after the opaque world, with `Oit::features`'s
     /// pipelines of the stage.
-    pub features: Option<&'a dyn Fn(&mut wgpu::RenderPass<'_>, Stage)>,
+    pub features: Option<&'a mut dyn FnMut(&mut wgpu::RenderPass<'_>, Stage)>,
 }
 
 struct Views {
@@ -592,6 +592,10 @@ impl Oit {
         })
     }
 
+    pub(super) fn stage_layouts(&self) -> &[wgpu::BindGroupLayout; 4] {
+        &self.layouts
+    }
+
     /// Sizes the targets to the world's and writes this frame's projection.
     pub fn prepare(
         &mut self,
@@ -696,7 +700,7 @@ impl Oit {
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         draw: &dyn Fn(&mut wgpu::RenderPass<'_>, Stage),
-        extras: &Extras<'_>,
+        extras: &mut Extras<'_>,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
         let Some(t) = &self.targets else { return };
@@ -769,7 +773,7 @@ impl Oit {
                 pass.set_bind_group(GROUP, group, &[]);
                 draw(&mut pass, stage);
             }
-            if let Some(features) = extras.features {
+            if let Some(features) = extras.features.as_deref_mut() {
                 // Over the world's own depth, even where a water mask patched
                 // the terrain's: the masks only hide water.
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

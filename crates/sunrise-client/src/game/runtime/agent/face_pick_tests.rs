@@ -4,7 +4,7 @@
 //! reports what the pick its click was taken with held.
 use super::*;
 use crate::game::native_client_session::tests::logged_client;
-use crate::game::native_entity_refs::tests::with_client_game;
+use crate::game::native_entity_refs::tests::{run_fresh_cases, with_client_game};
 use mod_api::{ClientHost, ClientPickEvent, CrosshairTarget, Hooks};
 use std::sync::{Arc, Mutex, mpsc};
 use sunrise_client::{chunk::Chunk, motion::PlayerMotion};
@@ -86,8 +86,7 @@ fn with_pig_and_server(run: impl FnOnce(&mut Game<'_>, &Mutex<Listener>, &mut Co
                 .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                 .unwrap();
             finish_login(game, &mut server);
-            game.native_lifecycle
-                .begin_open(mod_api::Authority::RemoteClient);
+            game.native_lifecycle.begin_open(None);
             game.title = None;
             game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 1.0, 0.5)).unwrap());
             game.previous_position = Vec3::new(0.5, 1.0, 0.5);
@@ -348,25 +347,89 @@ fn attack_by_id_reports_the_pick_the_click_was_taken_with() {
 #[test]
 #[ignore = "daily"]
 fn attack_by_id_reports_a_click_no_tick_took() {
+    if run_fresh_cases(
+        "game::agent::face_pick_tests::attack_by_id_reports_a_click_no_tick_took",
+        "SUNRISE_AGENT_ATTACK_CLICK_NOT_TAKEN_CHILD",
+        &["switcher"],
+    ) {
+        return;
+    }
+
     with_pig_and_server(|game, _, server| {
         let (_, replies) = command(game, "attack 31");
-        tick(game);
-        // A screen over the world: the tick's keybinds don't run, and its queued clicks go.
-        game.screen = Screen::GameModeSwitcher;
+        tick_with_player_clicks(game, 1);
+        // The switcher skips keybinds, but opening it doesn't clear attack's toggle mapping.
+        game.set_screen(Screen::GameModeSwitcher);
         tick(game);
         assert_eq!(clicks_sent(game, server), Vec::<String>::new());
-        // The screen closes; the player's next click on pig 31 is not the command's.
-        game.screen = Screen::Playing;
+        // The ordinary click survives; the agent's pending aimed click does not.
+        game.set_screen(Screen::Playing);
+        tick(game);
+        assert_eq!(clicks_sent(game, server), ["attack 31", "punch"]);
+        // A new player click isn't claimed by the command either.
         player_click(game);
         tick(game);
-        assert_eq!(attacks_on(&clicks_sent(game, server), 31), 1);
-        for _ in 0..2 {
-            tick(game);
-        }
+        assert_eq!(clicks_sent(game, server), ["attack 31", "punch"]);
+        tick(game);
         assert_eq!(
             reply(&replies)["error"],
             json!("the attack click was not taken")
         );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn attack_by_id_stop_retires_only_its_queued_click() {
+    if run_fresh_cases(
+        "game::agent::face_pick_tests::attack_by_id_stop_retires_only_its_queued_click",
+        "SUNRISE_AGENT_ATTACK_STOP_CHILD",
+        &["stop"],
+    ) {
+        return;
+    }
+
+    with_pig_and_server(|game, listener, server| {
+        add_second_pig(game);
+        let (_, replies) = command(game, "attack 31");
+        tick_with_player_clicks(game, 1);
+
+        let (stopped, _) = command(game, "stop");
+        assert!(matches!(stopped, Ok(Handled::Reply(_))));
+        assert_eq!(reply(&replies)["error"], json!("cancelled by stop"));
+
+        pick_second_pig(game, listener);
+        tick(game);
+        assert_eq!(clicks_sent(game, server), ["attack 32", "punch"]);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn attack_by_id_expiry_retires_only_its_queued_click() {
+    if run_fresh_cases(
+        "game::agent::face_pick_tests::attack_by_id_expiry_retires_only_its_queued_click",
+        "SUNRISE_AGENT_ATTACK_EXPIRY_CHILD",
+        &["expiry"],
+    ) {
+        return;
+    }
+
+    with_pig_and_server(|game, listener, server| {
+        add_second_pig(game);
+        let (_, replies) = command(game, "attack 31");
+        tick_with_player_clicks(game, 1);
+
+        game.agent.task.as_mut().unwrap().deadline = Instant::now();
+        game.advance_agent();
+        assert_eq!(
+            reply(&replies)["error"],
+            json!("the attack click was not taken")
+        );
+
+        pick_second_pig(game, listener);
+        tick(game);
+        assert_eq!(clicks_sent(game, server), ["attack 32", "punch"]);
     });
 }
 

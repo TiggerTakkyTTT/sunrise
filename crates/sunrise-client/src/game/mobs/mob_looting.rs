@@ -22,8 +22,7 @@ impl LootingLevel for Game<'_> {
         Game::grief_hooked(self)
     }
     fn equippable_in_slot(&self, stack: &ItemStack, slot: &str, kind: &str) -> bool {
-        let tags = &self.stations().enchantments.entity_tags;
-        equip::equippable_in_slot(self.items(), tags, stack, slot, kind)
+        equip::equippable_in_slot(self.items(), stack, slot, kind)
     }
     fn can_equip(
         &self,

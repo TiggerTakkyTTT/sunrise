@@ -51,6 +51,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn a_bright_texel_keeps_its_share_of_odd_sized_levels() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

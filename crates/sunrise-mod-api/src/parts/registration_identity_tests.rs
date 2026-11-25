@@ -182,7 +182,10 @@ mod ordered_key_tests {
     #[test]
     fn built_in_registry_order_lists_vanilla_first_and_mods_after_them() {
         crate::__private::part_tests::install_parts_fixture(&[]).unwrap();
-        super::resolve_entity_types(["minecraft:pig", "minecraft:zombie", "test:probe"]).unwrap();
+        super::resolve_entity_types(["minecraft:pig", "minecraft:zombie", "test:probe"], |_| {
+            None
+        })
+        .unwrap();
         // The registry's own order, not sorted: `pig` registers before `zombie`.
         let ordered: Vec<_> = super::entity_type_keys()
             .into_iter()
@@ -204,7 +207,10 @@ mod ordered_key_tests {
             mod_vocab::__private::parts_installation::validate_entity_type_key(u32::MAX).is_err()
         );
         // A second load of the same registry keeps every key and the order.
-        super::resolve_entity_types(["minecraft:pig", "minecraft:zombie", "test:probe"]).unwrap();
+        super::resolve_entity_types(["minecraft:pig", "minecraft:zombie", "test:probe"], |_| {
+            None
+        })
+        .unwrap();
         assert_eq!(super::entity_type_keys(), super::entity_type_keys());
         assert_eq!(
             super::entity_type_key_id(first).as_deref(),
@@ -338,7 +344,11 @@ mod hot_call_key_tests {
     fn hot_call_signatures_and_unknown_slots_are_typed() {
         let _: fn(&dyn Host, ItemKey) -> Option<i32> = |h, k| h.item_burn_time(k);
         let _: fn(&dyn Host, ItemKey) -> Option<f32> = |h, k| h.item_compost_chance(k);
-        let _: fn(&mut dyn ClientHost, ItemKey, u32) -> Result<(), String> = |h, k, n| h.give(k, n);
+        let _: fn(
+            PlayerRef,
+            &mut dyn ClientHost,
+            &ItemStack,
+        ) -> Result<Option<ItemStack>, CreativeGiveError> = |p, h, s| p.give_creative(h, s);
         let _: fn(&dyn ClientHost, &str, ItemKey) -> bool = |h, e, k| h.enchantment_supports(e, k);
         crate::testing::with_mods(Vec::new().into(), || {
             assert!(mod_vocab::__private::parts_installation::validate_item_key(u32::MAX).is_err());

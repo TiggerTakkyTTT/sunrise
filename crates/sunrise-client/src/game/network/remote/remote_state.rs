@@ -52,6 +52,11 @@ impl Remote {
             .map_or(0, |c| c.total_ticks)
     }
 
+    /// The synchronized clock supplying a time-based environment layer.
+    pub(in crate::game) fn named_clock_time(&self, clock: &str) -> i64 {
+        self.clock_time(self.registries.id("minecraft:world_clock", clock))
+    }
+
     pub(in crate::game) fn overworld_clock_time(&self) -> i64 {
         self.clock_time(self.overworld_clock)
     }
@@ -110,31 +115,30 @@ impl Remote {
     /// while the keys are not known yet.
     pub(super) fn new_chat_validator(&self, sender: u128) -> (secure_chat::MessageValidator, bool) {
         let keys = self.services_keys.lock().unwrap_or_else(|e| e.into_inner());
-        let (can_validate, settled) = match &*keys {
-            ServicesKeys::Ready(_) => (true, true),
-            ServicesKeys::Missing => (false, true),
-            ServicesKeys::Pending => (false, false),
+        let certificate_keys = match &*keys {
+            ServicesKeys::Pending => {
+                return (secure_chat::MessageValidator::fallback(false), false);
+            }
+            ServicesKeys::Ready(keys) => &keys.player_certificate_keys,
         };
+        let can_validate = !certificate_keys.is_empty();
         let fallback =
             secure_chat::MessageValidator::fallback(can_validate && self.enforces_secure_chat);
-        let (ServicesKeys::Ready(keys), Some(Some((id, expires_at, key, signature)))) =
-            (&*keys, self.chat_sessions.get(&sender))
-        else {
-            if matches!(&*keys, ServicesKeys::Missing)
-                && self.chat_sessions.get(&sender).is_some_and(Option::is_some)
-            {
-                log::warn!(
-                    "Ignoring chat session from {sender:032x} due to missing Services public key"
-                );
-            }
-            return (fallback, settled);
+        let Some(Some((id, expires_at, key, signature))) = self.chat_sessions.get(&sender) else {
+            return (fallback, true);
         };
+        if !can_validate {
+            log::warn!(
+                "Ignoring chat session from {sender:032x} due to missing Services public key"
+            );
+            return (fallback, true);
+        }
         let profile_key = secure_chat::ProfileKey {
             expires_at: *expires_at,
             key: key.clone(),
             signature: signature.clone(),
         };
-        match secure_chat::ChatSession::validate(*id, profile_key, keys, sender) {
+        match secure_chat::ChatSession::validate(*id, profile_key, certificate_keys, sender) {
             Ok(session) => (secure_chat::MessageValidator::keyed(session), true),
             Err(why) => {
                 log::error!("Failed to validate profile key for player {sender:032x}: {why}");
@@ -198,6 +202,11 @@ impl Remote {
             entity.mod_fire_immune = immune;
             true
         })
+    }
+    pub(in crate::game) fn set_tracked_position(&mut self, id: i32, position: [f64; 3]) {
+        if let Some(entity) = self.entities.get_mut(&id) {
+            entity.position = position;
+        }
     }
     /// The kind and last sent position of a tracked server entity.
     pub(in crate::game) fn tracked(&self, id: i32) -> Option<(&str, [f64; 3])> {

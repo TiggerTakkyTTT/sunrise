@@ -155,11 +155,11 @@ mod tests {
     #[ignore = "daily"]
     fn a_background_save_writes_the_png_off_the_render_thread() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
-        let Ok((device, queue)) = pollster::block_on(adapter.request_device(&Default::default()))
+        let Some((device, queue)) =
+            crate::gfx::test_gpu::optional_device_with(&adapter, &Default::default())
         else {
             return;
         };

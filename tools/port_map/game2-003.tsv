@@ -134,7 +134,7 @@ Hoglin.ageBoundaryReached	port	crates/sunrise-client/src/mobs/finalize.rs::age_b
 Hoglin.checkHoglinSpawnRules	port	crates/sunrise-client/src/mobs/spawn_rules.rs::check_spawn_rules	not spawned on a nether wart block
 Hoglin.finalizeSpawn	port	crates/sunrise-client/src/mobs/finalize.rs::Ctx::finalize	20 percent start as babies
 Hoglin.mobInteract	port	crates/sunrise-client/src/game/mobs/creatures/mod.rs::Game::interact_mob	gap: minor: a fed hoglin does not become persistent
-Hoglin.finishConversion	port	crates/sunrise-client/src/mobs/piglin.rs::ai_step	zombification turns it into a zoglin with nausea
+Hoglin.finishConversion	port	crates/sunrise-client/src/mobs/piglin.rs::zombification_tick	zombification turns it into a zoglin with nausea
 Hoglin.addAdditionalSaveData	port	crates/sunrise-client/src/entity_nbt.rs::mob_to_nbt	gap: minor: CannotBeHunted is not written
 Hoglin.readAdditionalSaveData	port	crates/sunrise-client/src/entity_nbt/mob_load.rs::mob_from_nbt	gap: minor: CannotBeHunted is not read
 Hoglin.getBreedOffspring	port	crates/sunrise-client/src/game/mobs/creatures/mod.rs::Game::breed	gap: minor: the hoglin child is not made persistent

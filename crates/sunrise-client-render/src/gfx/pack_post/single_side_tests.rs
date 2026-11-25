@@ -59,6 +59,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn only_buffers_drawn_into_or_flipped_get_a_second_texture() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

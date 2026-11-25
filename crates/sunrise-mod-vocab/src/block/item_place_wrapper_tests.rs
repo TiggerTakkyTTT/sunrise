@@ -39,13 +39,13 @@ fn infinite_hand() -> ItemPlace {
 /// `place.insert` of `amount` in a transaction that commits.
 fn insert(host: &mut FakeHost, place: &ItemPlace, resource: &ItemResource, amount: u32) -> u32 {
     let host: &mut dyn ServerHost = host;
-    host.transaction(|host, tx| Ok::<_, ()>(place.insert(host, tx, resource, amount)))
+    host.transaction(|host, tx| place.insert(host, tx, resource, amount))
         .unwrap()
 }
 
 fn extract(host: &mut FakeHost, place: &ItemPlace, resource: &ItemResource, amount: u32) -> u32 {
     let host: &mut dyn ServerHost = host;
-    host.transaction(|host, tx| Ok::<_, ()>(place.extract(host, tx, resource, amount)))
+    host.transaction(|host, tx| place.extract(host, tx, resource, amount))
         .unwrap()
 }
 
@@ -178,4 +178,24 @@ fn wrappers_nest_far_deeper_than_any_stack_would_recurse() {
     assert_eq!(cloned.amount(&mut host), 1);
     drop(cloned);
     drop(deep);
+}
+
+#[test]
+fn one_by_one_caps_both_inserts_and_extracts_at_one() {
+    let (mut host, r) = host_with(&[("minecraft:dirt", 64)]);
+    let dirt = &r[0];
+    host.players
+        .get_mut(STEVE)
+        .unwrap()
+        .slots
+        .insert(3, dirt.to_stack(5).unwrap());
+    let slot = ItemPlace::PlayerSlot {
+        player: STEVE,
+        slot: 3,
+    };
+    let one = ItemPlace::OneByOne(Box::new(slot));
+    assert_eq!(insert(&mut host, &one, dirt, 4), 1);
+    assert_eq!(slots(&host), [(3, 6)]);
+    assert_eq!(extract(&mut host, &one, dirt, 4), 1);
+    assert_eq!(slots(&host), [(3, 5)]);
 }

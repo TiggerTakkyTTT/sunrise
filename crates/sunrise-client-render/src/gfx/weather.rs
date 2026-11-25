@@ -372,10 +372,7 @@ mod tests {
     #[ignore = "requires a Vulkan/Metal/DX12 adapter"]
     fn weather_shader_uvs_match_legacy_bits() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .unwrap();
+        let adapter = crate::gfx::test_gpu::adapter().unwrap();
         eprintln!("weather parity adapter: {:?}", adapter.get_info());
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();

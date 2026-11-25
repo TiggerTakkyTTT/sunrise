@@ -18,7 +18,7 @@ again restores vanilla's behaviour completely.
 | Mouse Tweaks-style controls, sort buttons | `crates/sunrise-client/src/game/interface/extras/mouse_tweaks.rs`, `game/interface/extras/sorting.rs` |
 | Sort order and its clicks | `crates/sunrise-client/src/inv_sort.rs` (pure, unit tested) |
 | The music page's rows, and the pools it filters | `options_ui.rs` (`Page::Music`), `crates/sunrise-client/src/music.rs` (`track_groups`, `MusicManager::set_off`), `sound_events.rs` (`sound_except`) |
-| The settings page | `options_ui.rs` (`Page::Extras`): **Options → Sunrise Settings... → Extras...**; fullbright, dynamic lights and hiding block-break particles are on the graphics screen's Quality page instead (`graphics_ui.rs`, **Options → Video Settings...**) |
+| The settings page | `options_ui.rs` (`Page::Extras`): **Options → Sunrise Settings... → Extras...**; fullbright, dynamic lights and hiding block-break particles are on the graphics screen's Quality page instead (`graphics_ui.rs`, **Options → Sunrise Settings... → Extras... → Sunrise Graphics...**) |
 
 The settings are grouped by extra, under a header each, one to a row, and the strip
 under the list says what the row in focus or under the pointer does. An

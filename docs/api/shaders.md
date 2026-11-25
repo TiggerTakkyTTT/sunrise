@@ -162,7 +162,7 @@ names an exact filesystem path; `shaders/` packs still use filenames.
 
 ## Shader API 0.2 (experimental)
 
-0.2 is the line for linear light and HDR ([hdr-linear-light.md](../design/hdr-linear-light.md)). A pack opts in with
+0.2 is the line for linear light and HDR. A pack opts in with
 `api = "0.2"`. `sunrise-shader check` and `pack` take it; **the game draws 0.2 packs only with
 `SUNRISE_HDR_FRAME=float` set, and the registry doesn't list them**. With the switch, a 0.2 pack draws the world
 into a float frame where the device can (else the 8-bit one): the frame follows the picked pack,
@@ -245,8 +245,7 @@ it: [the guide](../shaders.md#testing-a-pack-frame-by-frame).
 
 Experimental (API 0.1). The stages ship in the game behind pack selection; see [stability.md](stability.md). API
 0.2 is experimental too, and the game draws it only with `SUNRISE_HDR_FRAME=float`.
-While the API is experimental, a line is served until the next one is on by default: 0.1 ends when 0.2 is
-([hdr-linear-light.md](../design/hdr-linear-light.md), step 5).
+While the API is experimental, a line is served until the next one is on by default: 0.1 ends when 0.2 is.
 
 ## Not there yet
 

@@ -28,7 +28,7 @@ Fox.FoxEatBerriesGoal.pickGlowBerry	port	crates/sunrise-client/src/mobs/fox.rs::
 Fox.FoxEatBerriesGoal.pickSweetBerries	port	crates/sunrise-client/src/mobs/fox.rs::EatBerries::pick	1 or 2 berries (+1 when fully grown), the first into the mouth when empty, age back to 1
 Fox.FoxFollowParentGoal.canContinueToUse	inline	crates/sunrise-client/src/mobs/fox.rs::Wrap::can_continue	defending is never set, so only the follow-parent test remains
 Fox.FoxLookAtPlayerGoal.canContinueToUse	inline	crates/sunrise-client/src/mobs/fox.rs::Wrap::can_continue	Wrap with the faceplanted or interested test on both can_use and can_continue
-Fox.FoxMeleeAttackGoal.checkAndPerformAttack	inline	crates/sunrise-client/src/mobs/goals.rs::MeleeAttack::tick	the generic melee strike, then the fox bite at entity.fox.bite 1.0/1.0 (MeleeAttack::bite, set in fox.rs::register)
+Fox.FoxMeleeAttackGoal.checkAndPerformAttack	port	crates/sunrise-client/src/mobs/goals.rs::MeleeAttack::fox_check_and_perform_attack	replaces the base method without calling it: reset cooldown, do_hurt_target with no swing, then the fox bite at entity.fox.bite 1.0/1.0 (MeleeAttack::bite, set in fox.rs::register)
 Fox.FoxPanicGoal.shouldPanic	inline	crates/sunrise-client/src/mobs/fox.rs::register	Panic(2.2); the not-defending test is moot because defending is never set
 Fox.FoxPounceGoal.canContinueToUse	inline	crates/sunrise-client/src/mobs/fox.rs::Pounce::can_continue	target alive, still in the air or tilted 15 degrees, not faceplanted
 Fox.FoxStrollThroughVillageGoal.canFoxMove	port	crates/sunrise-client/src/mobs/fox.rs::can_fox_move	not sleeping, sitting or defending, and no target; fox.rs::can_move is Fox.canMove, a different test

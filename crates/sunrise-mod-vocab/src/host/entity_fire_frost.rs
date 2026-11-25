@@ -8,7 +8,7 @@ use crate::*;
 pub trait EntityFireFrostBackend {
     /// Side: both.
     /// `Entity.isOnFire`: not fire immune, and positive remaining fire ticks OR the
-    /// client's synced shared flag 0. Players, mobs, armor stands and items, as
+    /// client's synced shared flag 0. Players, mobs, armor stands, items and projectiles, as
     /// `entity_fire_ticks` covers, as well as other players tracked by a client.
     /// Reads this side's own immunity and fire state. None for other kinds or stale handles.
     fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool>;
@@ -20,7 +20,7 @@ pub trait EntityFireFrostBackend {
     fn entity_fire_immune(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// The ticks the entity burns for (`Entity.getRemainingFireTicks`):
-    /// players, mobs, armor stands and items.
+    /// players, mobs, armor stands, items and projectiles.
     fn entity_fire_ticks(&self, entity: EntityRef) -> Option<i32>;
     /// Side: server.
     /// Returns the entity's frozen ticks (`Entity.getTicksFrozen`).

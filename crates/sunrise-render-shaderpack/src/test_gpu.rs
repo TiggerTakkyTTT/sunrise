@@ -1,8 +1,9 @@
 //! The GPU tests' adapter and device helpers.
 //!
-//! The client render's `gfx::test_gpu` hands out the same four (`lock`, `instance`, `adapter`
-//! and `device`, each spelled the same), and its own extra helpers (the DX12 compilers, the
-//! depth-load probe) are its tests' alone, so this crate keeps only what it calls.
+//! The client render's `gfx::test_gpu` hands out the same helpers, each spelled the same and
+//! with the same missing-adapter policy (`SUNRISE_GPU_TESTS_REQUIRE_ADAPTER`), and its own
+//! extra helpers (the DX12 compilers, the depth-load probe) are its tests' alone, so this crate
+//! keeps only what it calls.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -26,16 +27,38 @@ pub(crate) fn instance() -> wgpu::Instance {
 
 /// Find an adapter, reporting an unavailable adapter without hiding other failures.
 pub(crate) fn adapter() -> Option<wgpu::Adapter> {
-    let instance = instance();
-    let adapter = match pollster::block_on(instance.request_adapter(&Default::default())) {
-        Ok(adapter) => adapter,
+    match pollster::block_on(instance().request_adapter(&Default::default())) {
+        Ok(adapter) => Some(adapter),
         Err(error @ wgpu::RequestAdapterError::NotFound { .. }) => {
+            assert!(!require_adapter(), "no GPU adapter: {error}");
             eprintln!("skipped: no adapter: {error}");
-            return None;
+            None
         }
         Err(error) => panic!("GPU test adapter request failed: {error}"),
-    };
-    Some(adapter)
+    }
+}
+
+/// CI sets this where every GPU test must run: a missing adapter or device fails instead of skipping.
+fn require_adapter() -> bool {
+    std::env::var_os("SUNRISE_GPU_TESTS_REQUIRE_ADAPTER").is_some_and(|value| value == "1")
+}
+
+/// Device creation may skip locally, but must succeed under the CI switch.
+pub(crate) fn optional_device_with(
+    adapter: &wgpu::Adapter,
+    descriptor: &wgpu::DeviceDescriptor<'_>,
+) -> Option<(wgpu::Device, wgpu::Queue)> {
+    match pollster::block_on(adapter.request_device(descriptor)) {
+        Ok(pair) => Some(pair),
+        Err(error) => {
+            assert!(
+                !require_adapter(),
+                "GPU test device creation failed: {error}"
+            );
+            eprintln!("skipped: no GPU device: {error}");
+            None
+        }
+    }
 }
 
 pub(crate) fn device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue) {

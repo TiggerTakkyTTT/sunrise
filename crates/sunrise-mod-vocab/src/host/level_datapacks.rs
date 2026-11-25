@@ -7,14 +7,26 @@ use crate::*;
 #[sunrise_mod_api_macros::host_area]
 pub trait LevelDatapacksBackend {
     /// Side: both.
-    /// The owned entry IDs (`addon:fire`) of a datapack registry, sorted by ID, as this world
-    /// last loaded them. On the logical server, both the active dimension and any loaded parked
-    /// server dimension are accepted (matching vanilla `Level.registryAccess()`); stale epochs
-    /// and unloaded dimensions return `None`. On a client these are the entries the server sent
-    /// at join and after each reload; a declared registry omitted from the snapshot is empty.
-    /// An empty list means the registry has no entries. `None` means the level or registry is
-    /// unavailable. Reads nothing from disk.
-    fn level_datapack_entries(&self, level: LevelRef, registry: &str) -> Option<Vec<String>>;
+    /// Visit borrowed entry IDs (`addon:fire`) of a datapack registry in lexical order. The
+    /// published set stays pinned for the whole visit; no registry lock is held during `visit`.
+    /// Copy an ID inside `visit` to retain it. Return `ControlFlow::Break(())` to stop early
+    /// (`Ok(Break(()))`); `Continue(())` visits the next ID.
+    ///
+    /// On the logical server, both the active dimension and any loaded parked dimension are
+    /// accepted, matching vanilla `Level.registryAccess()`. On a client these are the entries the
+    /// server last sent, and a declared registry omitted from the snapshot is empty. In
+    /// `client_level_load` the entering level reads its own configuration; in `client_level_unload`
+    /// the retiring level still reads its old configuration even if the next has already arrived.
+    /// `Ok(Continue(()))` means the visit completed, including for an empty registry.
+    /// A missing set, unknown registry, or stale or unloaded level returns
+    /// [`DatapackReadError::UnknownRegistry`]. A host without a world backend
+    /// returns [`DatapackReadError::Unavailable`]. Neither calls `visit`. Reads nothing from disk.
+    fn level_visit_datapack_entries(
+        &self,
+        level: LevelRef,
+        registry: &str,
+        visit: &mut dyn FnMut(&str) -> core::ops::ControlFlow<()>,
+    ) -> Result<core::ops::ControlFlow<()>, DatapackReadError>;
     /// Side: both.
     /// Borrow the published entry `entry` of `registry` (on a client, from the snapshot its
     /// server last sent). The active set stays pinned for the duration of `visit`, even if its
@@ -26,10 +38,12 @@ pub trait LevelDatapacksBackend {
     ///
     /// On the logical server, both the active dimension and any loaded parked server dimension
     /// are accepted, matching vanilla `Level.registryAccess()`; stale epochs and unloaded
-    /// dimensions are refused. An unavailable set, unknown or unavailable registry, or stale or
-    /// unloaded level returns [`DatapackReadError::UnknownRegistry`]; a missing entry in the
-    /// registry returns [`DatapackReadError::MissingEntry`]. A host without a backend returns
-    /// [`DatapackReadError::Unavailable`]. No error calls `visit`.
+    /// dimensions are refused. On a client, `client_level_load` reads the entering level's
+    /// configuration and `client_level_unload` reads the retiring configuration even if the next
+    /// has already arrived; the retiring client `LevelRef` stops resolving after Unload. An
+    /// unavailable set, unknown or unavailable registry, or stale or unloaded level returns
+    /// [`DatapackReadError::UnknownRegistry`]; a missing entry in the registry returns
+    /// [`DatapackReadError::MissingEntry`]. A host without a world backend returns [`DatapackReadError::Unavailable`]. No error calls `visit`.
     fn level_datapack_read(
         &self,
         level: LevelRef,

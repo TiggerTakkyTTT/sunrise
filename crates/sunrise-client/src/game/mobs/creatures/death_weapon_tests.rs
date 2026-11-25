@@ -40,6 +40,7 @@ pub(super) fn isolated() -> bool {
 
 pub(super) struct WeaponProbe {
     pub(super) expected: Option<mod_api::ItemStack>,
+    pub(super) expected_source: Option<(&'static str, i32)>,
     pub(super) swap: Option<mod_api::ItemStack>,
     pub(super) seen: Arc<Mutex<usize>>,
 }
@@ -48,9 +49,13 @@ impl mod_api::Hooks for WeaponProbe {
     fn loot_drops(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::LootDropsEvent<'_>,
+        event: &mut mod_api::LootDropsEvent<'_, '_>,
     ) {
         assert!(event.context.tool.is_none());
+        if let Some(expected) = self.expected_source {
+            let source = event.context.damage_source.unwrap();
+            assert_eq!((source.damage_type, source.causing), expected);
+        }
         assert_eq!(event.context.weapon_item(host), self.expected);
         if let Some(axe) = &self.swap {
             let source = event.context.damage_source.unwrap();
@@ -129,6 +134,7 @@ fn weapon_case(item: &str, enchantment: &str, level: u32, projectile: bool, swap
             "weapon_probe",
             Box::new(WeaponProbe {
                 expected: Some(expected),
+                expected_source: None,
                 swap: swap.then_some(axe),
                 seen: seen.clone(),
             }),
@@ -254,6 +260,7 @@ fn death_weapon_e_fall_has_no_weapon() {
             "fall_weapon_probe",
             Box::new(WeaponProbe {
                 expected: None,
+                expected_source: None,
                 swap: None,
                 seen: seen.clone(),
             }),

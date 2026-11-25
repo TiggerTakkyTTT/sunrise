@@ -39,7 +39,7 @@ fn context_entities<'a>(
         this: source_this.filter(|_| c.without_this.is_none()),
         origin: c.without_this.unwrap_or(source_pos),
         tool: None,
-        block_pos: None,
+        event_block: None,
         target,
         interacting,
     }
@@ -285,7 +285,10 @@ impl Game<'_> {
                 blocks_ok && props_ok
             }
             _ => {
-                let source = self.command_source.unwrap_or_else(|| self.player_source());
+                let source = self
+                    .command_source
+                    .clone()
+                    .unwrap_or_else(|| self.player_source());
                 // Scores are read from the holder's board only where
                 // an `entity_scores` leaf may ask.
                 let scored = adv::asks_scores(cond);
@@ -324,6 +327,9 @@ mod tests {
     /// A world with nothing in it: the entity conditions under test read none of it.
     struct Void;
     impl adv::World for Void {
+        fn is_loaded(&self, _: [i32; 3]) -> bool {
+            false
+        }
         fn dimension(&self) -> &str {
             "minecraft:overworld"
         }

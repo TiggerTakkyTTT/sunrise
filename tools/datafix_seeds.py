@@ -13,6 +13,7 @@ still upgrade and compare every world fresh inside each job's private root. When
 SUNRISE_DATAFIX_SEED_KEEP is unset, callers take the existing local generation path unchanged.
 """
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -60,8 +61,12 @@ SOURCE_FILES = (
     'tools/datafix_scene_old.py',
     'tools/datafix_seeds.py',
     'tools/datafix_worlds.py',
-    'tools/lab.py',
 )
+# tools/lab.py is shared by every harness and changes for reasons unrelated to seed worlds; the seed tools call only
+# these of its functions (tests/test_datafix_seeds.py checks the list against their `lab.` uses), so the key reads
+# those functions' text rather than the whole file.
+LAB = 'tools/lab.py'
+LAB_FUNCTIONS = ('free_port', 'offline_uuid', 'parse_varint', 'varint')
 
 
 def _worlds_module():
@@ -114,7 +119,14 @@ def required_versions():
 
 
 def source_digests(root=ROOT, files=SOURCE_FILES):
-    return {rel: hashlib.sha256((Path(root) / rel).read_bytes()).hexdigest() for rel in sorted(files)}
+    digests = {rel: hashlib.sha256((Path(root) / rel).read_bytes()).hexdigest() for rel in sorted(files)}
+    source = (Path(root) / LAB).read_text(encoding='utf-8')
+    functions = {node.name: ast.get_source_segment(source, node) for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef) and node.name in LAB_FUNCTIONS}
+    if missing := sorted(set(LAB_FUNCTIONS) - functions.keys()):
+        raise ValueError(f'{LAB} no longer defines {", ".join(missing)}, which the seed tools call')
+    digests[LAB] = hashlib.sha256(json.dumps([functions[name] for name in LAB_FUNCTIONS]).encode('utf-8')).hexdigest()
+    return digests
 
 
 def fetch_manifest(url=None):

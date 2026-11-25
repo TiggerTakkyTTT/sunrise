@@ -59,8 +59,10 @@ impl PcmFormat {
     }
 }
 
+/// `pub`, not `pub(super)`: it is `CpalDevice`'s `BackendDevice::InputConfigs`, and SDK staging
+/// widens that trait while leaving this platform-only module's items as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct InputConfigRange {
+pub struct InputConfigRange {
     pub(super) channels: u16,
     pub(super) min_rate: u32,
     pub(super) max_rate: u32,

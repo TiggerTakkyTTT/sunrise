@@ -1501,19 +1501,20 @@ mod tests {
 }";
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let adapter = crate::test_gpu::adapter()?;
         let needed =
             wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
         if !adapter.features().contains(needed) {
             return None;
         }
         eprintln!("pass parts on {}", adapter.get_info().name);
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: needed,
-            ..Default::default()
-        }))
-        .ok()
+        crate::test_gpu::optional_device_with(
+            &adapter,
+            &wgpu::DeviceDescriptor {
+                required_features: needed,
+                ..Default::default()
+            },
+        )
     }
 
     /// The pass's median and its parts' medians after 20 timed frames of light, heavy, light2.
@@ -1622,8 +1623,7 @@ mod tests {
     const SIDE: u32 = 64;
 
     fn stats_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let adapter = crate::test_gpu::adapter()?;
         let needed = wgpu::Features::TIMESTAMP_QUERY
             | wgpu::Features::PIPELINE_STATISTICS_QUERY
             | wgpu::Features::SHADER_EARLY_DEPTH_TEST;
@@ -1633,11 +1633,13 @@ mod tests {
             return None;
         }
         eprintln!("pass counters on {}", adapter.get_info().name);
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: needed,
-            ..Default::default()
-        }))
-        .ok()
+        crate::test_gpu::optional_device_with(
+            &adapter,
+            &wgpu::DeviceDescriptor {
+                required_features: needed,
+                ..Default::default()
+            },
+        )
     }
 
     struct Scene {
@@ -1779,6 +1781,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn counters_see_the_overdraw_that_draw_order_makes() {
         let _gpu = crate::test_gpu::lock();
         let Some((device, queue)) = stats_device() else {
@@ -1874,8 +1877,7 @@ mod tests {
     #[ignore = "daily"]
     fn stages_split_a_render_pass_in_a_plain_frame_and_kept_frames_hold_them() {
         let _gpu = crate::test_gpu::lock();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::test_gpu::adapter() else {
             return;
         };
         let needed = wgpu::Features::TIMESTAMP_QUERY

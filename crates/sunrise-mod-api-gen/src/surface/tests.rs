@@ -2085,12 +2085,27 @@ fn the_real_tree_exports() {
     assert!(!text.contains("\"engine_items\":"));
     let catalog = Catalog::load(&root).unwrap();
     let ids: BTreeSet<&str> = read.hooks.iter().map(|h| h.id.as_str()).collect();
+    let part_ids: BTreeMap<&str, &[String]> = read
+        .parts
+        .iter()
+        .map(|part| (part.id.as_str(), part.hooks.as_slice()))
+        .collect();
     for hook in &catalog.hooks {
         assert!(
             ids.contains(format!("hook:{}", hook.name).as_str()),
             "{}",
             hook.name
         );
+        if let Some(kind) = hook.part {
+            let part_id = format!("part:{}", part_kind_snake(kind));
+            let hook_id = format!("hook:{}", hook.name);
+            assert!(
+                part_ids
+                    .get(part_id.as_str())
+                    .is_some_and(|hooks| hooks.iter().any(|id| id == &hook_id)),
+                "{part_id} missing {hook_id} in {part_ids:?}"
+            );
+        }
     }
     assert!(read.traits.iter().any(|t| t.id == "trait:Hooks"));
     for event in read.types.iter().filter(|ty| {
@@ -2102,6 +2117,57 @@ fn the_real_tree_exports() {
     }) {
         assert!(!event.contract.constructible, "{}", event.id);
     }
+    check_direct_break_fit(&root, &read);
+}
+
+fn check_direct_break_fit(root: &Path, surface: &Surface) {
+    use mod_surface::diff::ChangeKind;
+    use mod_surface::uses::{Change, Fit, Misfit, UsesTable};
+
+    const HANDLE: &str = "handle:PlayerRef::destroy_block";
+    const BEHAVIOUR: &str = "behaviour:player_destroy_block_direct";
+    let mut uses = UsesTable::read(include_bytes!(
+        "../../../sunrise-mod-surface/tests/fixtures/occultism-0.9.0-alpha.1/uses.json"
+    ))
+    .unwrap();
+    uses.entries.retain(|entry| entry.id == HANDLE);
+    assert_eq!(uses.entries.len(), 1);
+
+    // Reconstruct the old surface: the handle signature was identical, but it did not pin
+    // the new behaviour; break_block was still version 1.
+    let mut before = surface.clone();
+    let old_handle = before.handles.iter_mut().find(|h| h.id == HANDLE).unwrap();
+    old_handle.contract.behaviour_versions.remove(BEHAVIOUR);
+    old_handle.hash = mod_surface::contract_hash(&old_handle.contract);
+    before.behaviours.retain(|b| b.id != BEHAVIOUR);
+    before
+        .hooks
+        .iter_mut()
+        .find(|h| h.id == "hook:break_block")
+        .unwrap()
+        .contract
+        .version = 1;
+    before.hash = before.document_hash();
+
+    assert_eq!(uses.fits(&uses.entries, &before).verdict, Fit::Fits);
+    assert_eq!(
+        uses.fits(&uses.entries, surface).verdict,
+        Fit::DoesNotFit(vec![Misfit {
+            id: HANDLE.into(),
+            change: Change::Changed,
+        }])
+    );
+
+    let file = "debt-p3-87-use-the-direct-player-destroy-block-path.toml";
+    let text =
+        std::fs::read_to_string(root.join("crates/sunrise-mod-vocab/changes").join(file)).unwrap();
+    let notes::NoteFile { note, ids, .. } = notes::parse(file, &text).unwrap();
+    let mut report = mod_surface::diff(&before, surface);
+    assert!(report.attach(&note, &ids).is_empty());
+    let change = report.changes.iter().find(|c| c.id == HANDLE).unwrap();
+    assert_eq!(change.kind, ChangeKind::Changed);
+    assert!(note.migrate.is_some());
+    assert_eq!(change.notes, [note]);
 }
 
 #[test]
@@ -2279,4 +2345,27 @@ fn a_hidden_type_named_only_by_an_impl_gets_its_record() {
         secret(&[(LIB, "/// A colour.", from)]).as_deref(),
         Some("type:internal::Secret")
     );
+}
+#[test]
+fn a_part_hook_is_listed_in_its_part_record() {
+    let hooks = HOOKS.replacen(
+        "neoforge = \"PingEvent\"",
+        "neoforge = \"PingEvent\",\n        part = \"item\"",
+        1,
+    );
+    let export = export_fixture(
+        &[(
+            LIB,
+            "pub trait BlockPart {}",
+            "pub trait BlockPart {}\n/// An item's part.\npub trait ItemPart {}",
+        )],
+        &hooks,
+    );
+    let part = export
+        .surface
+        .parts
+        .iter()
+        .find(|part| part.id == "part:item")
+        .expect("item part record");
+    assert_eq!(part.hooks, vec!["hook:ping".to_owned()]);
 }

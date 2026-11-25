@@ -148,8 +148,7 @@ impl Game<'_> {
             ],
             _ => [0.0; 3],
         };
-        self.audio
-            .play("minecraft:block.chest.locked", Some(at), 1.0, 1.0);
+        self.play_audio("minecraft:block.chest.locked", Some(at), 1.0, 1.0);
         true
     }
     /// ShulkerBoxSlot.mayPlace: no shulker box inside a shulker box.
@@ -302,7 +301,7 @@ impl Game<'_> {
         // `Audio::play` captures the sound while the world is open to the
         // network and `lan_broadcast_effects` sends that tick to every guest,
         // so nothing is queued separately (a second queue played it twice).
-        self.audio.play(sound, Some(at), 0.5, pitch);
+        self.play_audio(sound, Some(at), 0.5, pitch);
     }
     /// Play the current block's sound when its opener count crosses zero
     /// (`ContainerOpenersCounter.onOpen` / `onClose`).

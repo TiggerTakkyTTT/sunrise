@@ -180,11 +180,8 @@ impl Game<'_> {
         // if its new root/seat is reached later in this pass.
         self.resident_entities.general.riders.ticked[index] = true;
         let kind = pass.catalog.key(slot);
-        let ticks = !pass.round.listening() || self.native_tick_pre_one(&mut pass.round, id, kind);
+        let ticks = !pass.round.pre() || self.native_tick_pre_one(&mut pass.round, id, kind);
         if !general_row_live(self, index, mount) {
-            if ticks {
-                pass.round.not_ticked(id);
-            }
             return None;
         }
         if ticks || mount.is_some() {
@@ -196,7 +193,7 @@ impl Game<'_> {
             {
                 self.dispatch_general_tick(kind, epoch, id);
             }
-            if pass.round.listening() {
+            if pass.round.post() {
                 self.native_tick_post_one(&pass.round, id, kind);
             }
         }
@@ -253,7 +250,7 @@ impl Game<'_> {
     /// transaction. A panic aborts the row's writes without unbalancing the pass.
     fn dispatch_general_tick(&mut self, kind: &str, epoch: mod_api::WorldEpoch, id: u32) {
         let failures = mod_api::runtime::isolated_failures();
-        let _ = mod_api::run_transaction(self, |game, _| {
+        let _ = self.storage_transaction(|game, _| {
             game.tick_general_row_scoped(kind, EntityRef::new(epoch, id));
             if mod_api::runtime::isolated_failures() == failures {
                 Ok(())

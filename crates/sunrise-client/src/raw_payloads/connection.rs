@@ -35,6 +35,19 @@ impl Epoch {
     pub fn active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
+    /// The send test of this epoch, before any bytes: still active, and `id` declared, in this
+    /// direction and negotiated with the peer for its phase.
+    pub fn can_send(&self, id: &mod_api::PayloadId) -> Result<(), PayloadSendError> {
+        if !self.active() {
+            return Err(PayloadSendError::StaleEpoch);
+        }
+        self.peer.can_send(self.phase, id)
+    }
+    /// Whether [`Self::can_send`] passes, decided the same way without building its error:
+    /// nothing is allocated, also when the answer is no.
+    pub fn sends(&self, id: &str) -> bool {
+        self.active() && self.peer.send_refusal(self.phase, id).is_none()
+    }
     /// Atomically publish against invalidation. The closure may only perform nonblocking
     /// queue publication, never user callbacks, waits or connection-state operations.
     pub fn with_active<T>(&self, publish: impl FnOnce() -> T) -> Option<T> {

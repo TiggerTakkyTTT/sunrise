@@ -30,8 +30,6 @@ tools/port_map/client-002.tsv	ClientPacketListener.handleOpenScreen	crates/sunri
 tools/port_map/client-002.tsv	ClientPacketListener.isAcceptingMessages	crates/sunrise-client/src/game/network/remote/mod.rs::Game::send_chat
 tools/port_map/client-002.tsv	MultiPlayerGameMode.handleCreativeModeItemDrop	crates/sunrise-client/src/game/network/remote/mod.rs::Game::remote_creative_drop
 tools/port_map/client-003.tsv	BlockStatePredictionHandler.updateKnownServerState	crates/sunrise-client/src/game/network/remote/mod.rs::Game::server_block
-tools/port_map/client-003.tsv	ChatListener.handleMessage	crates/sunrise-client/src/game/network/remote/mod.rs::handle_player_chat
-tools/port_map/client-003.tsv	ChatListener.showMessageToPlayer	crates/sunrise-client/src/game/network/remote/mod.rs::Game::chat_line
 tools/port_map/client-004.tsv	HumanoidMobRenderer.getEquipmentIfRenderable	crates/sunrise-client/src/mobs/render.rs::humanoid_armor
 tools/port_map/client-005.tsv	HumanoidArmorLayer.getArmorModel	crates/sunrise-client/src/mobs/render.rs::humanoid_armor
 tools/port_map/client-005.tsv	HumanoidArmorLayer.renderArmorPiece	crates/sunrise-client/src/mobs/render.rs::humanoid_armor
@@ -159,7 +157,6 @@ tools/port_map/game-003.tsv	ClockTimeMarker.occursAt	crates/sunrise-client/src/g
 tools/port_map/game-003.tsv	ClockTimeMarker.resolveTimeToMoveTo	crates/sunrise-client/src/game/interface/chat.rs::TimeMarker::resolve
 tools/port_map/game-003.tsv	ServerClockManager.getInstance	crates/sunrise-client/src/game/administration/commands/mod.rs::Game::command_clock_time
 tools/port_map/game-003.tsv	ServerPlayerGameMode.destroyAndAck	crates/sunrise-client/src/game/network/lan_actions/mod.rs::Game::lan_guest_packet
-tools/port_map/game-004.tsv	Display.setTransformation	crates/sunrise-client/src/game/modding/native_entities.rs::Game::native_set_display
 tools/port_map/game-004.tsv	InfestedMobEffect.spawnSilverfish	crates/sunrise-client/src/game/items/potions.rs::Game::infested_hurt
 tools/port_map/game-004.tsv	MobEffectInstance.onMobHurt	crates/sunrise-client/src/game/items/potions.rs::Game::infested_hurt
 tools/port_map/game-005.tsv	Entity.canCollideWith	crates/sunrise-client/src/game/mobs/ghasts.rs::Game::player_entity_collisions
@@ -187,8 +184,6 @@ tools/port_map/game-006.tsv	Mob.attemptToShearEquipment	crates/sunrise-client/sr
 tools/port_map/game-006.tsv	Mob.enchantSpawnedEquipment	crates/sunrise-client/src/game/mobs/mob_gear.rs::Game::enchant_slot
 tools/port_map/game-006.tsv	Mob.shearItem	crates/sunrise-client/src/game/mobs/mounts.rs::Game::shear_pig_saddle
 tools/port_map/game-007.tsv	GoAndGiveItemsToTarget.tick	crates/sunrise-client/src/game/mobs/allays.rs::allay_deliver
-tools/port_map/game-010.tsv	PoiTypes.bootstrap	crates/sunrise-client/src/save.rs::poi_type
-tools/port_map/game-010.tsv	PoiTypes.registerBlockStates	crates/sunrise-client/src/save.rs::poi_type
 tools/port_map/game-010.tsv	VillagerHostilesSensor.isClose	crates/sunrise-client/src/mobs/villager_brain.rs::hostile_distance
 tools/port_map/game-011.tsv	AbstractHorse.setOffspringAttribute	crates/sunrise-client/src/mobs/equine.rs::inherit
 tools/port_map/game-011.tsv	Salmon.getDefaultDimensions	crates/sunrise-client/src/mobs/living.rs::Mob::awake_dims_in
@@ -289,7 +284,6 @@ tools/port_map/game2-017.tsv	CrafterBlockEntity.setSlotState	crates/sunrise-clie
 tools/port_map/game2-019.tsv	ChunkGeneratorStructureState.createForFlat	crates/sunrise-world/src/worldgen/generator.rs::OverworldGenerator::flat
 tools/port_map/game2-020.tsv	SectionStorage.flushAll	crates/sunrise-client/src/game/saving.rs::Game::save_level
 tools/port_map/game2-020.tsv	SectionStorage.setDirty	crates/sunrise-client/src/game/world_update.rs::Game::update_world
-tools/port_map/game2-020.tsv	SimpleRegionStorage.write	crates/sunrise-client/src/save.rs::SaveDir::queue
 tools/port_map/game2-023.tsv	LootTable.getAvailableSlots	crates/sunrise-world/src/loot.rs::LootData::fill_with
 tools/port_map/gui-inventory-1.tsv	AbstractContainerScreen.onMouseClickAction	crates/sunrise-client/src/game.rs::Game::menu_ops
 tools/port_map/gui-inventory-1.tsv	AbstractContainerScreen.recalculateQuickCraftRemaining	crates/sunrise-client/src/menu.rs::Menu::quick_craft_preview

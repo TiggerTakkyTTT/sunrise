@@ -1,5 +1,4 @@
 //! The `shader_params` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0096
 
 pub trait Hooks {
     /// The values native mods hand their shader packs in this frame,

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 type Observation = (String, i32, i32, Option<u32>);
 struct Probe(Arc<Mutex<Vec<Observation>>>);
-// Cancel one invocation without leaving anything for the retry to inherit.
+// Veto the first death; the next victim must still reach the drop hook.
 struct CancelOnce(std::sync::atomic::AtomicBool);
 #[mod_api::__subscriptions]
 impl mod_api::Hooks for CancelOnce {
@@ -24,7 +24,7 @@ impl mod_api::Hooks for Probe {
     fn loot_drops(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::LootDropsEvent<'_>,
+        event: &mut mod_api::LootDropsEvent<'_, '_>,
     ) {
         let source = event.context.damage_source.unwrap();
         assert!(event.context.tool.is_none(), "entity context has no TOOL");
@@ -55,8 +55,15 @@ impl mod_api::Hooks for Probe {
 #[test]
 #[ignore = "daily"]
 fn death_loot_uses_call_scoped_source_and_hand() {
-    use crate::game::native_entity_refs::tests::with_game;
+    use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game};
     use sunrise_client::mobs::{Damage, DamageKind, Who};
+    if run_fresh_cases(
+        "game::creatures::death_loot_context_tests::death_loot_uses_call_scoped_source_and_hand",
+        "SUNRISE_DEATH_LOOT_CONTEXT_CHILD",
+        &["damage_sources"],
+    ) {
+        return;
+    }
     with_game(|game| {
         let loot = sunrise_world::loot::LootData::load(
             &game.options.resources,
@@ -131,13 +138,16 @@ fn death_loot_uses_call_scoped_source_and_hand() {
                 let victim = game.mobs.iter_mut().find(|m| m.id == id).unwrap();
                 victim.invulnerable_flag = false;
                 victim.invulnerable = 0;
+                let before = seen.lock().unwrap().len();
                 assert!(game.mob_hits_mob(id, 1000.0, Damage::fall()));
-                let victim = game.mobs.iter().find(|m| m.id == id).unwrap().clone();
-                game.mob_die(&victim);
+                assert_eq!(
+                    seen.lock().unwrap()[before..],
+                    [("minecraft:fall".to_owned(), 0, 0, None)],
+                );
             }
             // IDs belong to the killing blow, not a lookup of a surviving mob.
             game.mobs.retain(|m| m.id != 41);
-            let mut victim = Mob::new(73, ty, Vec3::ZERO, 0.0);
+            let mut victim = Mob::new(73, ty.clone(), Vec3::ZERO, 0.0);
             let mut damage = Damage::of(DamageKind::Arrow);
             damage.attacker = Some(Who::Mob(41));
             victim.last_damage = Some((damage, 0));
@@ -149,17 +159,18 @@ fn death_loot_uses_call_scoped_source_and_hand() {
                         as Box<dyn mod_api::Hooks>,
                 ),
                 mod_api::ModEntry::new(
-                    "retry_probe",
+                    "cancellation_probe",
                     Box::new(Probe(seen.clone())) as Box<dyn mod_api::Hooks>,
                 ),
             ]
             .into();
             mod_platform::testing::with_mods(mods, || {
                 let before = seen.lock().unwrap().len();
-                game.mob_die(&victim);
+                game.mobs.push(Mob::new(78, ty.clone(), Vec3::ZERO, 0.0));
+                assert!(game.mob_hits_mob(78, 1000.0, Damage::fall()));
                 assert_eq!(seen.lock().unwrap().len(), before);
-                victim.last_damage = Some((Damage::fall(), 1));
-                game.mob_die(&victim);
+                game.mobs.push(Mob::new(79, ty, Vec3::ZERO, 0.0));
+                assert!(game.mob_hits_mob(79, 1000.0, Damage::fall()));
                 assert_eq!(seen.lock().unwrap().len(), before + 1);
             });
         });
@@ -200,7 +211,7 @@ impl mod_api::Hooks for ChangeKillerHand {
     fn loot_drops(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::LootDropsEvent<'_>,
+        event: &mut mod_api::LootDropsEvent<'_, '_>,
     ) {
         assert!(event.context.tool.is_none());
         let entity = host
@@ -298,7 +309,7 @@ impl mod_api::Hooks for Nested {
     fn loot_drops(
         &self,
         host: &mut dyn mod_api::ServerHost,
-        event: &mut mod_api::LootDropsEvent<'_>,
+        event: &mut mod_api::LootDropsEvent<'_, '_>,
     ) {
         if event.context.entity.map(|e| e.0) != Some(90) {
             return;
@@ -366,7 +377,11 @@ fn death_loot_nested_death_keeps_outer_context() {
 struct BlockTool(mod_api::ItemStack);
 #[mod_api::__subscriptions]
 impl mod_api::Hooks for BlockTool {
-    fn loot_drops(&self, _: &mut dyn mod_api::ServerHost, event: &mut mod_api::LootDropsEvent<'_>) {
+    fn loot_drops(
+        &self,
+        _: &mut dyn mod_api::ServerHost,
+        event: &mut mod_api::LootDropsEvent<'_, '_>,
+    ) {
         assert!(event.context.damage_source.is_none());
         assert!(event.context.block.is_some());
         assert_eq!(event.context.tool, Some(&self.0));

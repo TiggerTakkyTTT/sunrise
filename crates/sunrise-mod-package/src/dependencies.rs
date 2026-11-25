@@ -51,11 +51,6 @@ pub enum Error {
         target: String,
         note: String,
     },
-    NoApi {
-        owner: String,
-        target: String,
-        note: String,
-    },
     CargoConflict {
         owner: String,
         target: String,
@@ -100,16 +95,6 @@ impl fmt::Display for Error {
                 target,
                 note,
             } => write!(f, "{owner} requires missing mod {target}{note}"),
-            Self::NoApi {
-                owner,
-                target,
-                note,
-            } => {
-                write!(
-                    f,
-                    "{owner} depends on {target}, which has no [api] package{note}"
-                )
-            }
             Self::CargoConflict { owner, target } => {
                 write!(
                     f,
@@ -204,12 +189,12 @@ fn parse(owner: &str, value: Option<&toml::Value>) -> Result<Vec<Dependency>, Er
     ))
 }
 
+/// A package in the logical dependency graph or the native build's link graph.
 #[derive(Clone)]
 pub struct Mod<'a> {
     pub id: &'a str,
     pub version: &'a Version,
-    pub has_api: bool,
-    /// Code declarations also participate in physical library linking.
+    /// `true` for a native package. Content-only packages have no library to link.
     pub code: bool,
     pub dependencies: &'a [Dependency],
 }
@@ -246,10 +231,9 @@ pub fn resolve(mods: &[Mod<'_>]) -> Result<Resolution, Error> {
 
 /// Physical library order, independent of manifest validation/dispatch overrides.
 ///
-/// Only library requirements enter this projection. A supplied code dependency
-/// needs an API package; content targets (`code = false`) are skipped. Version
-/// ranges and dispatch order are logical rules; Cargo and the native linker
-/// still enforce actual imports and ABI requirements.
+/// Only edges between supplied native packages enter this projection. Content-only
+/// packages have no library to link. Version ranges and dispatch order are logical
+/// rules; Cargo and the native linker enforce actual imports and ABI requirements.
 pub fn resolve_links(mods: &[Mod<'_>]) -> Result<Resolution, Error> {
     resolve_all(mods, &[], &[], &Overrides::default(), true)
 }
@@ -367,15 +351,11 @@ pub fn resolve_manifests(
     let inputs: Vec<_> = manifests
         .iter()
         .zip(&declared)
-        .map(|(manifest, dependencies)| {
-            let code = manifest.native.is_some();
-            Mod {
-                id: &manifest.id,
-                version: &manifest.version,
-                has_api: code,
-                code,
-                dependencies,
-            }
+        .map(|(manifest, dependencies)| Mod {
+            id: &manifest.id,
+            version: &manifest.version,
+            code: manifest.native.is_some(),
+            dependencies,
         })
         .collect();
     let rules: Vec<_> = manifests
@@ -560,13 +540,6 @@ fn resolve_all(
             let other = &mods[target];
             if links && !other.code {
                 continue;
-            }
-            if item.code && other.code && (!item.has_api || !other.has_api) {
-                return Err(Error::NoApi {
-                    owner: item.id.into(),
-                    target: dep.id.clone(),
-                    note,
-                });
             }
             if !links
                 && (crate::manifest::is_unresolved(other.version)
@@ -831,7 +804,6 @@ mod tests {
         Mod {
             id,
             version: Box::leak(Box::new(crate::manifest::parse_version(version).unwrap())),
-            has_api: true,
             code: true,
             dependencies,
         }
@@ -890,37 +862,104 @@ mod tests {
     }
 
     #[test]
-    fn declaration_boundaries_apply_to_dependencies_and_pair_rules() {
+    fn long_policy_reasons_are_preserved_for_dependencies_and_pair_rules() {
+        let reason = "Some context. ".repeat(100);
+        let entry = format!("target={{version='^1',reason='{reason}'}}");
+        let source = manifest(
+            "owner",
+            &format!("[dependencies]\n{entry}\n[incompatible]\n{entry}\n[discouraged]\n{entry}"),
+        );
+        let dependency = from_manifest(&source.dependencies, Side::Client);
+        assert_eq!(dependency[0].reason.as_deref(), Some(reason.as_str()));
+        let pairs = rules(&source, Side::Client);
+        assert_eq!(pairs.len(), 2);
+        for rule in pairs {
+            assert_eq!(rule.reason.as_deref(), Some(reason.as_str()));
+        }
+    }
+
+    #[test]
+    fn policy_schema_errors_are_refused_when_the_manifest_is_parsed() {
+        let assert_location = |result: Result<crate::Manifest, String>, line, column| {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains(&format!(" (line {line}, column {column})")),
+                "{error}"
+            );
+        };
         for table in ["dependencies", "incompatible", "discouraged"] {
             let manifest = |entry: &str| {
                 crate::Manifest::parse(&format!(
-                    "id='owner'\nname='Owner'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n[{table}]\n{entry}"
+                    "id='owner'\nname='Owner'\nversion='1'\n[{table}]\n{entry}"
                 ))
             };
-            assert!(
-                manifest(&format!(
-                    "target={{version='^1',reason='{}',url='https://example.test'}}",
-                    "a".repeat(512)
-                ))
-                .is_ok()
+            assert_location(
+                manifest("target={version='^1',url='http://example.test'}"),
+                5,
+                26,
             );
-            let error = manifest(&format!(
-                "target={{version='^1',reason='{}'}}",
-                "a".repeat(513)
-            ))
-            .unwrap_err();
-            assert!(error.contains("target") && error.contains("reason over 512 bytes"));
-            assert!(
-                manifest("target={version='^1',url='http://example.test'}")
-                    .unwrap_err()
-                    .contains("url is not https://")
+            assert_location(
+                crate::Manifest::parse(&format!(
+                    "id='owner'\nname='Owner'\nversion='1'\n[{table}.target]\nversion='^1'\nreason='Why'\nurl='http://example.test'\n"
+                )),
+                7,
+                5,
             );
-            assert!(
-                manifest("'bad id'='^1'")
-                    .unwrap_err()
-                    .contains("invalid dependency id")
-            );
+            assert_location(manifest("target={version='^1',reason=42}"), 5, 29);
+            assert_location(manifest("'bad id'='^1'"), 5, 1);
             assert!(manifest("target='not a semver requirement'").is_err());
+        }
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\nload_before = ['first', 'bad id']\n",
+            ),
+            4,
+            25,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n\
+                 dependencies = { first = { version = '*', url = 'https://a.test' }, second = { version = '*', url = 'http://b.test' } }\n",
+            ),
+            4,
+            101,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n[dependencies]\ntarget={optional=true}\n",
+            ),
+            5,
+            8,
+        );
+        assert_location(
+            crate::Manifest::parse(
+                "id='owner'\nname='Owner'\nversion='1'\n[dependencies.target]\noptional=true\n",
+            ),
+            4,
+            1,
+        );
+    }
+
+    #[test]
+    fn positional_policy_arrays_are_refused() {
+        for (table, fields) in [
+            (
+                "dependencies",
+                "'^1', false, 'both', 'Context', 'https://example.test', 'after'",
+            ),
+            (
+                "incompatible",
+                "'<2', 'Conflicts', 'https://example.test/old', 'client'",
+            ),
+            (
+                "discouraged",
+                "'*', 'Slow', 'https://example.test/slow', 'server'",
+            ),
+        ] {
+            let parsed = crate::Manifest::parse(&format!(
+                "id='owner'\nname='Owner'\nversion='1'\n[{table}]\ntarget = [{fields}]"
+            ));
+            assert!(parsed.is_err(), "{table} accepted an array");
         }
     }
 
@@ -974,14 +1013,12 @@ mod tests {
             Mod {
                 id: &addon.id,
                 version: &addon.version,
-                has_api: false,
                 code: false,
                 dependencies: &dependencies,
             },
             Mod {
                 id: &base.id,
                 version: &base.version,
-                has_api: false,
                 code: false,
                 dependencies: &[],
             },
@@ -991,7 +1028,6 @@ mod tests {
         let incompatible = Mod {
             id: "base",
             version: &Version::new(2, 0, 0),
-            has_api: false,
             code: false,
             dependencies: &[],
         };
@@ -1009,7 +1045,6 @@ mod tests {
                 Mod {
                     id: "base",
                     version: &Version::new(1, 0, 0),
-                    has_api: false,
                     code: false,
                     dependencies: &back
                 }
@@ -1126,6 +1161,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_supplied_native_packages_contribute_link_edges() {
+        let required = deps("[dependencies]\nlibrary='^1'\ndata='^1'");
+        let mods = [
+            item("consumer", "1", &required),
+            item("library", "1", &[]),
+            Mod {
+                id: "data",
+                version: &Version::new(1, 0, 0),
+                code: false,
+                dependencies: &[],
+            },
+        ];
+        assert_eq!(resolve_links(&mods).unwrap().order, [1, 0, 2]);
+        assert_eq!(resolve(&mods).unwrap().order, [1, 2, 0]);
+    }
+
     fn manifest(id: &str, extra: &str) -> crate::Manifest {
         crate::Manifest::parse(&format!(
             "id='{id}'\nname='{id}'\nversion='1'\napi='0.2'\ncapabilities=['registries']\n{extra}"
@@ -1178,7 +1230,6 @@ mod tests {
         let code = Mod {
             id: &dependent.id,
             version: &dependent.version,
-            has_api: true,
             code: true,
             dependencies: &build,
         };
@@ -1374,18 +1425,11 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_no_api() {
+    fn malformed_dependency_is_refused() {
         let value: toml::Table = "[dependencies]\nbase = { version = '^1', optional = 'yes' }"
             .parse()
             .unwrap();
         assert!(parse("user", value.get("dependencies")).is_err());
-        let required = deps("[dependencies]\nbase = '^1'");
-        let mut base = item("base", "1.0.0", &[]);
-        base.has_api = false;
-        assert!(matches!(
-            resolve_links(&[item("user", "1.0.0", &required), base]),
-            Err(Error::NoApi { .. })
-        ));
     }
 
     #[test]

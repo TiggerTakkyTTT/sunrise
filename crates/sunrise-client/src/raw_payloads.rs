@@ -414,33 +414,63 @@ impl Peer {
     }
     /// Resolve local authority, phase, direction and peer support before preparing bytes.
     pub fn can_send(&self, phase: Phase, id: &PayloadId) -> Result<(), PayloadSendError> {
+        match self.send_refusal(phase, &id.0) {
+            None => Ok(()),
+            Some(refusal) => Err(refusal.error(&id.0)),
+        }
+    }
+    /// The decision behind [`Self::can_send`], without building the owned error: `None` when
+    /// `id` may be sent in `phase`. It allocates nothing, so a refusal is cheap to ask for.
+    pub fn send_refusal(&self, phase: Phase, id: &str) -> Option<SendRefusal> {
         // A raw channel needs no peer declaration: it goes to any client in play.
-        if self.local.is_raw(&id.0) {
+        if self.local.is_raw(id) {
             return match (phase, self.side) {
-                (Phase::Play, Side::Server) => Ok(()),
-                (Phase::Configuration, _) => Err(PayloadSendError::WrongProtocol(id.clone())),
-                (_, Side::Client) => Err(PayloadSendError::WrongDirection(id.clone())),
+                (Phase::Play, Side::Server) => None,
+                (Phase::Configuration, _) => Some(SendRefusal::WrongProtocol),
+                (_, Side::Client) => Some(SendRefusal::WrongDirection),
             };
         }
-        let flow = self.local.declarations[index(phase)]
-            .get(&id.0)
-            .ok_or_else(|| self.missing(phase, &id.0))?;
+        let Some(flow) = self.local.declarations[index(phase)].get(id) else {
+            return Some(self.missing_refusal(phase, id));
+        };
         if *flow != Flow::Bidirectional && *flow != self.side.outgoing() {
-            return Err(PayloadSendError::WrongDirection(id.clone()));
+            return Some(SendRefusal::WrongDirection);
         }
-        if !self.phases[index(phase)].contains_key(&id.0) {
-            return Err(PayloadSendError::UnsupportedPeer(id.clone()));
+        if !self.phases[index(phase)].contains_key(id) {
+            return Some(SendRefusal::UnsupportedPeer);
         }
-        Ok(())
+        None
     }
     fn missing(&self, phase: Phase, id: &str) -> PayloadSendError {
-        let id = PayloadId(id.to_owned());
-        if self.local.declarations[index(phase)].contains_key(&id.0) {
-            PayloadSendError::UnsupportedPeer(id)
-        } else if self.local.owns(&id.0) {
-            PayloadSendError::WrongProtocol(id)
+        self.missing_refusal(phase, id).error(id)
+    }
+    fn missing_refusal(&self, phase: Phase, id: &str) -> SendRefusal {
+        if self.local.declarations[index(phase)].contains_key(id) {
+            SendRefusal::UnsupportedPeer
+        } else if self.local.owns(id) {
+            SendRefusal::WrongProtocol
         } else {
-            PayloadSendError::UnknownPayload(id)
+            SendRefusal::UnknownPayload
+        }
+    }
+}
+/// Why a channel cannot be sent on, before the owned [`PayloadSendError`] names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendRefusal {
+    UnknownPayload,
+    WrongProtocol,
+    WrongDirection,
+    UnsupportedPeer,
+}
+impl SendRefusal {
+    /// The send path's error for channel `id`.
+    pub fn error(self, id: &str) -> PayloadSendError {
+        let id = PayloadId(id.to_owned());
+        match self {
+            Self::UnknownPayload => PayloadSendError::UnknownPayload(id),
+            Self::WrongProtocol => PayloadSendError::WrongProtocol(id),
+            Self::WrongDirection => PayloadSendError::WrongDirection(id),
+            Self::UnsupportedPeer => PayloadSendError::UnsupportedPeer(id),
         }
     }
 }

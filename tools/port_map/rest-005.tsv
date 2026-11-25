@@ -28,7 +28,7 @@ IntegratedServer.processPacketsAndTick	skip:debug		gizmo collector for debug dra
 IntegratedServer.fillServerSystemReport	skip:debug		system report for crash reports
 IntegratedServer.getPersonalGameMode	port	crates/sunrise-client/src/game/world/integrated.rs::Game::server_options	owner's game mode, read from the guest record
 IntegratedServer.updateGameModeBasedOnPermission	inline	crates/sunrise-client/src/game/network/lan/mod.rs::Game::lan_guest_joined	gap: player: a guest already in the world keeps their mode when force-gamemode or the default mode changes; only a join applies it
-IntegratedServer.updatePermissions	port	crates/sunrise-client/src/lan/hub.rs::Hub::resend_commands	permission level and commands sent to every guest
+IntegratedServer.updatePermissions	port	crates/sunrise-client/src/game/modding/native_server.rs::Game::resend_commands_filtered	permission level and commands sent to every guest
 IntegratedServer.setDefaultGameType	port	crates/sunrise-client/src/game/network/lan/mod.rs::Game::set_default_game_mode
 IntegratedServer.isSingleplayerOwner	port	crates/sunrise-client/src/lan/hub.rs::Hub::player_info	the owner is kept by uuid on the hub, and player_info marks the guest it names
 IntegratedServer.getScaledTrackingDistance	inline	crates/sunrise-client/src/game/network/lan/mod.rs::Game::tick_lan	the Entity Distance option becomes the hub's entity range percent for an integrated or LAN host

@@ -1,5 +1,0 @@
-manifest:
-refused: sunrise-mod.toml: rule for other: reason over 512 bytes
-
-icon:
-unavailable

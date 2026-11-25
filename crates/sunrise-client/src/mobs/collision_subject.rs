@@ -1,3 +1,4 @@
+use crate::items::EntityTypeTags;
 use sunrise_world::{
     collision_context::{CollisionContext, CollisionEntity, EntityContextKind},
     entity_obstruction::EntityIdentity,
@@ -7,11 +8,12 @@ impl super::Mob {
     /// The live mob context for `Level.findSupportingBlock`.
     pub fn support_collision(
         &self,
+        tags: Option<&EntityTypeTags>,
     ) -> (
         CollisionContext<'_>,
         crate::collisions::PowderSnowSubject<'_>,
     ) {
-        let subject = self.collision_subject();
+        let subject = self.collision_subject(tags);
         let context = CollisionContext::for_entity(
             CollisionEntity {
                 identity: EntityIdentity(u64::from(self.id)),
@@ -25,11 +27,19 @@ impl super::Mob {
         (context, subject)
     }
 
-    pub(super) fn collision_subject(&self) -> crate::collisions::PowderSnowSubject<'_> {
+    pub(super) fn collision_subject(
+        &self,
+        tags: Option<&EntityTypeTags>,
+    ) -> crate::collisions::PowderSnowSubject<'_> {
         use sunrise_world::collision_context::CollisionItem;
         crate::collisions::PowderSnowSubject {
             fall_distance: self.fall_distance,
-            walkable_type: self.kind.flags.powder_snow_walkable,
+            walkable_type: tags.is_some_and(|tags| {
+                tags.has_bit(
+                    self.kind.flags.entity_tag_slot,
+                    EntityTypeTags::POWDER_SNOW_WALKABLE,
+                )
+            }),
             leather_boots: self
                 .extra
                 .slot_stack(sunrise_items::equipment::FEET)

@@ -256,8 +256,7 @@ impl Game<'_> {
                 VaultEvent::BlockUpdated => self.mark_block_entity_updated(key),
                 VaultEvent::LevelEvent(id, data) => self.level_event_at(id, pos, data),
                 VaultEvent::Sound(name, volume, pitch) => {
-                    self.audio
-                        .play(&format!("minecraft:{name}"), Some(center), volume, pitch)
+                    self.play_audio(&format!("minecraft:{name}"), Some(center), volume, pitch)
                 }
                 // Vec3.atBottomCenterOf(pos).relative(UP, 1.2), lowered by spawnItem.
                 VaultEvent::Eject(stack, v) => {
@@ -302,6 +301,11 @@ impl Game<'_> {
         alpha: f64,
         mut draw: impl FnMut(BlockItemDraw),
     ) {
+        let _items = sunrise_client::spans::raw_flight_guard("block_entity_items");
+        let reach = Reach::Default;
+        sunrise_client::spans::note_block_entity_item_visits(|| {
+            self.world.block_entities.len() as u64
+        });
         for (key, entity) in &self.world.block_entities {
             let BlockEntity::Vault(vault) = entity else {
                 continue;
@@ -309,7 +313,7 @@ impl Game<'_> {
             let Some(stack) = &vault.display_item else {
                 continue;
             };
-            if !Reach::Default.should_render([key.0, key.1, key.2], camera, 0) {
+            if !reach.should_render([key.0, key.1, key.2], camera, 0) {
                 continue;
             }
             let state = self.resolve_item(stack, DisplayContext::Ground, None, 0);

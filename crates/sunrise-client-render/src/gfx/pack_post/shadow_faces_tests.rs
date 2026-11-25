@@ -66,6 +66,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn shadow_pass_draws_terrain_back_faces() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };
@@ -86,6 +87,7 @@ fn shadow_pass_draws_terrain_back_faces() {
             atlas: None,
             ids: None,
             cull: true,
+            pages: false,
         }),
     );
     assert!(post.has_shadow(), "{:?}", post.notes);

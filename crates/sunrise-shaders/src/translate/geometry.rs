@@ -36,6 +36,7 @@ pub fn translate_geometry(
     geometry: &Preprocessed,
     fragment: &Preprocessed,
     inputs: &GeometryInputs,
+    limits: naga::front::glsl::InterfaceLimits,
 ) -> Result<(Program, u32), Vec<Error>> {
     let (combined, triangles) = combine(vertex, geometry, inputs)?;
     let mut gbuffers = inputs.inputs.clone();
@@ -52,7 +53,14 @@ pub fn translate_geometry(
     // The vertex's place isn't the fragment's through a geometry stage.
     gbuffers.water_patches = false;
     gbuffers.attributes = Vec::new();
-    let program = super::translate(&combined, fragment, Target::Buffers, Some(&gbuffers), true)?;
+    let program = super::translate(
+        &combined,
+        fragment,
+        Target::Buffers,
+        Some(&gbuffers),
+        true,
+        limits,
+    )?;
     Ok((program, triangles))
 }
 
@@ -677,6 +685,7 @@ mod tests {
             &pp("shadow.gsh"),
             &pp("shadow.fsh"),
             &inputs,
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
         )
     }
 

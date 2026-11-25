@@ -200,9 +200,8 @@ mod tests {
     use super::*;
 
     fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        let (_, device, queue) = crate::gfx::test_gpu::optional_device()?;
+        Some((device, queue))
     }
 
     fn buffer(device: &wgpu::Device, usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -215,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn writes_after_a_frame_on_the_thread_land_after_it() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device() else {

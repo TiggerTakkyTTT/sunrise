@@ -10,10 +10,11 @@ pub trait Hooks {
     /// `has_mod_renderer` tell what renderers this load built. A target that is no living entity
     /// type is refused by name. Asked on the client on every resource load, the first one and each
     /// reload, after the renderers resolve (`register_entity_renderers`): layers don't carry over
-    /// from one load to the next, so add them again each time. In the ordered body pass,
+    /// from one load to the next, so add them again each time. A mod's layer that panics in
+    /// `submit` stays disabled when re-added with the same `Arc`. In the ordered body pass,
     /// layers submit in level join order, interleaved with general entity renderer submissions.
-    /// If this listener panics, none of its registrations take effect; later listeners still
-    /// register in the same order.
+    /// If this registration listener panics, none of its registrations take effect; later
+    /// listeners still register in the same order.
     #[notes = r#"## Entity layers
 
 An entity layer (NeoForge's `EntityRenderersEvent.AddLayers` and `RenderLayer`) draws over a living entity
@@ -62,9 +63,10 @@ fn register_entity_layers(
 }
 ```
 
-The event tells what renderers this load built: `entity_types()` lists every entity type with a renderer,
-`is_living(type)` says whether it is a living entity's, `player_models()` lists `Wide` and `Slim`, and
-`has_mod_renderer(type)` whether a mod registered the type's renderer. No renderer object crosses the API.
+The event tells what renderers this load built: `entity_types()` borrows the sorted slice of every entity
+type with a renderer, `is_living(type)` says whether it is a living entity's, `player_models()` borrows
+the `[Wide, Slim]` slice, and `has_mod_renderer(type)` whether a mod registered the type's renderer. No
+renderer object crosses the API.
 
 A layer attaches only to a living renderer, a mod's own included: `add` refuses a target that is no entity
 type, a type whose renderer isn't a living one (a boat, a display, a projectile), `minecraft:player`,
@@ -77,17 +79,20 @@ layers. Layers draw after the entity's model and its vanilla layers, each from t
 and `entity.pitch` the head's. `model` lends the final body hierarchy for the callback, including for
 nonhumanoids, or `None` if no body pose was produced (such as after a successful replacement
 renderer). Read a named part or follow the hierarchy and compose its parent transforms to attach
-geometry. A layer that returns an `Err` or panics is logged once with the error
-and asked no more until the next resource load adds it again; what it drew that frame is dropped. The layers draw on the mobs (vanilla's and the content mods'
-living types) and the players; the armour stand and the ender dragon take them once their own draws run
-layers, in a follow-up of #860, which lifts their refusal."#]
+geometry. A layer that returns an `Err` rolls back what it drew that frame, logs a warning, and stays
+active for later draws while the other layers still run. A layer that panics rolls back what it drew that
+frame and disables the mod's layer instance for the rest of the session, with an error log and an
+in-game error toast naming the mod. Re-adding the same `Arc` on reload leaves it disabled regardless of
+its target or position. A new instance starts enabled. The layers draw on the mobs (vanilla's and the
+content mods' living types) and the players; the armour stand and the ender dragon take them once
+their own draws run layers, in a follow-up of #860, which lifts their refusal."#]
     #[hook(
         receiver = "associated",
         dispatch = "flat",
         side = "client",
         contract = "listen",
         staged_surface = "layers",
-        version = 4,
+        version = 5,
         context = "registration",
         neoforge = "EntityRenderersEvent.AddLayers"
     )]

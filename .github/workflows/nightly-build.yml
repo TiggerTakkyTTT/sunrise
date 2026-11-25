@@ -21,7 +21,7 @@ run-name: ${{ inputs.kind == 'dev' && format('dev build {0}', inputs.base) || in
 #   shared sccache.
 # - `build` (game-build.yml) checks out and compiles the merge with no secrets: its token reads contents only and
 #   isn't kept in the checkout; the macOS programs are signed ad hoc (`developer_id: false`: no Developer ID).
-# - `sign` and `musl-attach` pass RELEASE_SIGNING_KEY only to main's tools/ci/sign_release.sh, which runs the
+# - `sign` passes RELEASE_SIGNING_KEY only to main's tools/ci/sign_release.sh, which runs the
 #   runner's sha256sum and OpenSSL over the archives: it hashes them, never runs them. The signed message
 #   names the channel ("horizon release nightly"), so a nightly's signature can't pass for a release's.
 # - `publish` verifies the signature with the runner's OpenSSL and main's release keys (nightly.py verify-sums, no
@@ -29,17 +29,21 @@ run-name: ${{ inputs.kind == 'dev' && format('dev build {0}', inputs.base) || in
 #   the tag. Like sign, it never executes what build produced.
 # - The source ships with the build: `pick` writes sunrise-source.tar.gz with `git archive` (git objects again, nothing
 #   run), `sign` signs it with the builds, and `publish` attaches it and tags the commit nightly-source/<date>-<short>
-#   for good (the dated release and the build branch go after 7 days; native mods pin the commit: docs/native-mods.md).
+#   for good (the dated release and the build branch go after 7 days; native mods pin the commit: docs/modding/src/how-to/native-mods.md).
 #   gh workflow run "nightly build"                     # now (skips when the pick is the same commit as last night's)
 #   gh workflow run "nightly build" -f force=true       # build and publish even if unchanged
 #   gh workflow run "nightly build" -f dry_run=true     # build and sign with a throwaway key, publish nothing
 # Dry picks use only nightly/dry-run-<run>-<attempt>, removed by always-run cleanup; nightly-state and real build
 # numbering/quota stay untouched, including on a failed build. A hard-killed cleanup may leave only that isolated ref.
 # By dispatch only: the daily run starts it through release.yml when every leg is green (CI tiers, owner 2026-11-13).
-# kind=dev (release.yml kind dev, after it published the commit's SDK): the same build and signing for one
-# commit of main with the gate green, alone (no picks, no build branch, no nightly-state, no daily cap, no
-# release-blocker hold), signed for the `dev` channel and its version, and published as the pre-release
-# dev-<date>-<short> ("Dev <date> · <short>"); never the `nightly` tag, its rotation or nightly-source tags.
+# kind=dev (release.yml kind dev): the same build and signing for one commit of main with the gate green, alone (no
+# picks, no build branch, no nightly-state, no daily cap, no release-blocker hold), signed for the `dev` channel and
+# its version, and published as the pre-release dev-<date>-<short> ("Dev <date> · <short>"); never the `nightly` tag,
+# its rotation or nightly-source tags. Its run also builds the commit's SDK (`sdk`, prebuilt-game-build.yml) beside
+# the game legs, after the exporters like them, and publishes it (`sdk-publish`, sdk-publish.yml) as soon as its own
+# legs are done: the game's legs never read the SDK, only its signing does (sdk.json, `sdk-index`), so the game is
+# signed and published only after sdk-<sha>. Re-running a failed job reruns only it and what follows it: every leg
+# that built, the SDK's and the game's, stays built, and a published sdk-<sha> or dev tag is never built again.
 # The newest Dev build and all Dev builds from the last 7 days stay (nightly.py prune-dev).
 # kind=stable on release/26.3 publishes the full release 26.3-<semver>; only main and the two branches publish (docs/release-flow.md "Release branches").
 # With `break_glass` (why), a stable patch release ships on the daily legs its changes select instead of the full daily,
@@ -235,14 +239,19 @@ jobs:
             echo "$home/bin" >> "$GITHUB_PATH"
           fi
           bash tools/ci/rustup_install.sh --profile minimal
+      # A Dev build's SDK is built in this run, so its index comes once it is published (`sdk-index` below).
       - name: The SDK index the Nightly carries (sdk.json of sdk-<sha>)
-        if: steps.pick.outputs.build == 'true' && github.repository == 'sunrise-org/sunrise' && steps.pick.outputs.sdk != 'false'
+        if: >-
+          inputs.kind != 'dev' && steps.pick.outputs.build == 'true' && github.repository == 'sunrise-org/sunrise' &&
+          steps.pick.outputs.sdk != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.pick.outputs.sha }}
         run: python3 tools/ci/nightly.py sdk-index "$SHA" sdk.json
       - uses: actions/upload-artifact@v7
-        if: steps.pick.outputs.build == 'true' && github.repository == 'sunrise-org/sunrise' && steps.pick.outputs.sdk != 'false'
+        if: >-
+          inputs.kind != 'dev' && steps.pick.outputs.build == 'true' && github.repository == 'sunrise-org/sunrise' &&
+          steps.pick.outputs.sdk != 'false'
         with:
           name: sunrise-sdk-index
           path: sdk.json
@@ -294,7 +303,9 @@ jobs:
   break-glass:
     needs: [pick, break-glass-umceko, break-glass-aria]
     # Only a run's first attempt's approvals count: a re-run (of failed jobs too) never reuses them.
-    if: needs.pick.outputs.break_glass == 'true' && github.run_attempt == '1'
+    if: >-
+      !cancelled() && needs.pick.outputs.break_glass == 'true' && github.run_attempt == '1' &&
+      needs.break-glass-umceko.result == 'success' && needs.break-glass-aria.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -317,50 +328,98 @@ jobs:
 
   exporters:
     needs: [pick, break-glass]
-    # A break-glass release only once `break-glass` found both approvals; build, musl-build and so sign and publish
-    # all wait for this job.
+    # A break-glass release only once `break-glass` found both approvals; every build (a Dev build's SDK too) and so
+    # sign and publish wait for this job: its determinism check fails a release in minutes, before any platform leg.
     if: >-
       !cancelled() && needs.pick.result == 'success' && needs.pick.outputs.build == 'true' &&
       (needs.pick.outputs.break_glass == 'false' ||
       (needs.break-glass.result == 'success' && github.run_attempt == '1'))
-    uses: ./.github/workflows/game-build.yml
+    uses: ./.github/workflows/exporters.yml
     with:
-      part: exporters
-      ref: ${{ needs.pick.outputs.sha }}
-      version: ${{ needs.pick.outputs.version }}
-      developer_id: false
+      commit: ${{ needs.pick.outputs.sha }}
       trusted: false
 
   build:
     needs: [pick, exporters]
-    # A break-glass release builds only in its run's first attempt, whose approvals it has.
-    if: needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1'
+    # A break-glass release builds only in its run's first attempt, whose approvals it has. The status check is
+    # explicit: break-glass and its approvals are skipped on every ordinary release, and GitHub's implicit success()
+    # skips a job when any job upstream of it, however far, was skipped.
+    if: >-
+      !cancelled() && needs.exporters.result == 'success' &&
+      (needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1')
     uses: ./.github/workflows/game-build.yml
     with:
-      part: game
       ref: ${{ needs.pick.outputs.sha }}
       version: ${{ needs.pick.outputs.version }}
       nightly: ${{ needs.pick.outputs.nightly }}
-      kind: ${{ inputs.kind }}
       developer_id: false
       trusted: false  # it can hold unreviewed pull requests: their own cache key, never saved
+      dev: ${{ inputs.kind == 'dev' }}
 
-  musl-build:
+  # A Dev build's SDK, from the same commit, beside the game legs (which never read it). Its `fresh` job skips the
+  # legs when sdk-<sha> is already published. Only a Dev build: a gate-green commit of main alone, as release.yml
+  # built it before (a Nightly's or a stable release's SDK is published before its build starts).
+  sdk:
     needs: [pick, exporters]
-    # A break-glass release builds only in its run's first attempt, whose approvals it has.
-    if: needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1'
-    uses: ./.github/workflows/game-build.yml
+    if: >-
+      !cancelled() && inputs.kind == 'dev' && needs.pick.outputs.build == 'true' && needs.exporters.result == 'success'
+    uses: ./.github/workflows/prebuilt-game-build.yml
     with:
-      part: musl
-      ref: ${{ needs.pick.outputs.sha }}
-      version: ${{ needs.pick.outputs.version }}
-      nightly: ${{ needs.pick.outputs.nightly }}
-      kind: ${{ inputs.kind }}
-      developer_id: false
-      trusted: false
+      commit: ${{ needs.pick.outputs.sha }}
+      dev: true
+
+  # sdk-<sha> from the SDK legs' artifacts, as soon as they are done, while the game legs may still build. A dry run
+  # signs with a throwaway key and publishes nothing.
+  sdk-publish:
+    needs: [pick, sdk]
+    if: >-
+      !cancelled() && inputs.kind == 'dev' && needs.sdk.result == 'success' && needs.sdk.outputs.needed == 'true'
+    permissions:
+      contents: write  # the sdk-<sha> release (its publish job; a dry run writes nothing)
+    uses: ./.github/workflows/sdk-publish.yml
+    with:
+      commit: ${{ needs.pick.outputs.sha }}
+      publish: ${{ needs.pick.outputs.publish == 'true' }}
+    secrets: inherit
+
+  # The SDK index a Dev build carries in its signed sums (as `pick` fetches a Nightly's): sdk-<sha>'s sdk.json once
+  # it is published, checked against its SHA256SUMS. A dry run that built its own SDK publishes none: it carries
+  # that SDK's index.
+  sdk-index:
+    needs: [pick, sdk, sdk-publish]
+    if: >-
+      !cancelled() && inputs.kind == 'dev' && needs.sdk.result == 'success' &&
+      (needs.sdk-publish.result == 'success' || needs.sdk-publish.result == 'skipped')
+    runs-on: ${{ vars.DYNA_CI_SELF_HOSTED == 'true' && 'dyna-small' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        if: needs.pick.outputs.publish != 'true' && needs.sdk.outputs.needed == 'true'
+        with:
+          name: sdk-release
+          path: ${{ runner.temp }}/sdk-release
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.pick.outputs.sha }}
+          OWN: ${{ needs.pick.outputs.publish != 'true' && needs.sdk.outputs.needed == 'true' && 'yes' || '' }}
+        run: |
+          if [[ -n "$OWN" ]]; then
+            cp "$RUNNER_TEMP/sdk-release/sdk.json" sdk.json
+          else
+            python3 tools/ci/nightly.py sdk-index "$SHA" sdk.json
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sunrise-sdk-index
+          path: sdk.json
+          if-no-files-found: error
+          retention-days: 3
 
   # Whether every required leg built, from the `build-complete` marker game-build.yml's legs job uploads. build's
-  # result is `failure` or `cancelled` whenever an optional leg failed, timed out or got no runner, and a reusable
+  # result is `failure` or `cancelled` whenever a leg failed, timed out or got no runner, and a reusable
   # workflow that ends that way passes back no outputs, so this is an ordinary job's output instead.
   complete:
     needs: build
@@ -378,9 +437,11 @@ jobs:
           path: ${{ runner.temp }}/build-complete
 
   sign:
-    needs: [pick, build, complete, break-glass]
+    needs: [pick, build, complete, break-glass, sdk-index]
+    # A Dev build's game is signed only with its SDK's index, so only once sdk-<sha> is published.
     if: >-
       !cancelled() && needs.complete.outputs.complete == 'true' &&
+      (inputs.kind != 'dev' || needs.sdk-index.result == 'success') &&
       (needs.pick.outputs.break_glass == 'false' ||
       (needs.break-glass.result == 'success' && github.run_attempt == '1'))
     runs-on: ubuntu-latest
@@ -412,20 +473,9 @@ jobs:
           SIGN_FOR: ${{ inputs.kind == 'stable' && needs.pick.outputs.tag || inputs.kind }}
           ALSO_FOR: ${{ inputs.kind == 'stable' && needs.pick.outputs.tag || format('{0}-{1}-{2}', inputs.kind, needs.pick.outputs.date, needs.pick.outputs.short) }}
         run: |
-          # Windows ARM64's build may fail without holding the Nightly (game-build.yml): then it is left out.
-          arm64=(); if [[ -f dist/sunrise-windows-arm64.zip ]]; then arm64=(dist/sunrise-windows-arm64.zip)
-          else echo "::warning::sunrise-windows-arm64.zip is missing: SHA256SUMS goes out without it"; fi
-          macos=()
-          for archive in dist/sunrise-macos-arm64.zip dist/sunrise-macos-x64.zip; do
-            if [[ -f "$archive" ]]; then macos+=("$archive")
-            elif [[ "$GITHUB_REPOSITORY" == sunrise-org/sunrise || ( "$KIND" == dev && "$archive" == dist/sunrise-macos-x64.zip ) ]]; then
-              echo "::warning::$archive is missing: SHA256SUMS goes out without it"
-            else echo "::error::Required archive $archive is missing"; exit 1; fi
-          done
           sdk=(); if [[ -f dist/sdk.json ]]; then sdk=(dist/sdk.json); fi
           bash tools/ci/sign_release.sh "$SIGN_FOR" dist/sunrise-linux-x86_64.tar.gz dist/sunrise-windows-x64.zip \
-            ${arm64[@]+"${arm64[@]}"} ${sdk[@]+"${sdk[@]}"} \
-            ${macos[@]+"${macos[@]}"} dist/sunrise-server-linux-x86_64.tar.gz \
+            ${sdk[@]+"${sdk[@]}"} dist/sunrise-macos-arm64.zip dist/sunrise-server-linux-x86_64.tar.gz \
             dist/sunrise-source.tar.gz dist/sunrise-release.json
       - uses: actions/upload-artifact@v7
         with:
@@ -441,9 +491,10 @@ jobs:
           retention-days: 3
 
   publish:
-    needs: [pick, build, complete, sign, break-glass]
+    needs: [pick, build, complete, sign, break-glass, sdk-index]
     if: >-
       !cancelled() && needs.complete.outputs.complete == 'true' && needs.sign.result == 'success' &&
+      (inputs.kind != 'dev' || needs.sdk-index.result == 'success') &&
       (needs.pick.outputs.break_glass == 'false' ||
       (needs.break-glass.result == 'success' && github.run_attempt == '1'))
     runs-on: ubuntu-latest
@@ -452,8 +503,6 @@ jobs:
       contents: write
       issues: read          # the open release-blocker issues (gate)
       actions: read         # a stable release's daily run and a break-glass one's approvals, checked again before its tag
-    outputs:
-      release_id: ${{ steps.identity.outputs.id }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -511,37 +560,16 @@ jobs:
           [[ -f dist/SHA256SUMS.v2.sig ]] && signature+=(dist/SHA256SUMS.v2.sig)
           # The title is what launchers parse (strictly) into the version SHA256SUMS.v2.sig is signed for.
           [[ "${SHA:0:7}" == "$SHORT" ]] || { echo "::error::the build's commit isn't the one signed"; exit 1; }
-          # The ARM64 archive only when its build succeeded (the sign job left it out of SHA256SUMS otherwise).
-          arm64=()
-          if [[ -f dist/sunrise-windows-arm64.zip ]]; then
-            arm64=("dist/sunrise-windows-arm64.zip#Game files the launcher installs (Nightly): Windows ARM64 (sunrise-windows-arm64.zip)")
-          else
-            echo "::warning::sunrise-windows-arm64.zip is missing: the Nightly goes out without it (ARM64 launchers install the x64 build)"
-          fi
           sdk=(); if [[ -f dist/sdk.json ]]; then sdk=("dist/sdk.json#The mod SDK of this build (sdk.json; its files are the release sdk-$SHA)"); fi
           # A pre-release, never GitHub's latest: the latest stays the last vX.Y.Z, which launchers and servers from
           # before the Nightly-only switch keep (they don't read Nightlies).
           python3 tools/ci/nightly.py require-sdk "$SHA"
-          macos=()
-          for archive in dist/sunrise-macos-arm64.zip dist/sunrise-macos-x64.zip; do
-            if [[ -f "$archive" ]]; then macos+=("$archive"); fi
-          done
-          # Every optional build that is missing (the sign job left it out), named in the notes players read.
-          missing=()
-          for platform in "Windows ARM64:sunrise-windows-arm64.zip" \
-              "macOS on Apple silicon:sunrise-macos-arm64.zip" "macOS on Intel:sunrise-macos-x64.zip"; do
-            [[ -f "dist/${platform#*:}" ]] || missing+=("$platform")
-          done
-          if (( ${#missing[@]} )); then
-            printf '\n## Not in this Nightly\n\nThese builds failed or did not finish, so this Nightly has no archive for them:\n\n'
-            for platform in "${missing[@]}"; do printf -- '- %s (`%s`)\n' "${platform%%:*}" "${platform#*:}"; done
-          fi >> dist/nightly-notes.md
           gh release create nightly --prerelease --latest=false --target "$SHA" \
             --title "Nightly $DATE · ${SHA:0:7}" --notes-file dist/nightly-notes.md \
             "dist/sunrise-linux-x86_64.tar.gz#Game files the launcher installs (Nightly): Linux (sunrise-linux-x86_64.tar.gz)" \
             "dist/sunrise-windows-x64.zip#Game files the launcher installs (Nightly): Windows (sunrise-windows-x64.zip)" \
-            ${arm64[@]+"${arm64[@]}"} ${sdk[@]+"${sdk[@]}"} \
-            ${macos[@]+"${macos[@]}"} \
+            ${sdk[@]+"${sdk[@]}"} \
+            "dist/sunrise-macos-arm64.zip#Game files the launcher installs (Nightly): macOS on Apple silicon (sunrise-macos-arm64.zip)" \
             "dist/sunrise-server-linux-x86_64.tar.gz#Nightly dedicated server for Linux (sunrise-server-linux-x86_64.tar.gz)" \
             "dist/sunrise-source.tar.gz#Source of this Nightly, commit ${SHA:0:7} (sunrise-source.tar.gz; kept for good as the tag $SOURCE_TAG)" \
             "dist/sunrise-release.json#What this build is, for launchers (sunrise-release.json)" \
@@ -561,17 +589,7 @@ jobs:
           python3 tools/ci/nightly.py require-sdk "$SHA"
           # The title is what launchers parse (strictly) into the version SHA256SUMS.v2.sig is signed for: the tag.
           [[ "${SHA:0:7}" == "$SHORT" && "$TAG" == "dev-$DATE-$SHORT" ]] || { echo "::error::the build's commit isn't the one signed"; exit 1; }
-          # Archive presence records what was actually built, not an unsupported platform promise.
-          printf '\n## Platform build results\n\n' >> dist/nightly-notes.md
-          for archive in sunrise-linux-x86_64.tar.gz sunrise-server-linux-x86_64.tar.gz sunrise-windows-x64.zip \
-              sunrise-macos-arm64.zip sunrise-windows-arm64.zip sunrise-macos-x64.zip; do
-            if [[ -f "dist/$archive" ]]; then
-              printf -- '- Built: `%s`.\n' "$archive"
-            else
-              printf -- '- Failed or unavailable; not published: `%s`.\n' "$archive"
-            fi
-          done >> dist/nightly-notes.md
-          # Exactly the files SHA256SUMS lists (the sign job left out a missing optional archive), and the signatures.
+          # Exactly the files SHA256SUMS lists, and the signatures.
           files=(); while read -r _ name; do files+=("dist/${name#\*}"); done < dist/SHA256SUMS
           # A pre-release, never GitHub's latest, under its own tag: no launcher lists or updates to it.
           gh release create "$TAG" --prerelease --latest=false --target "$SHA" \
@@ -617,17 +635,6 @@ jobs:
           # A full release, never GitHub's latest: the site's launcher download and older servers read the latest.
           gh release create "$TAG" --verify-tag --latest=false --title "Sunrise $TAG" --notes-file dist/nightly-notes.md \
             "${files[@]}" dist/SHA256SUMS dist/SHA256SUMS.sig dist/SHA256SUMS.v2.sig dist/smoke-test.json
-      - name: Record the release identity for the later musl attachment
-        id: identity
-        if: needs.pick.outputs.publish == 'true'
-        # The release just made, found by its tag and kept only if it holds this run's SHA256SUMS. A failed lookup
-        # must not fail publication: without the id, the attach job refuses to upload.
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.pick.outputs.tag }}
-          SHA: ${{ needs.pick.outputs.sha }}
-        run: python3 tools/ci/nightly.py release-identity "$TAG" "$SHA" dist/SHA256SUMS
       - name: Dry run, the nightly that would be published
         if: needs.pick.outputs.publish != 'true'
         run: |
@@ -652,96 +659,10 @@ jobs:
           gh workflow run daily.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f dry_run=false -f commit="$SHA"
           echo "### Started the full daily run of ${SHA:0:9} on $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
 
-  musl-attach:
-    needs: [pick, publish, musl-build]
-    # `publish` can succeed after an optional launcher platform fails; only its explicit result matters here.
-    if: >-
-      !cancelled() && needs.publish.result == 'success' && needs.musl-build.result == 'success' &&
-      (needs.pick.outputs.break_glass == 'false' || github.run_attempt == '1')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: ${{ needs.pick.outputs.publish == 'true' && 'release' || '' }}
-    permissions:
-      contents: write
-    outputs:
-      phase: ${{ steps.verify.outcome == 'success' && 'attach' || steps.verify.outcome == 'failure' && 'verify' || 'sign' }}
-    env:
-      TAG: ${{ needs.pick.outputs.tag }}
-      KIND: ${{ inputs.kind }}
-      SIGN_FOR: ${{ inputs.kind == 'stable' && needs.pick.outputs.tag || inputs.kind }}
-      ALSO_FOR: ${{ inputs.kind == 'stable' && needs.pick.outputs.tag || format('{0}-{1}-{2}', inputs.kind, needs.pick.outputs.date, needs.pick.outputs.short) }}
-      DRY_RUN: ${{ needs.pick.outputs.dry_run }}
-      ARCHIVE: sunrise-linux-musl-x86_64.tar.gz
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: musl-archive
-          path: musl
-      - name: Sign the isolated musl checksums for the channel and build
-        env:
-          RELEASE_SIGNING_KEY: ${{ needs.pick.outputs.publish == 'true' && secrets.RELEASE_SIGNING_KEY || '' }}
-          RELEASE_SIGNING_KEY_NEXT: ${{ needs.pick.outputs.publish == 'true' && secrets.RELEASE_SIGNING_KEY_NEXT || '' }}
-          EPHEMERAL: ${{ needs.pick.outputs.publish != 'true' && 'yes' || '' }}
-        run: bash tools/ci/sign_release.sh "$SIGN_FOR" "musl/$ARCHIVE"
-      - name: Verify both musl signatures before naming the release assets
-        id: verify
-        run: |
-          key=(); [[ "$DRY_RUN" == true ]] && key=(--key "$(cat musl/ephemeral.pub)")
-          python3 tools/ci/nightly.py verify-sums --tag "$SIGN_FOR" --only "$ARCHIVE" "${key[@]}" musl
-          if [[ -n "$ALSO_FOR" ]]; then
-            python3 tools/ci/nightly.py verify-sums --tag "$ALSO_FOR" --signature SHA256SUMS.v2.sig --only "$ARCHIVE" \
-              "${key[@]}" musl
-          fi
-          for suffix in '' .sig .v2.sig; do
-            if [[ -f "musl/SHA256SUMS$suffix" ]]; then mv "musl/SHA256SUMS$suffix" "musl/SHA256SUMS-musl$suffix"; fi
-          done
-      - name: Append only the verified musl assets to the published release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.publish.outputs.release_id }}
-          SHA: ${{ needs.pick.outputs.sha }}
-        run: |
-          sums=(); for file in musl/SHA256SUMS-musl{,.sig,.v2.sig}; do if [[ -f "$file" ]]; then sums+=("$file"); fi; done
-          if [[ "$DRY_RUN" == true ]]; then
-            printf 'Would append to %s:\n' "$TAG"
-            ls -l "${sums[@]}" "musl/$ARCHIVE"
-            exit 0
-          fi
-          [[ -n "$RELEASE_ID" ]] || { echo "::error::publish recorded no release id; nothing was attached"; exit 1; }
-          # Every write goes to the release publish made, by id, never through the tag, which a newer Nightly can
-          # take over. The archive goes last, so a player can verify it as soon as it appears; a rerun keeps the
-          # files already there with the same bytes and refuses any with other bytes.
-          python3 tools/ci/nightly.py attach "$RELEASE_ID" "$TAG" "$SHA" "${sums[@]}" "musl/$ARCHIVE"
-
-  musl-failure:
-    needs: [pick, musl-build, musl-attach]
-    if: >-
-      ${{ always() && (needs.musl-build.result == 'failure' || needs.musl-build.result == 'cancelled' ||
-      needs.musl-attach.result == 'failure' || needs.musl-attach.result == 'cancelled') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - name: Report the failed musl job without writing any release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          KIND: ${{ inputs.kind }}
-          DRY_RUN: ${{ needs.pick.outputs.dry_run }}
-          FAILED_STEP: ${{ needs.musl-build.result != 'success' && 'build' || needs.musl-attach.outputs.phase || 'sign or attach' }}
-        run: python3 tools/ci/nightly.py report-musl-failure "$KIND" "$FAILED_STEP"
-
   cleanup-dry-run:
     # Wait for the parallel build too, since it checks out the same temporary ref.
     # Derive it independently of pick's outputs: pick may fail after pushing it.
-    needs: [pick, build, sign, publish, musl-build]
+    needs: [pick, build, sign, publish]
     # Every dispatch: a real run has no such ref to remove, and the step's lookup says so.
     if: always() && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

@@ -159,6 +159,11 @@ impl Game<'_> {
 
     /// The items [`Self::campfire_geometry`] draws, in `CampfireRenderer.submit`'s order.
     pub(super) fn campfire_items(&self, camera: glam::DVec3, mut draw: impl FnMut(BlockItemDraw)) {
+        let _items = sunrise_client::spans::raw_flight_guard("block_entity_items");
+        let reach = Reach::Default;
+        sunrise_client::spans::note_block_entity_item_visits(|| {
+            self.world.block_entities.len() as u64
+        });
         for (key, entity) in &self.world.block_entities {
             let BlockEntity::Campfire(c) = entity else {
                 continue;
@@ -166,7 +171,7 @@ impl Game<'_> {
             if c.items.iter().all(Option::is_none) {
                 continue;
             }
-            if !Reach::Default.should_render([key.0, key.1, key.2], camera, 0) {
+            if !reach.should_render([key.0, key.1, key.2], camera, 0) {
                 continue;
             }
             // Direction.get2DDataValue: south 0, west 1, north 2, east 3.
@@ -243,4 +248,4 @@ mod campfire_tests;
 
 #[cfg(test)]
 #[path = "tests/block_entity_items_tests.rs"]
-mod block_entity_items_tests;
+pub(in crate::game) mod block_entity_items_tests;

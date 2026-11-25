@@ -45,8 +45,11 @@ pub struct PackInputs {
     pub thunder: f32,
     /// The fluid at the camera: 0 none, 1 water, 2 lava, 3 powder snow.
     pub eye_in: i32,
+    /// The local player's blindness, 0 or 1, for Sunrise's own packs (`blindness` follows the
+    /// camera entity: [`ViewEntity`]).
     pub blindness: f32,
-    /// Block and sky light at the camera, 0..15.
+    /// Block and sky light at the camera, 0..15, for Sunrise's own packs (`eyeBrightness` reads
+    /// the camera entity's eye: [`ViewEntity`]).
     pub eye_light: [i32; 2],
     pub hide_gui: bool,
     /// The brightness option, 0..1.
@@ -90,9 +93,8 @@ pub struct PackInputs {
     pub end_flash_direction: Vec3,
     /// The dimension type's `ambient_light` (`ambientLight`).
     pub ambient_light: f32,
-    /// The player's cave mood, 0..1 (`BiomeAmbientSoundsHandler`'s moodiness):
-    /// `playerMood` and `constantMood`.
-    pub mood: f32,
+    /// What the uniforms tied to the view read from the camera entity.
+    pub view: ViewEntity,
     /// Under `SUNRISE_STILL`, the world's ticks: the pack's clock (`frameTimeCounter`,
     /// `frameCounter`) instead of the wall clock and the frames drawn, and smoothed values
     /// (`wetness`, `eyeBrightnessSmooth`, `centerDepthSmooth`) at their targets.
@@ -170,6 +172,40 @@ pub struct PlayerStatus {
 const MAX_HUNGER: f32 = 20.0;
 const MAX_AIR: f32 = 300.0;
 const MAX_ARMOR: f32 = 50.0;
+
+/// The camera entity's (`Minecraft.getCameraEntity`: the local player, or the entity a
+/// spectator's click or the server's `SetCamera` attached the view to) values for the uniforms
+/// tied to the view (#3948). The lightmap's own night vision and darkness stay in `Frame`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewEntity {
+    /// It is a `LivingEntity`: `playerLookVector` is the zero vector otherwise.
+    pub living: bool,
+    /// `blindness`: 1 while it has the blindness effect, else 0.
+    pub blindness: f32,
+    /// `nightVision`: its night vision, 0..1.
+    pub night_vision: f32,
+    /// `darknessFactor`: its darkness effect's strength, 0..1.
+    pub darkness: f32,
+    /// `playerMood` and `constantMood`: the cave mood (`BiomeAmbientSoundsHandler`'s
+    /// moodiness), 0..1, while the camera entity is the local player; 0 otherwise.
+    pub mood: f32,
+    /// `eyeBrightness`: block and sky light at its eye, 0..15.
+    pub eye_light: [i32; 2],
+}
+
+impl Default for ViewEntity {
+    /// The local player with no effects, in the dark.
+    fn default() -> Self {
+        Self {
+            living: true,
+            blindness: 0.0,
+            night_vision: 0.0,
+            darkness: 0.0,
+            mood: 0.0,
+            eye_light: [0; 2],
+        }
+    }
+}
 
 /// One uniform's value: up to 16 floats or 3 integers.
 #[derive(Clone, Copy, Debug)]
@@ -823,7 +859,7 @@ impl FrameUniforms {
         // match it bit for bit in our probes): fragments on a texel boundary of the shadow map
         // then read the same texel as in Iris (#8464).
         let (rotation, rotation_inverse) =
-            crate::joml::view_rotation_matrix(frame.yaw, frame.pitch);
+            crate::joml::view_rotation_matrix(frame.yaw, frame.pitch, frame.roll);
         let (view, view_inverse) = if frame.bob == Mat4::IDENTITY && frame.spin == Mat4::IDENTITY {
             (rotation, rotation_inverse)
         } else {
@@ -845,11 +881,17 @@ impl FrameUniforms {
         // The player's, not the camera's: in a third-person view the camera is behind (or in
         // front of, turned around) the eye the pack lights from.
         let [yaw, pitch] = frame.eye_rotation.map(f32::to_radians);
-        let look = Vec3::new(
+        let forward = Vec3::new(
             -yaw.sin() * pitch.cos(),
             -pitch.sin(),
             yaw.cos() * pitch.cos(),
         );
+        // A camera entity that isn't living has no view vector to give (#3948).
+        let look = if inputs.view.living {
+            forward
+        } else {
+            Vec3::ZERO
+        };
 
         let to_view = |v: Vec3| view.transform_vector3(v);
         let sun_angle = day_fraction(frame.sky.sun_angle);
@@ -870,7 +912,7 @@ impl FrameUniforms {
             dry.unwrap_or(200.0)
         };
         self.wetness = smooth(self.wetness, inputs.rain, half_life * SECONDS_A_TICK, dt);
-        let eye = inputs.eye_light.map(|l| (l * 16) as f32);
+        let eye = inputs.view.eye_light.map(|l| (l * 16) as f32);
         if first_frame {
             self.wetness = inputs.rain;
             self.eye_smooth = eye;
@@ -943,7 +985,8 @@ impl FrameUniforms {
                 // The camera is the eye in first person.
                 "eyePosition" => v3(frame.eye.as_vec3()),
                 "relativeEyePosition" => v3((frame.camera - frame.eye).as_vec3()),
-                "playerLookVector" | "playerBodyVector" => v3(look),
+                "playerLookVector" => v3(look),
+                "playerBodyVector" => v3(forward),
                 "firstPersonCamera" => Value::i(&[i32::from(frame.first_person)]),
                 "isRightHanded" => Value::i(&[i32::from(inputs.right_handed)]),
                 "is_on_ground" => Value::i(&[i32::from(inputs.on_ground)]),
@@ -1003,9 +1046,9 @@ impl FrameUniforms {
                 "blockEntityId" => Value::i(&[-1]),
                 "entityColor" => Value::f(&[0.0; 4]),
                 "isEyeInWater" => Value::i(&[inputs.eye_in]),
-                "blindness" => Value::f(&[inputs.blindness]),
-                "nightVision" => Value::f(&[frame.night_vision]),
-                "darknessFactor" => Value::f(&[frame.darkness.0]),
+                "blindness" => Value::f(&[inputs.view.blindness]),
+                "nightVision" => Value::f(&[inputs.view.night_vision]),
+                "darknessFactor" => Value::f(&[inputs.view.darkness]),
                 "darknessLightFactor" => Value::f(&[frame.darkness.1]),
                 "screenBrightness" => Value::f(&[inputs.brightness]),
                 "hideGUI" => Value::i(&[inputs.hide_gui as i32]),
@@ -1043,7 +1086,7 @@ impl FrameUniforms {
                 "cloudTime" => Value::f(&[inputs.cloud_time]),
                 "ambientLight" => Value::f(&[inputs.ambient_light]),
                 // Iris 1.11.7 gave both the same value in every scene measured.
-                "playerMood" | "constantMood" => Value::f(&[inputs.mood]),
+                "playerMood" | "constantMood" => Value::f(&[inputs.view.mood]),
                 // renderStage is NONE outside gbuffers draws.
                 _ => status_value(name, inputs).unwrap_or(Value::i(&[0])),
             }
@@ -1983,7 +2026,10 @@ pub(super) mod initial_history_tests {
         let mut u = FrameUniforms::default();
         let mut input = PackInputs {
             rain: 0.75,
-            eye_light: [3, 14],
+            view: ViewEntity {
+                eye_light: [3, 14],
+                ..Default::default()
+            },
             ..Default::default()
         };
         u.update(&f, &input, [800, 450]);
@@ -1993,7 +2039,7 @@ pub(super) mod initial_history_tests {
             _ => panic!("integer uniform expected"),
         }
         input.rain = 0.0;
-        input.eye_light = [0, 0];
+        input.view.eye_light = [0, 0];
         u.update(&f, &input, [800, 450]);
         assert!(float(&u, "wetness")[0] > 0.0);
         assert!(u.eye_smooth.iter().all(|v| *v > 0.0));
@@ -2004,8 +2050,7 @@ pub(super) mod initial_history_tests {
     #[ignore = "requires a host GPU; run with --ignored --nocapture"]
     fn core_matrix_inputs_render_provider_values() {
         let _gpu = crate::test_gpu::lock();
-        let instance = crate::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let adapter = crate::test_gpu::adapter().unwrap();
         eprintln!("Core matrix GPU: {:?}", adapter.get_info());
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -2081,8 +2126,7 @@ pub(super) mod initial_history_tests {
     #[ignore = "daily"]
     fn core_normal_matrix_renders_the_view_rotation() {
         let _gpu = crate::test_gpu::lock();
-        let instance = crate::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let adapter = crate::test_gpu::adapter().unwrap();
         eprintln!("Normal matrix GPU: {:?}", adapter.get_info());
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -2151,6 +2195,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
             &preprocess(&pack, "gbuffers_line.fsh", &macros),
             Target::Buffers,
             &GbuffersInputs::default(),
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
         )
         .unwrap();
         let mut bytes = vec![0; program.interface.uniform_size as usize];
@@ -2361,13 +2406,16 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
             });
         };
         let mut input = PackInputs {
-            eye_light: [0, 15],
+            view: ViewEntity {
+                eye_light: [0, 15],
+                ..Default::default()
+            },
             frame_timing: Some(FrameTiming::nth(1, 0.0)),
             ..Default::default()
         };
         u.center_depth_raw = Some(1.0);
         u.update(&f, &input, [800, 450]);
-        input.eye_light = [0, 0];
+        input.view.eye_light = [0, 0];
         u.center_depth_raw = Some(0.0);
         after(&mut input, 0.1);
         u.update(&f, &input, [800, 450]);
@@ -2430,13 +2478,16 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         let f = test_frame();
         let mut u = FrameUniforms::default();
         let mut input = PackInputs {
-            eye_light: [0, 15],
+            view: ViewEntity {
+                eye_light: [0, 15],
+                ..Default::default()
+            },
             still_ticks: Some(47_811),
             ..Default::default()
         };
         u.center_depth_raw = Some(1.0);
         u.update(&f, &input, [800, 450]);
-        input.eye_light = [0, 0];
+        input.view.eye_light = [0, 0];
         input.rain = 1.0;
         u.center_depth_raw = Some(0.0);
         u.last = Some(std::time::Instant::now() - std::time::Duration::from_secs(3));
@@ -2498,7 +2549,10 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         let mut u = FrameUniforms::default();
         let mut input = PackInputs {
             rain: 1.0,
-            eye_light: [0, 15],
+            view: ViewEntity {
+                eye_light: [0, 15],
+                ..Default::default()
+            },
             still_ticks: Some(47_811),
             frame_timing: Some(FrameTiming::nth(1, 1000.0)),
             ..Default::default()
@@ -2506,7 +2560,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         u.center_depth_raw = Some(1.0);
         u.update(&f, &input, [800, 450]);
         input.rain = 0.0;
-        input.eye_light = [0, 0];
+        input.view.eye_light = [0, 0];
         u.center_depth_raw = Some(0.0);
         // A second each: eyeBrightnessSmooth halves (1 s half-life),
         // centerDepthSmooth halves ten times (0.1 s), wetness falls by 0.5^(1/20) (20 s).
@@ -2729,7 +2783,10 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         };
         let mut inputs = PackInputs {
             rain: 1.0,
-            eye_light: [15, 15],
+            view: ViewEntity {
+                eye_light: [15, 15],
+                ..Default::default()
+            },
             frame_timing: Some(FrameTiming {
                 counter: 800,
                 elapsed: 99.0,
@@ -2742,7 +2799,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         f.camera = glam::DVec3::new(7.0, 12.0, -30.0);
         f.yaw = 77.0;
         inputs.rain = 0.25;
-        inputs.eye_light = [3, 8];
+        inputs.view.eye_light = [3, 8];
         inputs.frame_timing = None;
         uniforms.reset_history();
         uniforms.update(&f, &inputs, [16, 16]);
@@ -2772,6 +2829,52 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         }
     }
 
+    /// #3948: the uniforms tied to the view read the camera entity's values, not the lightmap's
+    /// night vision and darkness nor the local player's blindness and light at the camera, while
+    /// `darknessLightFactor` keeps the lightmap's. A camera entity that isn't living looks
+    /// nowhere; its body vector stays.
+    #[test]
+    fn the_view_uniforms_read_the_camera_entity() {
+        let mut frame = test_frame();
+        frame.pitch = 0.0;
+        frame.night_vision = 0.25;
+        frame.darkness = (0.5, 0.125);
+        let mut input = PackInputs {
+            blindness: 1.0,
+            eye_light: [3, 14],
+            view: ViewEntity {
+                living: true,
+                blindness: 0.0,
+                night_vision: 0.75,
+                darkness: 0.375,
+                mood: 0.0,
+                eye_light: [12, 5],
+            },
+            ..Default::default()
+        };
+        let mut u = FrameUniforms::default();
+        u.update(&frame, &input, [800, 450]);
+        assert_eq!(float(&u, "blindness")[0], 0.0);
+        assert_eq!(float(&u, "nightVision")[0], 0.75);
+        assert_eq!(float(&u, "darknessFactor")[0], 0.375);
+        assert_eq!(float(&u, "darknessLightFactor")[0], 0.125);
+        let ints = |u: &FrameUniforms, name: &str| match u.values[index(name).unwrap()] {
+            Value::I(v) => v,
+            _ => panic!("integer uniform expected"),
+        };
+        assert_eq!(&ints(&u, "eyeBrightness")[..2], &[192, 80]);
+        assert_eq!(&ints(&u, "eyeBrightnessSmooth")[..2], &[192, 80]);
+        assert_eq!(&float(&u, "playerLookVector")[..3], &[0.0, 0.0, 1.0]);
+        assert_eq!(&float(&u, "playerBodyVector")[..3], &[0.0, 0.0, 1.0]);
+
+        input.view.living = false;
+        input.view.blindness = 1.0;
+        u.update(&frame, &input, [800, 450]);
+        assert_eq!(float(&u, "blindness")[0], 1.0);
+        assert_eq!(&float(&u, "playerLookVector")[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(&float(&u, "playerBodyVector")[..3], &[0.0, 0.0, 1.0]);
+    }
+
     /// Iris 1.11.7 (probe pack): `ambientLight` is the dimension type's (0.1 in the Nether,
     /// 0.25 in the End), and `playerMood` and `constantMood` both the cave mood.
     #[test]
@@ -2779,7 +2882,10 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
         let mut u = FrameUniforms::default();
         let input = PackInputs {
             ambient_light: 0.25,
-            mood: 0.0235,
+            view: ViewEntity {
+                mood: 0.0235,
+                ..Default::default()
+            },
             ..Default::default()
         };
         u.update(&test_frame(), &input, [800, 450]);
@@ -2793,6 +2899,7 @@ in vec3 result; out vec4 color; void main() { color = vec4(result, 1.0); }",
             camera: glam::DVec3::new(0.5, 100.0, 0.5),
             yaw: 0.0,
             pitch: 10.0,
+            roll: 0.0,
             fov_degrees: 85.0,
             eye: glam::DVec3::ZERO,
             eye_rotation: [0.0; 2],

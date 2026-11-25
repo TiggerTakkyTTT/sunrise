@@ -3,6 +3,7 @@
 //! token sends; the expected bodies are written out by hand.
 use mod_api::wire::{Reader, Wire, WireError, WireSchema, Writer};
 use mod_api::{
+    __private::{HookPanicReport, take_hook_panics},
     Hooks, IPayloadContext, ModEntry, PayloadAccepted, PayloadId, PayloadSendError, PlayerRef,
     Registrar, ToClient, ToServer, Wire,
 };
@@ -139,11 +140,12 @@ fn up(value: Probe, context: &mut dyn IPayloadContext) -> Result<(), String> {
             let witness = WITNESS.lock().unwrap().expect("a witness sent 7 first");
             let host = context.server_host().map_err(|e| format!("{e:?}"))?;
             let living = host.living(witness.entity()).ok_or("no witness")?;
-            assert!(living.set_health(host, STAGED));
-            assert_eq!(
-                down().reply(context, &probe(14)),
-                Ok(PayloadAccepted::Queued)
-            );
+            if !living.set_health(host, STAGED) || living.health(host) != Some(STAGED) {
+                return Err("could not stage witness health".into());
+            }
+            if down().reply(context, &probe(14)) != Ok(PayloadAccepted::Queued) {
+                return Err("could not stage panic reply".into());
+            }
             panic!("typed handler panics after a staged write and a staged reply");
         }
         _ => Ok(()),
@@ -371,14 +373,22 @@ fn lan(game: &mut super::Game<'_>) {
     send(&mut witness, UP, empty(7).to_vec());
     assert_eq!(await_reply(&mut witness, DOWN), empty(2));
     assert_eq!(await_reply(&mut witness, DOWN), empty(8));
-    // A reply staged before a panic is never sent, and the session closes.
+    // The next callback on this peer runs after the panic. Its reply must come first:
+    // the staged reply is discarded without closing the connection.
     let mut failing = super::sender_tests::connect_peer(port, "TypedPanic");
     send(&mut failing, UP, empty(13).to_vec());
-    let reason = await_disconnect(&mut failing, DOWN);
-    assert!(reason.contains("typed_probe"), "{reason}");
-    // The staged write to the witness was rolled back, as a healthy callback sees it.
-    send(&mut witness, OTHER, empty(4).to_vec());
-    assert_eq!(await_reply(&mut witness, DOWN), empty(4));
+    send(&mut failing, OTHER, empty(4).to_vec());
+    assert_eq!(await_reply(&mut failing, DOWN), empty(4));
+    assert_eq!(
+        SERVER.lock().unwrap().last().copied(),
+        Some((OTHER, 4, Some(full))),
+        "the failed handler's write was rolled back"
+    );
+    // A fresh peer still negotiates the channel, but skips the disabled callback.
+    let mut later = super::sender_tests::connect_peer(port, "TypedLater");
+    send(&mut later, UP, empty(7).to_vec());
+    send(&mut later, OTHER, empty(5).to_vec());
+    assert_eq!(await_reply(&mut later, DOWN), empty(5));
     let seen: Vec<_> = SERVER
         .lock()
         .unwrap()
@@ -394,21 +404,17 @@ fn lan(game: &mut super::Game<'_>) {
             (UP, 3),
             (UP, 7),
             (UP, 13),
-            (OTHER, 4)
+            (OTHER, 4),
+            (OTHER, 5),
         ]
     );
-    let last = SERVER.lock().unwrap().last().unwrap().2;
     assert_eq!(
-        last,
-        Some(full),
-        "the failed handler's write was rolled back"
+        take_hook_panics(),
+        [HookPanicReport {
+            mod_id: "typed_probe",
+            hook: "payload",
+        }]
     );
-    // The panicked callback is disabled: a later message on it is refused at ingress, as for
-    // a disabled owner, and the session ends without running it.
-    let mut later = super::sender_tests::connect_peer(port, "TypedLater");
-    send(&mut later, UP, empty(7).to_vec());
-    await_disconnect(&mut later, DOWN);
-    assert_eq!(SERVER.lock().unwrap().len(), seen.len());
 }
 
 /// Send `data` on `channel` from a TCP peer in play.

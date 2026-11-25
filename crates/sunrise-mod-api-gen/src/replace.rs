@@ -511,7 +511,7 @@ pub fn qualified(sig: &syn::Signature, trait_path: &syn::Path) -> syn::Signature
 
 /// Whether `sig` still names something through `Self::` (an associated constant of the trait, in
 /// an array length): that has no form outside the trait's `impl`.
-fn names_associated(sig: &syn::Signature) -> bool {
+pub(crate) fn names_associated(sig: &syn::Signature) -> bool {
     struct Find(bool);
     impl<'ast> syn::visit::Visit<'ast> for Find {
         fn visit_path(&mut self, path: &'ast syn::Path) {
@@ -584,9 +584,17 @@ impl syn::visit_mut::VisitMut for ElideTo {
             *lifetime = self.0.clone();
         }
     }
-    // A function pointer or trait object in the return elides on its own.
+    // A function pointer in the return elides on its own; a trait object's explicit `'_` bound
+    // (`Box<dyn Read + '_>`) borrows from the receiver while trait-bound arguments (`dyn Fn(&T)`)
+    // elide on their own.
     fn visit_type_bare_fn_mut(&mut self, _: &mut syn::TypeBareFn) {}
-    fn visit_type_trait_object_mut(&mut self, _: &mut syn::TypeTraitObject) {}
+    fn visit_type_trait_object_mut(&mut self, object: &mut syn::TypeTraitObject) {
+        for bound in &mut object.bounds {
+            if let syn::TypeParamBound::Lifetime(lifetime) = bound {
+                self.visit_lifetime_mut(lifetime);
+            }
+        }
+    }
 }
 
 /// The function-pointer type of `sig`, as written inside its `impl`: the receiver as the first
@@ -1585,6 +1593,24 @@ mod tests {
             pointer_type(&free.sig).to_string(),
             quote!(fn(f32) -> i64).to_string()
         );
+        let trait_obj: syn::ImplItemFn = syn::parse_str(
+            "fn open(&self, id: &str) -> Result<Box<dyn Read + '_>, Err> { todo!() }",
+        )
+        .unwrap();
+        assert_eq!(
+            pointer_type(&trait_obj.sig).to_string(),
+            quote!(for<'__fnr_s> fn(&'__fnr_s Self, &str) -> Result<Box<dyn Read + '__fnr_s>, Err>)
+                .to_string()
+        );
+        let fn_trait_obj: syn::ImplItemFn = syn::parse_str(
+            "fn mapper(&self, a: &str) -> Box<dyn Fn(&str) -> &str + '_> { todo!() }",
+        )
+        .unwrap();
+        assert_eq!(
+            pointer_type(&fn_trait_obj.sig).to_string(),
+            quote!(for<'__fnr_s> fn(&'__fnr_s Self, &str) -> Box<dyn Fn(&str) -> &str + '__fnr_s>)
+                .to_string()
+        );
     }
 
     #[test]
@@ -2131,5 +2157,36 @@ mod tests {
             fs::read_to_string(root.path().join("crates/sunrise-high/src/lib.rs")).unwrap(),
             "#[sunrise_mod_api_macros::replaceable] pub fn drawn() {}\n"
         );
+    }
+
+    #[test]
+    fn stages_method_returning_trait_object_with_elided_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "crates/sunrise-client/Cargo.toml",
+            "[package]\nname = 'sunrise-client'\n",
+        );
+        write("crates/sunrise-client/src/lib.rs", "mod game;\n");
+        write(
+            "crates/sunrise-client/src/game.rs",
+            "impl Game<'_> {\n\
+             fn open_resource(&self, id: &str) -> Result<Option<Box<dyn std::io::Read + '_>>, ()> { let _ = id; Ok(None) }\n\
+             fn mapper(&self, _tag: &str) -> Box<dyn Fn(&str) -> &str + '_> { Box::new(|s| s) }\n\
+             }\n",
+        );
+
+        let staged = stage(root.path()).unwrap();
+        assert_eq!(staged.functions, 2);
+        let rewritten =
+            fs::read_to_string(root.path().join("crates/sunrise-client/src/game.rs")).unwrap();
+        let open_expected = "for < '__fnr_s > fn (& '__fnr_s Self , & str) -> Result < Option < Box < dyn std :: io :: Read + '__fnr_s > > , () >";
+        assert!(rewritten.contains(open_expected), "{rewritten}");
+        let mapper_expected = "for < '__fnr_s > fn (& '__fnr_s Self , & str) -> Box < dyn Fn (& str) -> & str + '__fnr_s >";
+        assert!(rewritten.contains(mapper_expected), "{rewritten}");
     }
 }

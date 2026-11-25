@@ -726,6 +726,7 @@ mod tests {
             pose: [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             polygons: Vec::new(),
             children,
+            layer: None,
         }
     }
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -1073,6 +1074,7 @@ mod tests {
     fn a_fox_sits_by_its_own_flags() {
         let mut m = mob();
         m.kind = std::sync::Arc::new(crate::mobs::MobType {
+            type_key: Default::default(),
             species: crate::mobs::Species::Fox,
             ..(*m.kind).clone()
         });

@@ -146,6 +146,31 @@ fn fall(g: &Game<'_>) -> (f64, Option<[f64; 3]>, [bool; 3]) {
 
 #[test]
 #[ignore = "daily"]
+fn fall_distance_handle_reads_the_guests_fall_and_landing() {
+    crate::game::in_own_process(
+        "game::lan_actions::guest_body::tests::fall_reset::fall_distance_handle_reads_the_guests_fall_and_landing",
+        || {
+            let mut resources = None;
+            let scratch = tempfile::tempdir().unwrap();
+            let mut game = scene(&mut resources, scratch.path());
+            let entity = game.player(1).unwrap().entity();
+            drain_moves(&mut game, [(109.0, 0)]);
+            assert_eq!(entity.fall_distance(&game), Some(1.0));
+            game.tick_lan(false);
+            drain_moves(&mut game, [(108.0, 0)]);
+            assert_eq!(entity.fall_distance(&game), Some(2.0));
+            game.tick_lan(false);
+            drain_moves(&mut game, [(100.0, 1)]);
+            let guest = game.lan.as_ref().unwrap().hub.guest(1).unwrap();
+            assert_eq!(guest.position, [12.5, 100.0, 12.5]);
+            assert!(guest.on_ground);
+            assert_eq!(entity.fall_distance(&game), Some(0.0));
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
 fn a_guest_move_that_goes_up_ends_its_fall() {
     crate::game::in_own_process(
         "game::lan_actions::guest_body::tests::fall_reset::a_guest_move_that_goes_up_ends_its_fall",
@@ -285,6 +310,43 @@ fn a_totem_saves_the_guest_before_its_tracked_fall_ends() {
         "game::lan_actions::guest_body::tests::fall_reset::a_totem_saves_the_guest_before_its_tracked_fall_ends",
         || {
             lethal_landing(true);
+        },
+    );
+}
+
+#[test]
+#[ignore = "daily"]
+fn lethal_landing_consumes_one_item_with_death_protection_from_the_selected_slot() {
+    crate::game::in_own_process(
+        "game::lan_actions::guest_body::tests::fall_reset::lethal_landing_consumes_one_item_with_death_protection_from_the_selected_slot",
+        || {
+            let mut resources = None;
+            let scratch = tempfile::tempdir().unwrap();
+            let mut g = scene(&mut resources, scratch.path());
+            tick_with_moves(&mut g, &[105.0], (5.0, None, [false; 3]));
+
+            let mut item = ItemStack::new("minecraft:stick", 2);
+            item.data_mut().set_other(
+                "minecraft:death_protection",
+                Some(sunrise_core::nbt::Tag::Compound(Default::default())),
+            );
+            g.as_guest(1, |game| {
+                game.player
+                    .as_mut()
+                    .unwrap()
+                    .set_health(0.5, false)
+                    .unwrap();
+                game.selected = 1;
+                game.inventory[1] = Some(item.clone());
+            })
+            .unwrap();
+
+            drain_moves(&mut g, [(100.0, 1)]);
+            let guest = &g.lan.as_ref().unwrap().hub.guests[0];
+            assert!(!guest.dead);
+            assert_eq!(guest.health, 1.0);
+            item.count = 1;
+            assert_eq!(guest.inventory[1].as_ref(), Some(&item));
         },
     );
 }

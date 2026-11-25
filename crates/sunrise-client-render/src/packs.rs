@@ -61,7 +61,7 @@ pub struct Pack {
     /// Presentation and selection supplied by an additional repository source.
     pub selection: Option<crate::pack_screen::PackInfo>,
 }
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filter {
     namespace: Option<Pattern>,
     path: Option<Pattern>,
@@ -74,6 +74,10 @@ impl Filter {
         let Some((namespace, path)) = rest.split_once('/') else {
             return false;
         };
+        self.matches(namespace, path)
+    }
+
+    pub(crate) fn matches(&self, namespace: &str, path: &str) -> bool {
         self.namespace
             .as_ref()
             .is_none_or(|p| p.is_match(namespace))
@@ -408,8 +412,7 @@ pub fn compatibility_for(meta: &serde_json::Value, current: Format) -> crate::pa
 /// Whether an `overlays.entries[]` item applies to the current format
 /// (OverlayMetadataSection: `formats` as an int, `[min, max]` or
 /// `{min_inclusive, max_inclusive}`, or `min_format`/`max_format`).
-fn overlay_applies(entry: &serde_json::Value) -> bool {
-    let current = RESOURCE_FORMAT;
+fn overlay_applies(entry: &serde_json::Value, current: Format) -> bool {
     if let (Some(min), Some(max)) = (
         format_of(&entry["min_format"]),
         format_of(&entry["max_format"]),
@@ -438,11 +441,25 @@ fn overlay_applies(entry: &serde_json::Value) -> bool {
     }
 }
 fn overlays_of(meta: &serde_json::Value, configs: &sunrise_polytone::pack::Configs) -> Vec<String> {
+    overlay_directories(meta, |e| {
+        sunrise_polytone::pack::overlay_active(e, configs, overlay_applies(e, RESOURCE_FORMAT))
+    })
+}
+/// The overlay directories of a data pack's metadata that apply to the data pack format.
+pub(crate) fn data_overlays(meta: &serde_json::Value) -> Vec<String> {
+    overlay_directories(meta, |e| {
+        overlay_applies(e, sunrise_core::version::DATA_PACK_FORMAT)
+    })
+}
+fn overlay_directories(
+    meta: &serde_json::Value,
+    active: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<String> {
     meta["overlays"]["entries"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|e| sunrise_polytone::pack::overlay_active(e, configs, overlay_applies(e)))
+        .filter(|e| active(e))
         .filter_map(|e| e["directory"].as_str().map(str::to_owned))
         // OverlayMetadataSection's DIR_VALIDATOR: one folder of the pack, `[-_a-zA-Z0-9.]+`.
         .filter(|d| {
@@ -453,7 +470,7 @@ fn overlays_of(meta: &serde_json::Value, configs: &sunrise_polytone::pack::Confi
         })
         .collect()
 }
-fn filter_of(meta: &serde_json::Value) -> Vec<Filter> {
+pub(crate) fn filter_of(meta: &serde_json::Value) -> Vec<Filter> {
     meta["filter"]["block"]
         .as_array()
         .into_iter()
@@ -502,7 +519,7 @@ pub(crate) fn parse_meta(bytes: &[u8]) -> Option<serde_json::Value> {
 /// The first JSON value of a `.mcmeta` file, as `ResourceMetadata.fromJsonStream` reads it:
 /// Gson's `TypeAdapter.read` stops after the value, so text after it (packs leave `//` notes
 /// there) is never read, and a UTF-8 byte order mark is skipped.
-pub(crate) fn first_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+pub fn first_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     match serde_json::Deserializer::from_slice(bytes)
         .into_iter()
@@ -1016,16 +1033,31 @@ pub fn resources(
     } = resolve(packs)?;
     let filters: Vec<_> = packs.iter().flat_map(|pack| &pack.filter).collect();
     let merged = merged_resources(&base, packs, &stacks);
-    let mut index: BTreeMap<_, _> = base
-        .list("")
-        .into_iter()
-        .filter(|name| {
-            !hidden.contains(name)
-                && !filters.iter().any(|filter| filter.blocks(name))
-                && name != sunrise_core::prepared_files::FILE_NAME
-        })
-        .map(|name| (name.clone(), Resource::file(base.clone(), name)))
-        .collect();
+    let index_base = |source: &ResourceSource| -> BTreeMap<_, _> {
+        source
+            .list("")
+            .into_iter()
+            .filter(|name| {
+                !filters.iter().any(|filter| filter.blocks(name))
+                    && name != sunrise_core::prepared_files::FILE_NAME
+            })
+            .map(|name| (name.clone(), Resource::file(source.clone(), name)))
+            .collect()
+    };
+    let mut index = index_base(&base);
+    // The same resolver already keeps each pack's original files in order.
+    // Publish those winners before the renderer hides or synthesizes files.
+    let raw_base = base.raw_pack_files();
+    let mut raw = if base.same_generation(raw_base) {
+        index.clone()
+    } else {
+        index_base(raw_base)
+    };
+    raw.extend(layers.iter().filter_map(|(name, provided)| {
+        let (_, (_, source, inner)) = provided.last()?;
+        Some((name.clone(), Resource::file(source.clone(), inner.clone())))
+    }));
+    index.retain(|name, _| !hidden.contains(name));
     for (name, (_, (_, source, inner))) in files {
         index.insert(name, Resource::file(source, inner));
     }
@@ -1057,7 +1089,11 @@ pub fn resources(
         stacked.insert(name, below.into_iter().chain(copies).collect());
     }
     stacked.retain(|name, _| index.contains_key(name));
-    Ok(ResourceSource::indexed_with_layers(index, stacked))
+    Ok(ResourceSource::indexed_with_layers(
+        index,
+        stacked,
+        Some(ResourceSource::indexed(raw)),
+    ))
 }
 
 fn merged_resources(
@@ -1725,6 +1761,87 @@ impl SelectionModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_language_resource_is_the_winner_not_the_render_merge() {
+        use crate::resource_source::{Resource, ResourcePath, ResourceSource};
+        use std::io::Read;
+
+        let name = "assets/demo/lang/en_us.json";
+        let winner = b"{ \"high\": \"winner\" }\n";
+        let base = ResourceSource::indexed(BTreeMap::from([(
+            name.into(),
+            Resource::bytes(br#"{"low":"base"}"#.to_vec()),
+        )]));
+        let upper = ResourceSource::indexed(BTreeMap::from([(
+            name.into(),
+            Resource::bytes(winner.to_vec()),
+        )]));
+        let composed = resources(
+            base,
+            &[Pack::mod_layer("top".into(), Source::Opened(upper))],
+        )
+        .unwrap();
+        // Applying another selection over this view must not flatten its raw files.
+        let selected = resources(
+            composed,
+            &[Pack::mod_layer(
+                "empty".into(),
+                Source::Opened(ResourceSource::default()),
+            )],
+        )
+        .unwrap();
+        let rendered: serde_json::Value =
+            serde_json::from_slice(&selected.read(name).unwrap()).unwrap();
+        assert_eq!(rendered, serde_json::json!({"low":"base", "high":"winner"}));
+        let mut raw = Vec::new();
+        selected
+            .raw_pack_files()
+            .open_resource(ResourcePath::new(name).unwrap())
+            .unwrap()
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
+        assert_eq!(raw, winner);
+    }
+
+    #[test]
+    fn raw_language_winner_reports_archive_read_failure_instead_of_lower_bytes() {
+        use crate::resource_source::{Resource, ResourcePath, ResourceSource};
+        use std::io::{Cursor, Read, Write};
+
+        let name = "assets/demo/lang/en_us.json";
+        let base = ResourceSource::indexed(BTreeMap::from([(
+            name.into(),
+            Resource::bytes(br#"{"low":"base"}"#.to_vec()),
+        )]));
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file(name, options).unwrap();
+        zip.write_all(br#"{"high":"winner"}"#).unwrap();
+        let mut bytes = zip.finish().unwrap().into_inner();
+        let offset = {
+            let mut zip = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+            zip.by_index_raw(0).unwrap().data_start().unwrap() as usize
+        };
+        bytes[offset] = 0b0000_0111; // Reserved DEFLATE block type.
+        let archive = ResourceSource::opened_archive(crate::zip::Zip::from_bytes(bytes).unwrap());
+        let selected = resources(
+            base,
+            &[Pack::mod_layer("broken".into(), Source::Opened(archive))],
+        )
+        .unwrap();
+        let rendered: serde_json::Value =
+            serde_json::from_slice(&selected.read(name).unwrap()).unwrap();
+        assert_eq!(rendered, serde_json::json!({"low":"base"}));
+        let mut reader = selected
+            .raw_pack_files()
+            .open_resource(ResourcePath::new(name).unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(reader.read_to_end(&mut Vec::new()).is_err());
+    }
 
     /// A resource manager's `getResourceStack`: every visible copy, lowest first, the packs'
     /// own files (not the merged document the game reads of a stacked kind), with a pack's

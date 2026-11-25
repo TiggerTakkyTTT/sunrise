@@ -29,7 +29,8 @@ fn tags_merge_in_load_order_and_replace_warns() {
         )
         .unwrap();
         let doc = serde_json::from_str(&text).unwrap();
-        sunrise_world::tag_layers::TagLayers::from_file(&doc)
+        sunrise_world::tag_layers::TagLayers::from_file(doc)
+            .unwrap()
             .build(|_| true, |_| None)
             .unwrap()
     };

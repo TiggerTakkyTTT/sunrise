@@ -73,9 +73,8 @@ start); the hedge places and its recipe crafts 4.
 
 - The file must come, over HTTPS, from Modrinth's or CurseForge's file servers (`cdn.modrinth.com`,
   `edge.forgecdn.net`, `mediafilez.forgecdn.net`) or, for Sunrise's registry, from its release assets
-  (`sunrise_mods::index::FILE_HOST`; the same files at the address they had before the move to the horizon-rust
-  organisation; and the release assets of the repository a registry entry names:
-  `browser::download::github_release_asset`).
+  in `sunrise-org/sunrise-mods` (`sunrise_mod_package::index::FILE_HOST`) or from the release assets of the
+  repository a registry entry names (`browser::download::github_release_asset`).
 - Its name must be one plain file name (no folders, `..`, hidden names or reserved characters).
 - It is written as `.<name>.part`, hashed as it arrives, and renamed into place only when its size and checksum match
   what the source lists: SHA-512 on Modrinth, SHA-1 on CurseForge (the strongest hash CurseForge publishes). Anything
@@ -189,7 +188,7 @@ sunrise-launcher mods remove faithful-32x
 ## Sources
 
 **Sunrise's registry.** Content mods (`.smod`), native mods (`.smod`), modpacks (`.spack`), resource packs and shader packs (`.sshader`) made for Sunrise, reviewed as pull requests in
-[horizon-rust/horizon-mods](https://github.com/horizon-rust/horizon-mods) ([modding/src/reference/registry-index.md](modding/src/reference/registry-index.md)). The
+[sunrise-org/sunrise-mods](https://github.com/sunrise-org/sunrise-mods) ([modding/src/reference/registry-index.md](modding/src/reference/registry-index.md)). The
 launcher reads its `index.json` (`browser/sunrise.rs`; `SUNRISE_MOD_INDEX=<file or https address>` reads a test
 registry instead, whose files may then be on disk) at most every ten minutes, and keeps the last copy in
 `mod-browser/sunrise-index.json`. Before a result is installed it shows whether its files are signed and, for a mod,

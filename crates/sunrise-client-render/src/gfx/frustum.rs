@@ -102,6 +102,9 @@ impl Cull for ShadowCull {
     fn tight(&self) -> bool {
         self.casters.is_none()
     }
+    fn vertical_clamp(&self) -> bool {
+        false
+    }
 }
 /// The block entities of `sections` whose box, a block wider on every side, comes within the
 /// 64 blocks block entities are drawn to (`Renderer::block_entities_in_range`).

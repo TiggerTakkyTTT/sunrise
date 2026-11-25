@@ -1,50 +1,18 @@
 //! Restricted views for registration, data loading, configuration, reload, and client setup.
 use std::{collections::BTreeMap, sync::Arc};
 
-/// Fallback empty [`crate::ConfigFiles`] service returned by default context implementations.
-struct EmptyConfigFiles;
-
-impl crate::ConfigFiles for EmptyConfigFiles {
-    fn read(&self, _: &crate::ConfigPath) -> Result<Vec<u8>, crate::ConfigFileError> {
-        Err(crate::ConfigFileError::NoCallingMod)
-    }
-    fn write(&self, _: &crate::ConfigPath, _: &[u8]) -> Result<(), crate::ConfigFileError> {
-        Err(crate::ConfigFileError::NoCallingMod)
-    }
-    fn list(
-        &self,
-        _: &crate::ConfigPath,
-        _: Option<&str>,
-        _: u32,
-    ) -> Result<Vec<crate::ConfigEntry>, crate::ConfigFileError> {
-        Err(crate::ConfigFileError::NoCallingMod)
-    }
-    fn stat(
-        &self,
-        _: &crate::ConfigPath,
-    ) -> Result<Option<crate::ConfigStat>, crate::ConfigFileError> {
-        Err(crate::ConfigFileError::NoCallingMod)
-    }
-    fn remove(&self, _: &crate::ConfigPath) -> Result<bool, crate::ConfigFileError> {
-        Err(crate::ConfigFileError::NoCallingMod)
-    }
-}
-
-const EMPTY_CONFIG_FILES: EmptyConfigFiles = EmptyConfigFiles;
-
-/// Context for config registration and initial loading (`register_configs`, `config_loading`).
-/// Exposes mod settings and the calling mod's `config/` files, not a game host.
-/// Config reloading and unloading instead lend the polling or stopping game's host.
+/// Owner-bound view for a registered config's initial loading.
+/// Reloading and unloading instead lend the live polling or stopping host.
 pub trait ConfigContext {
-    /// A mod's registered setting `key`. Returns `None` for another mod's id or an
-    /// unregistered key.
-    fn setting(&self, _mod_id: &str, _key: &str) -> Option<String> {
-        None
+    /// Read a registered setting through its owner-bound [`crate::SettingKey`].
+    fn setting(
+        &self,
+        _key: crate::SettingKey,
+    ) -> Result<crate::SettingValue, crate::SettingAccessError> {
+        Err(crate::SettingAccessError::Unavailable)
     }
-    /// The calling mod's own files in the game's `config/` folder.
-    fn config_files(&self) -> &'static dyn crate::ConfigFiles {
-        &EMPTY_CONFIG_FILES
-    }
+    /// The game's shared `config/` directory. Lending the path performs no I/O.
+    fn config_dir(&self) -> &std::path::Path;
 }
 
 /// Phase-scoped read-only context for data-reload hooks (`add_server_reload_listeners`,
@@ -89,9 +57,12 @@ pub trait ReloadContext:
     fn on(&self, _mod_id: &str) -> bool {
         false
     }
-    /// A mod's registered setting `key`.
-    fn setting(&self, _mod_id: &str, _key: &str) -> Option<String> {
-        None
+    /// Read a registered setting through its owner-bound [`crate::SettingKey`].
+    fn setting(
+        &self,
+        _key: crate::SettingKey,
+    ) -> Result<crate::SettingValue, crate::SettingAccessError> {
+        Err(crate::SettingAccessError::Unavailable)
     }
     /// Startup opt-in for test-only content.
     fn game_tests_enabled(&self) -> bool {
@@ -211,8 +182,9 @@ pub trait ReloadContext:
     fn enchantment_key_id(&self, _key: crate::EnchantmentKey) -> Option<crate::RegistryName> {
         None
     }
-    /// Borrow the canonical biome id for `key`.
-    fn biome_key_id(&self, _key: crate::BiomeKey) -> Result<&str, crate::BiomeKeyError> {
+    /// Borrow the canonical biome id for `key` from the published biome registry.
+    /// Returns [`crate::BiomeKeyError::UnknownBiome`] if the key is not registered there.
+    fn biome_key_id(&self, _key: &crate::BiomeKey) -> Result<&str, crate::BiomeKeyError> {
         Err(crate::BiomeKeyError::Unavailable)
     }
     /// Borrow the canonical dimension id for `key`.
@@ -283,7 +255,9 @@ const EMPTY_CLIENT_RELOAD_SERVICES: EmptyClientReloadServices = EmptyClientReloa
 ///
 /// Named `ClientReloadHost` rather than `ClientReloadContext` because [`crate::ClientReloadContext`]
 /// is the per-listener asset file reader passed to `ClientReloadListener::prepare`.
-pub trait ClientReloadHost: ReloadContext + crate::prelude::ItemParticlesClientHost {
+pub trait ClientReloadHost:
+    ReloadContext + crate::prelude::ItemParticlesClientHost + crate::InstanceGroupContext
+{
     /// Published client render assets: standalone models, render pipelines, animations,
     /// and baked block-state models.
     fn render_assets(&self) -> &dyn crate::RenderAssets {
@@ -292,38 +266,6 @@ pub trait ClientReloadHost: ReloadContext + crate::prelude::ItemParticlesClientH
     /// Persistent model instance groups.
     fn instance_groups(&self) -> &dyn crate::InstanceGroups {
         &EMPTY_CLIENT_RELOAD_SERVICES
-    }
-    /// Atomically overwrite retained model copies in `group`.
-    fn instance_group_write(
-        &self,
-        _group: crate::InstanceGroupRef,
-        _first: u32,
-        _instances: &[crate::ModelInstance],
-    ) -> Result<(), crate::GroupError> {
-        Err(crate::GroupError::Stale)
-    }
-    /// Set the drawn length of `group`.
-    fn instance_group_set_len(
-        &self,
-        _group: crate::InstanceGroupRef,
-        _len: u32,
-    ) -> Result<(), crate::GroupError> {
-        Err(crate::GroupError::Stale)
-    }
-    /// Replace the transform of `group`.
-    fn instance_group_set_transform(
-        &self,
-        _group: crate::InstanceGroupRef,
-        _transform: [f32; 12],
-    ) -> Result<(), crate::GroupError> {
-        Err(crate::GroupError::Stale)
-    }
-    /// Retire retained model copies in `group`.
-    fn instance_group_destroy(
-        &self,
-        _group: crate::InstanceGroupRef,
-    ) -> Result<(), crate::GroupError> {
-        Err(crate::GroupError::Stale)
     }
     /// Whether `stack`'s resolved model uses block lighting in `context`.
     fn item_uses_block_light(
@@ -388,10 +330,12 @@ pub trait ClientReloadListenerContext {
     fn is_loaded(&self, _id: &str) -> bool {
         false
     }
-    /// A mod's registered setting `key`. Returns `None` for another mod's id or an
-    /// unregistered key.
-    fn setting(&self, _mod_id: &str, _key: &str) -> Option<String> {
-        None
+    /// Read a registered setting through its owner-bound [`crate::SettingKey`].
+    fn setting(
+        &self,
+        _key: crate::SettingKey,
+    ) -> Result<crate::SettingValue, crate::SettingAccessError> {
+        Err(crate::SettingAccessError::Unavailable)
     }
     /// Math backend profile active in this process.
     fn math_profile(&self) -> crate::MathProfile;
@@ -426,19 +370,15 @@ pub trait ClientSetupContext:
     + crate::prelude::PayloadsClientHost
     + crate::prelude::ScoreboardClientHost
 {
-    /// The calling mod's own files in the game's `config/` folder.
-    fn config_files(&self) -> &'static dyn crate::ConfigFiles {
-        &EMPTY_CONFIG_FILES
-    }
-    /// The calling mod's bulk files in `sunrise-mod-data/<mod id>/`.
-    fn data_files(&self) -> &'static dyn crate::ConfigFiles {
-        &EMPTY_CONFIG_FILES
-    }
+    /// The game's shared `config/` directory, as in `ConfigContext::config_dir`.
+    fn config_dir(&self) -> &std::path::Path;
     /// Translate a language key in the client's current language.
     fn translate(&self, _key: &str) -> Option<String> {
         None
     }
-    /// Registered enchantments, in registry order.
+    /// Registered enchantments in registry order, including selection `weight` and `anvil_cost`
+    /// (the base anvil fee per enchantment level). This and the other enchantment reads use the
+    /// table built from the server's synced entries when available, and the local table otherwise.
     fn enchantments(&self) -> Vec<crate::EnchantmentInfo> {
         Vec::new()
     }
@@ -450,7 +390,8 @@ pub trait ClientSetupContext:
     fn enchantment_min_cost(&self, _id: &str, _level: u32) -> Option<i32> {
         None
     }
-    /// Whether enchantment `id` supports `item`.
+    /// Whether `item` is in enchantment `id`'s `supported_items` (`Enchantment.isSupportedItem`).
+    /// Does not consult Item Part overrides.
     fn enchantment_supports(&self, _id: &str, _item: crate::ItemKey) -> bool {
         false
     }
@@ -789,7 +730,8 @@ impl PackageInfo {
     pub fn icon_path(&self) -> Option<&str> {
         self.details.icon_path.as_deref()
     }
-    /// One value of its manifest's `[properties]` table.
+    /// One value of its manifest's `[properties]` table. Only the complete manifest's byte
+    /// limit applies; there is no separate property count or size limit.
     pub fn property(&self, key: &str) -> Option<&crate::PropertyValue> {
         self.details.properties.get(key)
     }
@@ -802,7 +744,8 @@ impl PackageInfo {
 #[derive(Clone)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct RegistrationData {
-    instance_dir: crate::InstanceDirectory,
+    instance_dir: Arc<crate::InstanceDirectory>,
+    config_dir: Option<Arc<std::path::Path>>,
     runtime: crate::RuntimeEnvironment,
     /// Built-in registry names in ID order, by registry name.
     pub(crate) registries: Arc<[(String, Arc<[String]>)]>,
@@ -828,8 +771,12 @@ impl RegistrationData {
         instance_dir: crate::InstanceDirectory,
         runtime: crate::RuntimeEnvironment,
     ) -> Self {
+        let config_dir = instance_dir
+            .to_path_buf()
+            .map(|path| Arc::from(path.join("config")));
         Self {
-            instance_dir,
+            instance_dir: Arc::new(instance_dir),
+            config_dir,
             runtime,
             capability_coverage: None,
             block_entity_coverage: None,
@@ -851,6 +798,21 @@ impl RegistrationData {
     /// Without a registration publication, the load owns a fresh capture.
     pub fn initial_settings_snapshot() -> Option<Arc<[(String, Arc<[(String, String)]>)]>> {
         registration_data().map(|data| data.settings)
+    }
+    /// The startup `config/` path derived from the published registration
+    /// instance directory (`FMLPaths.CONFIGDIR`), when installed.
+    pub fn initial_config_dir() -> Option<Arc<std::path::Path>> {
+        registration_data()?.config_dir
+    }
+    /// The startup `config/` directory from the published registration snapshot,
+    /// falling back to `<current_dir>/config` in isolated tests with no snapshot.
+    pub fn resolved_config_dir() -> Arc<std::path::Path> {
+        Self::initial_config_dir().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join("config")
+                .into()
+        })
     }
     /// Bind each package's checked runtime files, by mod ID: what
     /// [`RegistrationContext::runtime_files`] serves.
@@ -954,12 +916,6 @@ pub struct LoadedMods {
 }
 
 impl LoadedMods {
-    #[cfg(test)]
-    pub(crate) fn from_entries(entries: Arc<[PackageInfo]>) -> Self {
-        let authority = Arc::new(crate::parts::NamespaceAuthority::from_packages(&entries));
-        Self { entries, authority }
-    }
-
     pub(crate) fn new() -> Self {
         #[cfg(test)]
         if let Some((entries, authority)) = TEST_PACKAGES.with_borrow(Clone::clone) {
@@ -1003,9 +959,9 @@ impl LoadedMods {
 /// dispatch order or on which hook asks:
 ///
 /// - [`mods`](Self::mods): the enabled, admitted packages at startup.
-/// - [`registry`](Self::registry): the built-in registries, as `registries.json` lists them.
-///   Entries that mods declare during registration are not in it; a mod already has its own
-///   declarations on its event or registrar.
+/// - [`registry`](Self::registry): built-in registry names in ID order. Mob effects come from the
+///   game's built-in effect table; other registry names come from the prepared report. Entries
+///   that mods declare during registration are not in this view.
 /// - [`setting`](Self::setting): the settings on disk for the loaded packages when registration
 ///   began. Later writes are not seen.
 ///
@@ -1021,9 +977,9 @@ impl LoadedMods {
 /// ```
 ///
 /// ```compile_fail
-/// use mod_api::{HostTransaction, RegistrationContext};
+/// use mod_api::{HostTransaction, RegistrationContext, TransactionError};
 /// fn registration(context: &mut RegistrationContext) {
-///     let _: Result<(), ()> = context.transaction(|_, _| Ok(()));
+///     let _: Result<(), TransactionError<()>> = context.transaction(|_, _| Ok(()));
 /// }
 /// ```
 // exhaustive: its fields are private, so mods cannot build or destructure it
@@ -1133,9 +1089,9 @@ impl RegistrationContext {
 /// ```
 ///
 /// ```compile_fail
-/// use mod_api::{DataLoadContext, HostTransaction};
+/// use mod_api::{DataLoadContext, HostTransaction, TransactionError};
 /// fn load(context: &mut dyn DataLoadContext) {
-///     let _: Result<(), ()> = context.transaction(|_, _| Ok(()));
+///     let _: Result<(), TransactionError<()>> = context.transaction(|_, _| Ok(()));
 /// }
 /// ```
 pub trait DataLoadContext {
@@ -1232,9 +1188,9 @@ impl DataLoadContext for OwningLoad<'_> {
 /// ```
 ///
 /// ```compile_fail
-/// use mod_api::{HostTransaction, LoopContext};
+/// use mod_api::{HostTransaction, LoopContext, TransactionError};
 /// fn each(context: &mut dyn LoopContext) {
-///     let _: Result<(), ()> = context.transaction(|_, _| Ok(()));
+///     let _: Result<(), TransactionError<()>> = context.transaction(|_, _| Ok(()));
 /// }
 /// ```
 pub trait LoopContext {
@@ -1358,9 +1314,9 @@ impl LoopContext for OwningLoop<'_> {
 /// ```
 ///
 /// ```compile_fail
-/// use mod_api::{HostTransaction, WorldgenHost};
+/// use mod_api::{HostTransaction, TransactionError, WorldgenHost};
 /// fn generate(host: &mut dyn WorldgenHost) {
-///     let _: Result<(), ()> = host.transaction(|_, _| Ok(()));
+///     let _: Result<(), TransactionError<()>> = host.transaction(|_, _| Ok(()));
 /// }
 /// ```
 pub trait WorldgenHost {
@@ -1455,11 +1411,6 @@ pub(crate) fn test_owns_namespace(owner: &str, namespace: &str) -> Option<bool> 
         slot.as_ref()
             .map(|(_, authority)| authority.owns(owner, namespace))
     })
-}
-
-#[cfg(test)]
-pub(crate) fn test_namespace_authority() -> Option<Arc<crate::parts::NamespaceAuthority>> {
-    TEST_PACKAGES.with_borrow(|slot| slot.as_ref().map(|(_, authority)| authority.clone()))
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 use crate::resource_source::ResourceSource;
 use std::sync::Arc;
 
-use crate::core_shader::{CoreProgram, Glue};
+use sunrise_glsl::{Glue, Translated};
 
 use super::{HudBatch, HudVertex};
 use crate::gfx::hud_coverage::Pipeline;
@@ -28,6 +28,8 @@ const GLUE: Glue = Glue {
     // GL's clip depth runs from -w to w, wgpu's from 0 to w; GUI text has no depth test.
     finish: "gl_Position.z = 0.5 * gl_Position.w;",
     vertex_id: "hz_vertex_id()",
+    fragment_finish: None,
+    interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
 /// The packs' core shader stages `names` (`shaders/core/<name>.vsh` and `.fsh`, which may differ,
@@ -41,7 +43,7 @@ pub(super) fn load_pair(
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Option<Arc<CoreProgram>> {
+) -> Option<Arc<Translated>> {
     let name = names.1;
     match translate_pair(root, defaults, names, defines, glue, provided)? {
         Ok(program) => {
@@ -59,7 +61,7 @@ pub(super) fn load_pair(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// A stage or include over the translator's budget for a whole shader
-    /// (`core_shader::MAX_EXPANDED`).
+    /// (`sunrise_glsl::MAX_EXPANDED`).
     OverBudget { path: String },
     /// A stage or include that isn't UTF-8 text.
     NotText { path: String },
@@ -69,8 +71,15 @@ pub(crate) enum Refusal {
     StageHidden { path: String },
     /// An include the selected packs don't have (`ns:path`, as the shader asks for it).
     IncludeMissing { id: String },
-    /// The translator refused the GLSL.
-    Translation(String),
+    /// An include refused (`refusal`: missing, unreadable, over the budget, not text) at the
+    /// directive asking for it, in the file (`ns:path`) and on the line that has it.
+    Include {
+        file: String,
+        line: u32,
+        refusal: Box<Refusal>,
+    },
+    /// The translator refused the GLSL, at the files and lines the author wrote.
+    Translation(Vec<sunrise_glsl::Error>),
     /// The translator panicked on it.
     Panicked(String),
 }
@@ -81,13 +90,18 @@ impl std::fmt::Display for Refusal {
             Self::OverBudget { path } => write!(
                 f,
                 "{path} is over the {} bytes a shader may have",
-                crate::core_shader::MAX_EXPANDED
+                sunrise_glsl::MAX_EXPANDED
             ),
             Self::NotText { path } => write!(f, "{path} is not UTF-8 text"),
             Self::Unreadable { path, error } => write!(f, "{path}: {error}"),
             Self::StageHidden { path } => write!(f, "{path} is not in the selected packs"),
             Self::IncludeMissing { id } => write!(f, "{id} is not in the selected packs"),
-            Self::Translation(e) => f.write_str(e),
+            Self::Include {
+                file,
+                line,
+                refusal,
+            } => write!(f, "{file}:{line}: {refusal}"),
+            Self::Translation(errors) => f.write_str(&sunrise_glsl::describe(errors)),
             Self::Panicked(e) => write!(f, "the shader translator failed: {e}"),
         }
     }
@@ -110,12 +124,25 @@ fn translate_pair(
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Option<Result<CoreProgram, Refusal>> {
+) -> Option<Result<Translated, Refusal>> {
     let stages = match selected_stages(root, defaults, (vertex_name, name), &[defines])? {
         Ok(stages) => stages,
         Err(e) => return Some(Err(e)),
     };
-    Some(translate_selected(root, &stages, defines, glue, provided))
+    Some(translate_selected(
+        root,
+        &stages,
+        (vertex_name, name),
+        defines,
+        glue,
+        provided,
+    ))
+}
+
+/// The id of the core shader stage `name` (`minecraft:shaders/core/<name>.<extension>`), which
+/// errors in it name.
+fn stage_id(name: &str, extension: &str) -> String {
+    format!("minecraft:shaders/core/{name}.{extension}")
 }
 
 /// Return both selected stage files if any required variant uses a pack override.
@@ -132,13 +159,17 @@ fn selected_stages(
         let changed = match (&selected, &game) {
             (None, _) => defaults.contains(&path),
             (Some(text), Some(game)) if text == game => variants.iter().any(|defines| {
+                // The text and the refusal: where each line came from changes nothing.
                 let resolved = |base| {
                     crate::core_shader::expand_core_imports(
                         text,
+                        &stage_id(name, extension),
                         "minecraft:shaders/core/",
                         defines,
                         &|id| include_of(base, id).1,
                     )
+                    .map(|expanded| expanded.text().to_owned())
+                    .map_err(|e| e.refusal)
                 };
                 resolved(root) != resolved(defaults)
             }),
@@ -164,27 +195,41 @@ fn selected_stages(
 fn translate_selected(
     root: &ResourceSource,
     (vertex, fragment): &(String, String),
+    (vertex_name, fragment_name): (&str, &str),
     defines: &[&str],
     glue: &Glue,
     provided: &dyn Fn(&str) -> bool,
-) -> Result<CoreProgram, Refusal> {
+) -> Result<Translated, Refusal> {
     let unavailable = std::cell::RefCell::new(None);
     let include = |id: &str| {
         let (refusal, text) = include_of(root, id);
         *unavailable.borrow_mut() = refusal;
         text
     };
-    let stages = crate::core_shader::Stages {
+    let (vertex_file, fragment_file) =
+        (stage_id(vertex_name, "vsh"), stage_id(fragment_name, "fsh"));
+    let stages = sunrise_glsl::Stages {
         dir: "minecraft:shaders/core/",
         vertex,
         fragment,
+        vertex_file: &vertex_file,
+        fragment_file: &fragment_file,
     };
     let translated = contained(|| {
         crate::core_shader::translate_core_at(&stages, defines, &include, glue, provided)
     });
-    translated.map_err(|e| match e {
-        Refusal::Translation(_) => unavailable.into_inner().unwrap_or(e),
-        _ => e,
+    // An include that couldn't be given stops the translation at its directive, the error's
+    // file and line.
+    translated.map_err(|e| match (e, unavailable.into_inner()) {
+        (Refusal::Translation(errors), Some(refusal)) => match errors.first() {
+            Some(at) => Refusal::Include {
+                file: at.file.clone(),
+                line: at.line,
+                refusal: Box::new(refusal),
+            },
+            None => refusal,
+        },
+        (e, _) => e,
     })
 }
 
@@ -214,15 +259,15 @@ fn include_of(
 /// `translate`'s result, or its panic as a refusal: a pack's GLSL is untrusted, and a fault the
 /// translator or naga meets in it must not end the game.
 fn contained(
-    translate: impl FnOnce() -> Result<CoreProgram, String>,
-) -> Result<CoreProgram, Refusal> {
+    translate: impl FnOnce() -> Result<Translated, Vec<sunrise_glsl::Error>>,
+) -> Result<Translated, Refusal> {
     crate::crash::contain(translate)
         .map_err(Refusal::Panicked)
         .and_then(|translated| translated.map_err(Refusal::Translation))
 }
 
 /// A shader file (a stage or an include) of `base`, read only up to the translator's budget
-/// for a whole shader (`core_shader::MAX_EXPANDED`, 1 MiB): none when `base` hasn't it, the
+/// for a whole shader (`sunrise_glsl::MAX_EXPANDED`, 1 MiB): none when `base` hasn't it, the
 /// refusal naming its path when it is over the budget or isn't text.
 pub(crate) fn read_shader_file(
     base: &ResourceSource,
@@ -231,7 +276,7 @@ pub(crate) fn read_shader_file(
     if !base.contains(path) {
         return Ok(None);
     }
-    let max = crate::core_shader::MAX_EXPANDED as u64;
+    let max = sunrise_glsl::MAX_EXPANDED as u64;
     let path = path.to_owned();
     // `read_limited` refuses a resource over `max` as invalid data.
     let bytes = base.read_limited(&path, max).map_err(|e| match e.kind() {
@@ -248,18 +293,16 @@ pub(crate) fn read_shader_file(
 
 /// The packs' `core/lightmap` with `core/screenquad`, when a pack replaces either stage: the
 /// pass gives it `LightmapInfo` besides vanilla's blocks, and the packs' expression uniforms
-/// (`modifiers`) of either stage's file, resolved here for the blocks its stages read. A block
-/// no file of its stages names, or an expression block that is not one float, refuses it.
+/// (`modifiers`) of either stage's file. Unspecified float blocks read zero.
 fn load_lightmap(
     root: &ResourceSource,
     defaults: &ResourceSource,
     modifiers: &crate::polytone_post::ShaderModifiers,
 ) -> Option<(
-    Arc<CoreProgram>,
+    Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
 )> {
     let shaders = crate::gfx::core_lightmap::SHADERS;
-    let names = modifiers.names(&shaders);
     let info = crate::gfx::core_lightmap::INFO_BLOCK;
     let globals = sunrise_polytone::globals::BLOCK;
     let program = load_pair(
@@ -268,7 +311,7 @@ fn load_lightmap(
         ("screenquad", "lightmap"),
         &[],
         &crate::gfx::core_lightmap::GLUE,
-        &|block| block == info || block == globals || names.iter().any(|n| n == block),
+        &|_| true,
     )?;
     match modifiers.resolve((shaders[0], shaders[1]), &program, &[info, globals]) {
         Ok(expressions) => Some((program, expressions)),
@@ -285,21 +328,21 @@ trait UnzipOrDefault {
     fn unzip_or_default(
         self,
     ) -> (
-        Option<Arc<CoreProgram>>,
+        Option<Arc<Translated>>,
         Vec<crate::polytone_post::ExpressionUniform>,
     );
 }
 
 impl UnzipOrDefault
     for Option<(
-        Arc<CoreProgram>,
+        Arc<Translated>,
         Vec<crate::polytone_post::ExpressionUniform>,
     )>
 {
     fn unzip_or_default(
         self,
     ) -> (
-        Option<Arc<CoreProgram>>,
+        Option<Arc<Translated>>,
         Vec<crate::polytone_post::ExpressionUniform>,
     ) {
         match self {
@@ -312,8 +355,8 @@ impl UnzipOrDefault
 /// The packs' core shader `id` (`minecraft:core/<name>`, one shader for both stages: the sky,
 /// the stars, the block outline, and the text for the GUI's, the world's and the see-through
 /// text) for the program `label` names in the log, with its `defines` (the text's `IS_GUI`,
-/// none, `IS_SEE_THROUGH`), `PolyGlobals` and the blocks its file of `modifiers` names, and its
-/// expression uniforms resolved for the blocks its stages read; none when no pack replaces it,
+/// none, `IS_SEE_THROUGH`), `PolyGlobals`, and expression uniforms for the blocks its stages read.
+/// Returns none when no pack replaces it,
 /// it doesn't translate, or a block refuses it (named in the log with the program).
 fn load_with_expressions(
     root: &ResourceSource,
@@ -323,14 +366,12 @@ fn load_with_expressions(
     (label, defines): (&str, &[&str]),
     glue: &Glue,
 ) -> Option<(
-    Arc<CoreProgram>,
+    Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
 )> {
     let name = id.strip_prefix("minecraft:core/")?;
-    let names = modifiers.names(&[id]);
     let globals = sunrise_polytone::globals::BLOCK;
-    let provided = |block: &str| block == globals || names.iter().any(|n| n == block);
-    let translated = translate_pair(root, defaults, (name, name), defines, glue, &provided)?;
+    let translated = translate_pair(root, defaults, (name, name), defines, glue, &|_| true)?;
     let resolved = translated.map_err(|e| e.to_string()).and_then(|program| {
         let expressions = modifiers.resolve((id, id), &program, &[globals]);
         expressions
@@ -398,11 +439,20 @@ fn load_clouds(
         why: e.to_string(),
     })?;
     let translate = |defines: &[&str], samplers: &[&str], targets: usize, pipeline| {
-        translate_selected(root, &stages, defines, &clouds::GLUE, &|name| {
-            matches!(name, clouds::INFO_BLOCK | clouds::FACES) || samplers.contains(&name)
-        })
+        translate_selected(
+            root,
+            &stages,
+            ("clouds", "clouds"),
+            defines,
+            &clouds::GLUE,
+            &|name| matches!(name, clouds::INFO_BLOCK | clouds::FACES) || samplers.contains(&name),
+        )
         .map_err(|e| e.to_string())
-        .and_then(|program| clouds::check(&program, targets).map(|()| program))
+        .and_then(|program| {
+            clouds::check(&program, targets)
+                .map(|()| program)
+                .map_err(|e| e.to_string())
+        })
         .map_err(|why| RequiredShaderRefused { pipeline, why })
     };
     let classic = translate(&CLASSIC_DEFINES, &[], 1, clouds::CLASSIC_PIPELINE)?;
@@ -483,7 +533,7 @@ impl PackText {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         atlas: &wgpu::TextureView,
-        (program, expressions): (&CoreProgram, &[crate::polytone_post::ExpressionUniform]),
+        (program, expressions): (&Translated, &[crate::polytone_post::ExpressionUniform]),
         coverage: bool,
     ) -> Option<Self> {
         // A pack's shader is untrusted: the backend failing to compile it is an internal error.
@@ -666,6 +716,15 @@ pub(super) fn text_runs(
 mod tests {
     use super::*;
 
+    /// `refusal` of an include asked for on `line` of the pack's `lightmap.fsh`.
+    fn in_lightmap(line: u32, refusal: Refusal) -> Refusal {
+        Refusal::Include {
+            file: "minecraft:shaders/core/lightmap.fsh".into(),
+            line,
+            refusal: Box::new(refusal),
+        }
+    }
+
     #[test]
     fn the_gui_projection_maps_gui_pixels_to_the_screen() {
         let mut batch = HudBatch::scratch([1920, 1080]);
@@ -760,7 +819,7 @@ mod tests {
         (source(pack), source(vanilla.to_vec()))
     }
 
-    fn lightmap(own: &[(&str, &str)]) -> Option<Arc<CoreProgram>> {
+    fn lightmap(own: &[(&str, &str)]) -> Option<Arc<Translated>> {
         lightmap_with_expressions(own).map(|(program, _)| program)
     }
 
@@ -768,7 +827,7 @@ mod tests {
     fn lightmap_with_expressions(
         own: &[(&str, &str)],
     ) -> Option<(
-        Arc<CoreProgram>,
+        Arc<Translated>,
         Vec<crate::polytone_post::ExpressionUniform>,
     )> {
         let (root, defaults) = lightmap_packs(own);
@@ -777,8 +836,7 @@ mod tests {
     }
 
     /// A pack's lightmap reading an expression uniform (`Tint`) is given it when a pack's
-    /// `shader_modifiers` gives either stage one of that name, and refused for an unknown block
-    /// otherwise.
+    /// `shader_modifiers` gives either stage one of that name, or zero otherwise.
     #[test]
     fn a_lightmap_shader_is_given_the_packs_expression_uniforms() {
         let fsh = "assets/minecraft/shaders/core/lightmap.fsh";
@@ -806,18 +864,17 @@ mod tests {
         let wide = tinted
             .replace("float value;", "vec4 value;")
             .replace("vec4(value, ", "vec4(value.x, ");
-        assert!(
-            lightmap(&[(fsh, &wide), (&on("lightmap"), r#"{"Tint": "1"}"#)]).is_none(),
-            "a vec4 block"
-        );
-        assert!(
-            lightmap(&[(fsh, tinted)]).is_none(),
-            "no modifier gives Tint"
-        );
-        assert!(
-            lightmap(&[(fsh, tinted), (&on("sky"), r#"{"Tint": "1"}"#)]).is_none(),
-            "another shader's"
-        );
+        assert!(lightmap(&[(fsh, &wide)]).is_none(), "a vec4 block");
+        let other = on("sky");
+        for files in [
+            vec![(fsh, tinted)],
+            vec![(fsh, tinted), (&other, r#"{"Tint": "1"}"#)],
+        ] {
+            let (_, expressions) = lightmap_with_expressions(&files).expect("shader uses zero");
+            assert_eq!(expressions.len(), 1);
+            assert_eq!(expressions[0].name, "Tint");
+            assert_eq!(expressions[0].evaluate(&Default::default()), 0.0);
+        }
     }
 
     /// A pack's lightmap importing Polytone's `polytone_globals.glsl` is given `PolyGlobals`
@@ -906,14 +963,17 @@ mod tests {
         files.insert(include.to_owned(), Resource::bytes(vec![0xff, 0xfe]));
         assert_eq!(
             translation(files),
-            Err(Refusal::NotText {
-                path: include.to_owned()
-            })
+            Err(in_lightmap(
+                2,
+                Refusal::NotText {
+                    path: include.to_owned()
+                }
+            ))
         );
     }
 
     /// [`lightmap`]'s translation, with why it is refused.
-    fn lightmap_translation(own: &[(&str, &str)]) -> Option<Result<CoreProgram, Refusal>> {
+    fn lightmap_translation(own: &[(&str, &str)]) -> Option<Result<Translated, Refusal>> {
         let (root, defaults) = lightmap_packs(own);
         translate_pair(
             &root,
@@ -1025,10 +1085,34 @@ mod tests {
         );
         assert_eq!(
             translate(&hiding(tint)).expect_err("the include hidden"),
-            Refusal::IncludeMissing {
-                id: "minecraft:shaders/core/tint.glsl".into()
-            }
+            in_lightmap(
+                2,
+                Refusal::IncludeMissing {
+                    id: "minecraft:shaders/core/tint.glsl".into()
+                }
+            )
         );
+    }
+
+    /// An error in a file a pack's include includes names that file and its line, through the
+    /// loader's own reading of the packs.
+    #[test]
+    fn an_error_in_a_nested_include_names_its_file_and_line() {
+        let fsh = "assets/minecraft/shaders/core/lightmap.fsh";
+        let tint = "assets/minecraft/shaders/core/tint.glsl";
+        let deep = "assets/minecraft/shaders/core/inner/deep.glsl";
+        let tint_glsl = "#moj_import \"inner/deep.glsl\"\n\
+            vec4 tint(float f) { return vec4(f, 0.5 * f, 0.0, 1.0) * deep(); }\n";
+        let deep_glsl = "// deep\nfloat deep() {\n    return not_declared;\n}\n";
+        let refused =
+            lightmap_translation(&[(fsh, IMPORTING_FSH), (tint, tint_glsl), (deep, deep_glsl)])
+                .expect("the pack replaces a stage")
+                .expect_err("the include has an error");
+        let Refusal::Translation(errors) = refused else {
+            panic!("not the translator's: {refused:?}");
+        };
+        let located: Vec<(&str, u32)> = errors.iter().map(|e| (e.file.as_str(), e.line)).collect();
+        assert_eq!(located, [("minecraft:shaders/core/inner/deep.glsl", 3)]);
     }
 
     /// A stage that isn't UTF-8 text refuses the shader, named.
@@ -1089,9 +1173,12 @@ mod tests {
             .expect_err("an import only under shaders/include is not beside the shader");
         assert_eq!(
             why,
-            Refusal::IncludeMissing {
-                id: "minecraft:shaders/core/tint.glsl".into()
-            }
+            in_lightmap(
+                2,
+                Refusal::IncludeMissing {
+                    id: "minecraft:shaders/core/tint.glsl".into()
+                }
+            )
         );
     }
 
@@ -1116,7 +1203,7 @@ mod tests {
         };
         assert_eq!(
             refused(&[(fsh, IMPORTING_FSH), (tint, &over)]),
-            Refusal::OverBudget { path: tint.into() }
+            in_lightmap(2, Refusal::OverBudget { path: tint.into() })
         );
         // The same file at the budget gets past the read (and the translator then finds the
         // expanded shader too long, a refusal of its own).
@@ -1133,8 +1220,8 @@ mod tests {
     }
 
     /// A pack's `core/lightmap` is loaded with vanilla's `core/screenquad` (a stage of another
-    /// name), and the reverse; none when no pack replaces either; refused when it reads a block
-    /// the lightmap pass doesn't give.
+    /// name), and the reverse; none when no pack replaces either; refused when it reads an
+    /// extra block whose layout the lightmap pass cannot bind.
     #[test]
     fn a_pack_replacing_either_lightmap_stage_is_loaded() {
         let red = "#version 330\nlayout(std140) uniform LightmapInfo {\n    float SkyFactor;\n} info;\n\
@@ -1148,7 +1235,10 @@ mod tests {
                     void main() {\n    texCoord = vec2(0.5);\n    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n";
         assert!(lightmap(&[(vsh, quad)]).is_some());
         assert!(lightmap(&[]).is_none(), "no pack replaces either stage");
-        let other = red.replace("LightmapInfo", "Elsewhere");
+        let other = red
+            .replace("LightmapInfo", "Elsewhere")
+            .replace("float SkyFactor", "vec4 SkyFactor")
+            .replace("info.SkyFactor", "info.SkyFactor.x");
         assert!(lightmap(&[(fsh, &other)]).is_none());
     }
 
@@ -1181,3 +1271,7 @@ mod gpu_tests;
 #[cfg(test)]
 #[path = "pack_text_clouds_tests.rs"]
 mod clouds_tests;
+
+#[cfg(test)]
+#[path = "pack_text_depth_tests.rs"]
+mod depth_tests;

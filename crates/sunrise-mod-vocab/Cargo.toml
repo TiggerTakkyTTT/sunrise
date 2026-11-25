@@ -25,7 +25,6 @@ glam = "0.30"
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen" }
 
 [dev-dependencies]
-sunrise-protocol = { path = "../sunrise-protocol" }
 # Shared API docs deliberately exercise the mod-facing facade, as mods do.
 sunrise-mod-api = { path = "../sunrise-mod-api" }
 

@@ -27,7 +27,7 @@ use sunrise_client::{
     particles::{ParticleOptions, ParticleType},
     random_source,
     scoreboard::pushable_by,
-    sound_engine::{BLOCKS, CartSound, PlayResult, SoundInstance, Sounds},
+    sound_engine::{BLOCKS, CartSound, PlayResult, SoundInstance},
 };
 use sunrise_core::{
     geometry::{Aabb, Vec3, trig},
@@ -186,13 +186,16 @@ pub(super) struct Minecart {
     /// The synched `DATA_ID_COMMAND_NAME` and `DATA_ID_LAST_OUTPUT`, which
     /// follow the command block only at `onUpdated`.
     pub synced_command: String,
-    pub synced_output: String,
+    pub synced_output: Option<sunrise_core::nbt::Tag>,
     /// `AbstractMinecart.customDisplayBlockState` (`DisplayState`): the block
     /// state's NBT form, resolved against the registry where it draws.
     pub custom_display: Option<sunrise_core::nbt::Tag>,
     /// `AbstractMinecart.customDisplayOffset` (`DisplayOffset`), in sixteenths.
     pub custom_offset: Option<i32>,
     pub random: LegacyRandom,
+    /// What `entity_size` answered at its last size refresh (`EntityEvent.Size`): its box takes
+    /// the answer while it holds for its vanilla size.
+    pub(super) size_answer: Option<sunrise_client::pose::SizeAnswer>,
 }
 /// `EntityType.MINECART`'s `sized(0.98F, 0.7F)`: float dimensions, widened.
 pub(super) const WIDTH: f64 = 0.98_f32 as f64;
@@ -495,6 +498,7 @@ impl Minecart {
     }
     pub fn new(id: u32, kind: CartKind, position: Vec3) -> Self {
         Self {
+            size_answer: None,
             join: Default::default(),
             attachment_lifetime: Default::default(),
             id,
@@ -537,18 +541,25 @@ impl Minecart {
             // A fresh `BaseSpawner`, as `MinecartSpawner`'s constructor makes.
             spawner: (kind == CartKind::Spawner).then(Default::default),
             synced_command: String::new(),
-            synced_output: String::new(),
+            synced_output: None,
             custom_display: None,
             custom_offset: None,
             random: random_source::entity(),
         }
     }
+    /// `EntityType.MINECART & co`'s `getDimensions()`: width, height and eye height.
+    pub(super) const DIMENSIONS: [f32; 3] = [0.98, 0.7, 0.595];
     pub fn bounds(&self) -> Aabb {
-        let (w, p) = (WIDTH / 2.0, self.position);
-        Aabb::new(
+        self.bounds_at(self.position)
+    }
+    /// The box of this cart were its position `p`.
+    fn bounds_at(&self, p: Vec3) -> Aabb {
+        let w = WIDTH / 2.0;
+        let vanilla = Aabb::new(
             Vec3::new(p.x - w, p.y, p.z - w),
             Vec3::new(p.x + w, p.y + HEIGHT, p.z + w),
-        )
+        );
+        sunrise_client::pose::SizeAnswer::sized_box(self.size_answer, Self::DIMENSIONS, p, vanilla)
     }
     fn horizontal(&self) -> f64 {
         sunrise_core::geometry::length(self.velocity.x, self.velocity.z)
@@ -602,14 +613,14 @@ impl CartModels {
 }
 impl Game<'_> {
     /// `getCurrentBlockPosOrRailBelow`.
-    fn rail_block(&self, p: Vec3) -> [i32; 3] {
+    pub(super) fn rail_block(&self, p: Vec3, improved: bool) -> [i32; 3] {
         let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
-        let below = if self.minecart_improvements() {
+        let below = if improved {
             (p.y - 0.1 - f64::from(1.0e-5_f32)).floor() as i32
         } else {
             y - 1
         };
-        if self.rail(None, x, below, z).is_some() {
+        if self.tagged_rail(self.world.block(x, below, z)) {
             [x, below, z]
         } else {
             [x, y, z]
@@ -625,7 +636,7 @@ impl Game<'_> {
     /// `OldMinecartBehavior.getPos`: the point on the rail under (x, y, z), on the track the
     /// rail lays for `cart`.
     fn rail_pos(&self, cart: Option<u32>, x: f64, y: f64, z: f64) -> Option<[f64; 3]> {
-        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z));
+        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z), self.minecart_improvements());
         let rail = self.rail(cart, xt, yt, zt)?;
         let (e0, e1) = rail.shape.exits();
         let (fx, fy, fz) = (f64::from(xt), f64::from(yt), f64::from(zt));
@@ -660,7 +671,7 @@ impl Game<'_> {
         mut z: f64,
         offs: f64,
     ) -> Option<[f64; 3]> {
-        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z));
+        let [xt, yt, zt] = self.rail_block(Vec3::new(x, y, z), self.minecart_improvements());
         let rail = self.rail(cart, xt, yt, zt)?;
         let mut y = f64::from(yt) + if rail.shape.is_slope() { 1.0 } else { 0.0 };
         let (e0, e1) = rail.shape.exits();
@@ -868,12 +879,7 @@ impl Game<'_> {
     /// left it. `slot` is where the cart is stored.
     fn cart_inside_blocks(&mut self, c: &mut Minecart, slot: usize, from: Vec3, to: Vec3) {
         let shrink = f64::from(1.0e-5f32);
-        let half = WIDTH / 2.0;
-        let bounds = Aabb::new(
-            Vec3::new(to.x - half, to.y, to.z - half),
-            Vec3::new(to.x + half, to.y + HEIGHT, to.z + half),
-        )
-        .deflate(Vec3::new(shrink, shrink, shrink));
+        let bounds = c.bounds_at(to).deflate(Vec3::new(shrink, shrink, shrink));
         let mut hits = Vec::new();
         let behaviours = self.res.behaviours();
         let world = &self.world;
@@ -1065,7 +1071,7 @@ impl Game<'_> {
         let mut step_start = c.previous;
         while first || movement_left > f64::from(1.0e-5_f32) {
             let initial = c.velocity;
-            let pos = self.rail_block(c.position);
+            let pos = self.rail_block(c.position, true);
             let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) else {
                 c.on_rails = false;
                 if !self.come_off_track(c) {
@@ -1395,8 +1401,9 @@ impl Game<'_> {
             c.damage -= 1.0;
         }
         // NewMinecartBehavior.tick snaps a newly created cart before gravity.
-        if self.minecart_improvements() && c.first_tick {
-            let pos = self.rail_block(c.position);
+        let improved = self.minecart_improvements();
+        if improved && c.first_tick {
+            let pos = self.rail_block(c.position, true);
             if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
                 c.on_rails = true;
                 Self::adjust_cart_to_rails(c, pos, rail.shape);
@@ -1406,13 +1413,13 @@ impl Game<'_> {
         }
         // applyGravity
         c.velocity.y -= c.get_gravity();
-        let pos = self.rail_block(c.position);
-        if self.minecart_improvements() {
+        if improved {
             if !self.move_along_track_new(c, intent) {
                 return false;
             }
         } else {
             // OldMinecartBehavior.tick writes `onRails` every tick, before the move.
+            let pos = self.rail_block(c.position, false);
             let rail = self.rail(Some(c.id), pos[0], pos[1], pos[2]);
             c.on_rails = rail.is_some();
             if let Some(rail) = rail {
@@ -1518,6 +1525,20 @@ impl Game<'_> {
             }
             // MinecartSpawner.tick: `BaseSpawner.serverTick` at the cart's block.
             CartKind::Spawner => {
+                if c.spawner.as_ref().is_some_and(|s| s.spawn_delay <= 0)
+                    && (mod_api::__private::listened(mod_api::HookId::MobSpawnPositionCheck)
+                        || mod_api::__private::listened(mod_api::HookId::FinalizeSpawn))
+                    && let Some(i) = cart_at(&self.carts, c.id, slot)
+                {
+                    // push_from_ticked_cart stored the moved cart. Bring its stored
+                    // fluid state up to date for the shared spawner hooks; mutable
+                    // hooks cannot touch it until the tick finishes.
+                    self.carts.update(i, |stored| {
+                        stored.velocity = c.velocity;
+                        stored.in_water = c.in_water;
+                        stored.fall_distance = c.fall_distance;
+                    });
+                }
                 if let Some(mut spawner) = c.spawner.take() {
                     let key = (
                         c.position.x.floor() as i32,
@@ -1594,8 +1615,7 @@ impl Game<'_> {
         let id = c.id as i32;
         self.lan_entity_event(id, TNT_PRIME_EVENT, at);
         if !self.entity_silent(c.id) {
-            self.audio
-                .play_on(BLOCKS, "minecraft:entity.tnt.primed", Some(at), 1.0, 1.0);
+            self.play_audio_on(BLOCKS, "minecraft:entity.tnt.primed", Some(at), 1.0, 1.0);
         }
     }
     /// `MinecartTNT.handleEntityEvent`: event 70 calls `primeFuse`, which on a
@@ -2016,6 +2036,7 @@ impl Game<'_> {
     /// two inside sounds when the player got in one; then what the sound
     /// instances read this tick (the ridden cart and every cart).
     pub(super) fn start_cart_sounds(&mut self) -> (Option<u32>, Vec<CartSound>) {
+        let improved = self.minecart_improvements();
         let carts: Vec<CartSound> = self
             .carts
             .iter()
@@ -2024,6 +2045,8 @@ impl Game<'_> {
                 position: [c.position.x, c.position.y, c.position.z],
                 // Vec3.horizontalDistance.
                 speed: (c.velocity.x * c.velocity.x + c.velocity.z * c.velocity.z).sqrt(),
+                new_behavior: improved,
+                on_rails: c.on_rails,
             })
             .collect();
         self.cart_sounds
@@ -2031,7 +2054,7 @@ impl Game<'_> {
         for cart in &carts {
             if !self.cart_sounds.contains(&cart.id) {
                 let instance = SoundInstance::minecart(cart, random_source::create());
-                let (_, res) = self.audio.play_instance(instance, false);
+                let (_, res) = self.play_audio_instance(instance, false);
                 if res != PlayResult::NotStarted {
                     self.cart_sounds.insert(cart.id);
                 }
@@ -2045,7 +2068,7 @@ impl Game<'_> {
             for underwater in [true, false] {
                 let instance =
                     SoundInstance::riding_minecart(cart, underwater, random_source::create());
-                let (_, res) = self.audio.play_instance(instance, false);
+                let (_, res) = self.play_audio_instance(instance, false);
                 if res == PlayResult::NotStarted {
                     started = false;
                 }
@@ -2190,13 +2213,6 @@ impl Game<'_> {
         true
     }
     pub(super) fn cart_hit(&self) -> Option<(usize, f64)> {
-        let mut pick = crate::game::pick_accumulator::PickAccumulator::new(self.entity_reach);
-        self.cart_hit_with_pick(&mut pick)
-    }
-    pub(super) fn cart_hit_with_pick(
-        &self,
-        pick: &mut crate::game::pick_accumulator::PickAccumulator,
-    ) -> Option<(usize, f64)> {
         if let Some(hit) = self.cached_entity_pick() {
             let (entity, distance, _) = hit?;
             let index = self.carts.iter().position(|f| f.id == entity.id())?;
@@ -2204,27 +2220,18 @@ impl Game<'_> {
         }
         let (eye, dir) = self.aim()?;
         let reach: f64 = self.entity_reach;
+        let (from, to) = super::pick_accumulator::pick_ray_segment(eye, dir, reach);
+        let mut pick = super::pick_accumulator::PickAccumulator::new(reach * reach);
         let mut best: Option<(usize, f64)> = None;
         for (i, c) in self.carts.iter().enumerate() {
-            let bb = c.bounds();
-            let (lo, hi) = (bb.min_position(), bb.max_position());
-            let (lo, hi) = ([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
-            let (mut t0, mut t1) = (0.0f64, reach);
-            let mut hit = true;
-            for a in 0..3 {
-                if dir[a].abs() < 1e-9 {
-                    hit &= eye[a] >= lo[a] && eye[a] <= hi[a];
-                    continue;
-                }
-                let (mut ta, mut tb) = ((lo[a] - eye[a]) / dir[a], (hi[a] - eye[a]) / dir[a]);
-                if ta > tb {
-                    std::mem::swap(&mut ta, &mut tb);
-                }
-                t0 = t0.max(ta);
-                t1 = t1.min(tb);
-            }
-            if hit && t0 <= t1 && pick.consider(self, c.id, t0) {
-                best = Some((i, t0));
+            if pick.consider_box(
+                self,
+                c.id,
+                from,
+                to,
+                self.client_copy_box(c.id, c.position, c.bounds()),
+            ) {
+                best = Some((i, pick.hovered.unwrap().distance_sq.sqrt()));
             }
         }
         best
@@ -2468,6 +2475,115 @@ impl Game<'_> {
     /// The seed vanilla picks a block state model's weighted alternatives with outside the
     /// world (`BlockModelResolver.MODEL_SEED`).
     pub(super) const BLOCK_MODEL_SEED: i64 = 42;
+    /// `BlockModelResolver.update` + `BlockModelRenderState.submit`: combines external light
+    /// with the block state's own light component-wise (`emissiveRendering` gives full sky+block
+    /// light `(15, 15)`, otherwise `(0, state.getLightEmission())`).
+    pub(super) fn block_display_light(&self, state: BlockStateId, external_light: u32) -> u32 {
+        let emissive = self.pack.assets.registry.state(state).is_some_and(|st| {
+            let name = st.name.strip_prefix("minecraft:").unwrap_or(&st.name);
+            name == "magma_block"
+                || (matches!(name, "sculk_sensor" | "calibrated_sculk_sensor")
+                    && st.properties.get("sculk_sensor_phase").map(String::as_str)
+                        == Some("active"))
+        });
+        let (block_sky, block_em) = if emissive {
+            (15 * 16, 15 * 16)
+        } else {
+            (0, u32::from(self.res.facts().get(state).emission) * 16)
+        };
+        let sky = (external_light & 0xFF).max(block_sky);
+        let block = ((external_light >> 8) & 0xFF).max(block_em);
+        sky | (block << 8)
+    }
+    /// `BlockModelRenderState` / `BlockDisplayRenderer`: baked block-state faces with back-face
+    /// culling (`SHADED_CULL_W`), one resolved sheet (`translucentBlockItemSheet` if any face is
+    /// translucent, else `cutoutBlockItemSheet`), component-wise light max, JOML vertex transform,
+    /// and reusable slot scratch. Returns whether the model routed to the translucent sheet.
+    pub(super) fn block_display_model_vertices(
+        &self,
+        state: BlockStateId,
+        seed: i64,
+        pose: sunrise_client::camera::joml::Mat4,
+        light: u32,
+        slots: &mut Vec<u32>,
+        out: &mut Vec<Vertex>,
+    ) -> bool {
+        if self
+            .pack
+            .render
+            .model_catalog
+            .slots_seeded(state, seed, slots)
+            .is_err()
+        {
+            return false;
+        }
+        let effective_light = self.block_display_light(state, light);
+        let has_translucency = slots.iter().any(|&slot| {
+            self.pack
+                .render
+                .model_catalog
+                .baked_model(slot)
+                .faces
+                .iter()
+                .any(|face| {
+                    let Some(name) = self.pack.layer_names.get(&face.layer) else {
+                        return false;
+                    };
+                    if !self.gui.atlas.sprites.contains_key(name) {
+                        return false;
+                    }
+                    face.translucent
+                        || self.gui.atlas.translucent.contains(name)
+                        || face.quad.render_type
+                            == Some(sunrise_assets::bake::RenderType::Translucent)
+                })
+        });
+        let layer = if has_translucency {
+            sunrise_client::gfx::TRANSLUCENT_ITEM_OVERLAY
+        } else {
+            0
+        };
+        let tint = self.default_block_tint(state);
+        let mut normals = sunrise_client::item_render::FaceNormals::new(pose.to_glam());
+        for &slot in slots.iter() {
+            let model = self.pack.render.model_catalog.baked_model(slot);
+            for face in &model.faces {
+                let Some(name) = self.pack.layer_names.get(&face.layer) else {
+                    continue;
+                };
+                let Some(sprite) = self.gui.atlas.sprites.get(name) else {
+                    continue;
+                };
+                let quad = PreparedModelFace::new(&face.quad, *sprite);
+                let mut color = u32::MAX;
+                if let Some(t) = tint(quad.tint_index) {
+                    color = sunrise_client::hud_layout::multiply(
+                        color,
+                        sunrise_client::mobs::render::abgr(t),
+                    );
+                }
+                let n = normals
+                    .face(quad.facing)
+                    .to_array()
+                    .map(|v| (v.clamp(-1.0, 1.0) * 127.0) as i8);
+                let normal = [n[0], n[1], n[2], sunrise_client::mesher::SHADED_CULL_W];
+                let quad_light = (effective_light & 0xFF)
+                    | ((effective_light >> 8) & 0xFF).max(u32::from(quad.light_emission) * 16) << 8;
+                for k in 0..4 {
+                    out.push(Vertex {
+                        normal,
+                        pos: pose.transform_position(quad.positions[k]),
+                        uv: quad.uv[k],
+                        layer,
+                        color,
+                        light: quad_light,
+                        glint_uv: [0.0, 0.0],
+                    });
+                }
+            }
+        }
+        has_translucency
+    }
     /// Baked block-state faces with default block tints and terrain shade or diffuse lighting.
     pub(super) fn block_model_vertices(
         &self,
@@ -2601,6 +2717,9 @@ impl Game<'_> {
         // edge, scaled by the view scale.
         let range = (WIDTH + HEIGHT + WIDTH) / 3.0 * 64.0 * self.view_scale();
         for c in &self.carts[run] {
+            if self.hides_as_camera(c.id) {
+                continue;
+            }
             let Some(model) = self.cart_models.models.get(&c.kind) else {
                 continue;
             };
@@ -2765,6 +2884,7 @@ impl Game<'_> {
         let lid = |_: [i32; 3]| 0.0;
         let scene = sunrise_client::block_entity_render::Scene {
             camera: glam::DVec3::ZERO,
+            sign_outline: sunrise_client::block_entity_render::SignOutline::None,
             orientation: glam::Quat::IDENTITY,
             anim: &|_| sunrise_client::block_entity_render::BlockAnim::default(),
             texts: None,
@@ -2999,7 +3119,7 @@ impl Minecart {
                 c.synced_command.clone_from(&c.command.command);
                 c.command.set_command(&c.synced_command);
             }
-            c.synced_output = c.command.last_output_string();
+            c.sync_command_output();
         }
         // MinecartSpawner.readAdditionalSaveData: BaseSpawner.load.
         if kind == CartKind::Spawner {

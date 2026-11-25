@@ -1,4 +1,5 @@
 """Unit tests for the keyed datafix input-seed cache (tools/datafix_seeds.py)."""
+import ast
 import hashlib
 import importlib
 import io
@@ -34,6 +35,12 @@ class DatafixSeedKeyTests(unittest.TestCase):
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f'# {rel}\n', encoding='utf-8')
+        self.lab = self.root / datafix_seeds.LAB
+        self.lab.write_text(
+            'def unrelated():\n    return 0\n\n\n'
+            + ''.join(f'def {name}(value):\n    return value\n\n\n' for name in datafix_seeds.LAB_FUNCTIONS),
+            encoding='utf-8',
+        )
         self.expected = [('worlds-pre-1.17', '1.12.2'), ('worlds', '1.19')]
         self.version_pins = {'1.12.2': 'a' * 40, '1.19': 'b' * 40}
         self.runtime_pins = {
@@ -76,6 +83,13 @@ class DatafixSeedKeyTests(unittest.TestCase):
                 path.write_bytes(original + b'# changed\n')
                 self.assertNotEqual(self.key(), base)
                 path.write_bytes(original)
+        for name in datafix_seeds.LAB_FUNCTIONS:
+            with self.subTest(lab=name):
+                original = self.lab.read_text(encoding='utf-8')
+                self.lab.write_text(original.replace(f'def {name}(value):\n    return value\n',
+                                                     f'def {name}(value):\n    return -value\n'), encoding='utf-8')
+                self.assertNotEqual(self.key(), base)
+                self.lab.write_text(original, encoding='utf-8')
 
         self.assertNotEqual(self.key(version_pins={**self.version_pins, '1.19': 'e' * 40}), base)
         self.assertNotEqual(self.key(platform_name='mac-os-arm64'), base)
@@ -88,6 +102,25 @@ class DatafixSeedKeyTests(unittest.TestCase):
             base,
         )
         self.assertNotEqual(self.key(expected=[*self.expected, ('worlds', '1.20.1')]), base)
+
+    def test_lab_changes_outside_the_called_functions_keep_the_key(self):
+        base = self.key()
+        original = self.lab.read_text(encoding='utf-8')
+        self.lab.write_text(original.replace('return 0', 'return 1') + 'def added():\n    pass\n', encoding='utf-8')
+        self.assertEqual(self.key(), base)
+
+    def test_lab_without_a_called_function_is_refused(self):
+        self.lab.write_text('def varint(value):\n    return value\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'free_port'):
+            self.key()
+
+    def test_lab_functions_are_the_ones_the_seed_tools_call(self):
+        called = set()
+        for rel in datafix_seeds.SOURCE_FILES:
+            tree = ast.parse((datafix_seeds.ROOT / rel).read_text(encoding='utf-8'))
+            called.update(node.attr for node in ast.walk(tree)
+                          if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'lab')
+        self.assertEqual(called, set(datafix_seeds.LAB_FUNCTIONS))
 
     def test_default_java_identity_hashes_jdk_content_via_parity_shim(self):
         jdk = self.root / 'jdk'

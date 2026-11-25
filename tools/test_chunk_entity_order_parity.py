@@ -54,8 +54,8 @@ def engine():
     resources = os.environ.get('SUNRISE_TEST_RESOURCES') or str(
         lab.RESOURCES)
     return subprocess.check_output([
-        'cargo', 'test', '-p', 'sunrise-client', '--lib', TEST,
-        '--', '--ignored', '--exact', f'game::persist::lookup_order_tests::{TEST}',
+        lab.parity_fixtures(), TEST,
+        '--ignored', '--exact', f'game::persist::lookup_order_tests::{TEST}',
         '--nocapture'],
         cwd=lab.ROOT, text=True, env={**os.environ, 'SUNRISE_TEST_RESOURCES': resources})
 

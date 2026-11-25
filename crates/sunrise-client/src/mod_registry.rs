@@ -1,5 +1,5 @@
-//! Sunrise's mod registry from inside the game (Options > Mods > Browse mods,
-//! docs/design/mod-hotload.md): the same `index.json` the launcher reads, the
+//! Sunrise's mod registry from inside the game (Options > Mods > Browse mods):
+//! the same `index.json` the launcher reads, the
 //! projects this game can install, and installing one exactly as the launcher
 //! does (`https://github.com/sunrise-org/sunrise-launcher/blob/main/src/browser/sunrise.rs`, `install_version`): downloaded into
 //! `mod-browser/downloads/`, checked against the index (size, SHA-256, the

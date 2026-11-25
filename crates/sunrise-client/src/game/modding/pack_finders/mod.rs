@@ -141,6 +141,17 @@ impl mod_api::prelude::TextHost for StartupDiscovery {
         Err(mod_api::text::TextFormError::Unavailable)
     }
 
+    fn text_to_nbt(&self, _: &mod_api::Text) -> Result<mod_api::Tag, mod_api::text::TextFormError> {
+        Err(mod_api::text::TextFormError::Unavailable)
+    }
+
+    fn text_from_nbt(
+        &self,
+        _: &mod_api::Tag,
+    ) -> Result<Option<mod_api::Text>, mod_api::text::TextFormError> {
+        Err(mod_api::text::TextFormError::Unavailable)
+    }
+
     fn text_from_legacy(&self, _: &str) -> Result<mod_api::Text, mod_api::text::TextFormError> {
         Err(mod_api::text::TextFormError::Unavailable)
     }
@@ -165,7 +176,8 @@ pub(super) fn data_packs(mods: &ModsState) -> Vec<std::sync::Arc<DataPack>> {
         .into_iter()
         .map(|pack| {
             let mut data =
-                DataPack::from_source(pack.id, pack.source.open().expect("retained source"));
+                DataPack::from_source(pack.id, pack.source.open().expect("retained source"))
+                    .with_filter(pack.filter);
             data.selection = pack.selection;
             std::sync::Arc::new(data)
         })

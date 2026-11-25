@@ -36,7 +36,7 @@ GREEN_JOBS = [job("shards / plan"), job("shards / ignored-tests-shards (sunrise-
               job("windows-runtime-leases / test"),
               job("windows-runtime-leases / runtime-leases"), job("windows-runtime-leases / launcher-processes"),
               job("cargo-sunrise-mod / plan"),
-              job("machine-sample / route"), job("machine-sample / build"),
+              job("machine-sample / route"), job("machine-sample / build"), job("exporters / exporters"),
               job("sdk / fresh"), job("sdk / build linux"), job("sdk / build linux-server"),
               job("sdk / fresh"), job("sdk / build windows"), job("sdk / build macos"), job(PARITY_JOB)]
 # Every binstall archive the daily builds (cargo-sunrise-mod-build.yml), with no publish job: it never publishes.
@@ -631,13 +631,13 @@ class DailySummaryTests(unittest.TestCase):
 
     def test_a_job_skipped_beside_another_leg_jobs_failure_is_still_its_own_issue(self):
         arm = "cargo-sunrise-mod / build aarch64-apple-darwin"
-        intel = "cargo-sunrise-mod / build x86_64-apple-darwin"
+        windows = "cargo-sunrise-mod / build x86_64-pc-windows-msvc"
         jobs = [job(arm, "failure", ["Build tool"]) if entry["name"] == arm
-                else job(intel, "skipped") if entry["name"] == intel else entry for entry in GREEN_JOBS]
+                else job(windows, "skipped") if entry["name"] == windows else entry for entry in GREEN_JOBS]
         api = Api(jobs)
         _, out = self.run_summary(api, results=dict(LEGS, **{"cargo-sunrise-mod": {"result": "failure"}}))
         self.assertEqual(sorted(body["title"] for _, path, body in api.writes if path == "issues"),
-                         [f"Daily: {arm} did not complete", f"Daily: {intel} did not complete"])
+                         [f"Daily: {arm} did not complete", f"Daily: {windows} did not complete"])
         self.assertEqual(out.splitlines(), ["green=false", "sdk_green=true"])
 
     def test_a_shard_killed_for_memory_says_by_what_with_its_memory_time_and_running_tests(self):
@@ -947,7 +947,7 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertIn('git merge-base --is-ancestor "$sha" "refs/remotes/origin/$branch"', step["run"])
         self.assertEqual(jobs["summary"]["steps"][-1]["env"]["DRY_RUN"], "${{ needs.resolve.outputs.dry_run }}")
         self.assertEqual(jobs["nightly"]["if"],
-                         "needs.green.result == 'success' && needs.resolve.outputs.branch == 'main'"
+                         "!cancelled() && needs.green.result == 'success' && needs.resolve.outputs.branch == 'main'"
                          " && needs.nightly-branch.result == 'success'")
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
         self.assertEqual(jobs["sdk"]["with"]["commit"], "${{ needs.resolve.outputs.commit }}")

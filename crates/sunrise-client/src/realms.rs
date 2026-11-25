@@ -1040,7 +1040,7 @@ impl Screen {
 
     /// The screen with the game's `saves` folder, which `RealmsSelectFileToUploadScreen`
     /// lists (`new RealmsSelectFileToUploadScreen` reads the level list).
-    pub fn with_saves(saves: Option<PathBuf>) -> Self {
+    pub(crate) fn with_saves(saves: Option<PathBuf>) -> Self {
         // `SkinManager`'s cache under the game directory (`assets/skins`).
         let skin_root = saves
             .as_ref()
@@ -1154,7 +1154,7 @@ impl Screen {
         let _ = std::fs::write(&path, json.to_string());
     }
 
-    pub fn layout_state(&self) -> LayoutState {
+    pub(crate) fn layout_state(&self) -> LayoutState {
         match &self.state {
             FetchState::Loading(_) => LayoutState::Loading,
             // A notification entry alone makes the list (`RealmsMainScreen`'s `LIST`).
@@ -1197,16 +1197,16 @@ impl Screen {
         slot: usize,
     ) -> Option<String> {
         let id = uuid.and_then(sunrise_client_render::auth::parse_uuid)?;
-        let (value, signature) = {
+        let value = {
             let mut profiles = self.skin_workers.profiles.lock().ok()?;
             let crate::skins::Resolve::Done(Some(profile)) =
                 profiles.state(&crate::skins::NameOrId::Id(id))
             else {
                 return None;
             };
-            profile.textures()?
+            profile.textures()?.to_owned()
         };
-        let textures = crate::skins::unpack(&value, signature, crate::skins::texture_uris());
+        let textures = crate::skins::unpack_insecure(&value);
         let url = textures.skin?;
         let location = crate::skins::skin_location(&crate::skins::texture_hash(&url)?);
         let mut downloads = self.skin_workers.downloads.lock().ok()?;
@@ -1310,7 +1310,7 @@ impl Screen {
     /// button, so [`Self::draw`] cannot have drawn it: the buttons render after. Unread
     /// news shows notification/more; the invite button counts the service's pending
     /// invites, notification/1..5 then more. The main screen only (`draw_main`'s header).
-    pub fn draw_header_badges(&self, atlas: &HudAtlas, batch: &mut HudBatch, w: f32) {
+    pub(crate) fn draw_header_badges(&self, atlas: &HudAtlas, batch: &mut HudBatch, w: f32) {
         // `RealmsHeader` belongs to the main list and the product page alike: both draw
         // the pending-invite and news badges on their buttons.
         if !matches!(self.subscreen, SubScreen::Main | SubScreen::AddRealm { .. }) {
@@ -2281,7 +2281,7 @@ impl Screen {
         }
     }
 
-    pub fn focused_box(&self, (w, h): (f32, f32)) -> Option<[f32; 4]> {
+    pub(crate) fn focused_box(&self, (w, h): (f32, f32)) -> Option<[f32; 4]> {
         match &self.subscreen {
             SubScreen::JoinCode { .. } => {
                 // The field sits at the draw's content y + 13 (`AbstractRealmsCodeScreen`'s
@@ -2337,7 +2337,9 @@ impl Screen {
         }
     }
 
-    pub fn focused_text(&mut self) -> Option<(crate::clipboard::FieldId, &mut String, usize)> {
+    pub(crate) fn focused_text(
+        &mut self,
+    ) -> Option<(crate::clipboard::FieldId, &mut String, usize)> {
         match &mut self.subscreen {
             // `RealmsJoinRealmWithCodeScreen`: `setEditable(false)` while validating.
             SubScreen::JoinCode { code, job, .. } => {
@@ -2473,7 +2475,7 @@ impl Screen {
 
     /// `AbstractSliderButton.onDrag`: the settings tab's held distance slider follows the
     /// pointer while the button stays down.
-    pub fn drag(&mut self, cursor: (f32, f32), (w, h): (f32, f32)) {
+    pub fn drag(&mut self, cursor: (f32, f32), (w, h): (f32, f32)) -> bool {
         // `ScrollableLayout`'s held scrollbar (the settings tab's column).
         if self.settings_scroll.held()
             && let SubScreen::Configure {
@@ -2483,8 +2485,7 @@ impl Screen {
             } = &self.subscreen
         {
             let content = settings_rows(matches!(tier, Some(Ok(_)))).1;
-            self.settings_scroll.drag(cursor.1, 24.0, h - 33.0, content);
-            return;
+            return self.settings_scroll.drag(cursor.1, 24.0, h - 33.0, content);
         }
         if let Some(slider) = self.other_slider {
             match slider {
@@ -2500,6 +2501,7 @@ impl Screen {
                         let x = (w / 2.0).floor() + 4.0;
                         *spawn_protection =
                             (crate::ui::slider_value(x, 150.0, cursor.0) * 16.0).round() as i32;
+                        return true;
                     }
                 }
                 // `RealmsEditInviteCodeScreen.ExpirationSlider`: one choice per step.
@@ -2514,14 +2516,15 @@ impl Screen {
                         let left = (w / 2.0).floor() - 154.0;
                         let value = crate::ui::slider_value(left, 308.0, cursor.0);
                         *expiration = (value * (EXPIRATIONS.len() - 1) as f64).round() as usize;
+                        return true;
                     }
                 }
                 _ => {}
             }
-            return;
+            return false;
         }
         let Some(which) = self.settings_slider else {
-            return;
+            return false;
         };
         let SubScreen::Configure {
             tab: ConfigureTab::Settings,
@@ -2530,17 +2533,17 @@ impl Screen {
             ..
         } = &mut self.subscreen
         else {
-            return;
+            return false;
         };
         let Some(Ok(config)) = tier.as_ref() else {
-            return;
+            return false;
         };
         let range = match which {
             0 => config.render_distance.as_ref(),
             _ => config.sim_distance.as_ref(),
         };
         let Some(range) = range else {
-            return;
+            return false;
         };
         let left = (w / 2.0).floor() - 106.0;
         let value = range.from_slider(crate::ui::slider_value(left, 212.0, cursor.0) as f32);
@@ -2549,6 +2552,7 @@ impl Screen {
         } else {
             draft.simulation_distance = Some(value);
         }
+        true
     }
 
     /// `AbstractSliderButton.onRelease`.
@@ -3742,7 +3746,11 @@ impl Screen {
     /// `RealmsCreateWorldFlow.createWorld`: the Create New World screen's settings become
     /// a temporary world (`createTemporaryWorldFolder`) that is packed and uploaded into
     /// the slot; `AlertScreen` (`mco.create.world.reset.title`) shows while it runs.
-    pub fn start_create_world_upload(&mut self, request: CreateWorldRequest, world: CreatedWorld) {
+    pub(crate) fn start_create_world_upload(
+        &mut self,
+        request: CreateWorldRequest,
+        world: CreatedWorld,
+    ) {
         let progress = Arc::new(upload::UploadProgress::default());
         let job = client().map(|client| {
             let progress = Arc::clone(&progress);
@@ -3773,7 +3781,7 @@ impl Screen {
     /// The Create New World screen's Back for the Generate New World tile
     /// (`CreateWorldScreen.openFresh`'s cancel): the screen the reset screen was opened
     /// from — the configuration screen, or the list for a Realm being created.
-    pub fn cancel_create_world(&mut self, request: CreateWorldRequest) {
+    pub(crate) fn cancel_create_world(&mut self, request: CreateWorldRequest) {
         match request.kind {
             ResetKind::NewRealm => {
                 self.subscreen = SubScreen::Main;
@@ -5802,13 +5810,13 @@ impl Screen {
 
     /// The product page's list is on screen: a Tab stop, and the arrows' target while no
     /// button has the keyboard (`ObjectSelectionList`).
-    pub fn pdp_list(&self) -> bool {
+    pub(crate) fn pdp_list(&self) -> bool {
         matches!(self.subscreen, SubScreen::AddRealm { .. })
     }
 
     /// A list takes the keyboard while no button has it: the server list on the main
     /// screen, the product page's rows behind Add Realm.
-    pub fn list_stop(&self) -> bool {
+    pub(crate) fn list_stop(&self) -> bool {
         // Every `ObjectSelectionList` is a keyboard stop: its Enter is the row's action.
         matches!(
             self.subscreen,
@@ -5821,7 +5829,7 @@ impl Screen {
 
     /// `ObjectSelectionList.nextFocusPath` over the server list: from no row an arrow takes
     /// the near end, as `nextEntry` does.
-    pub fn main_arrow(&mut self, up: bool) -> bool {
+    pub(crate) fn main_arrow(&mut self, up: bool) -> bool {
         if !matches!(self.subscreen, SubScreen::Main) {
             return false;
         }
@@ -5840,7 +5848,7 @@ impl Screen {
 
     /// `ServerEntry.keyPressed`'s Enter: an uninitialized entry creates a Realm, a playable
     /// one plays; any other row does nothing.
-    pub fn activate_selected(&mut self) -> Outcome {
+    pub(crate) fn activate_selected(&mut self) -> Outcome {
         // `ObjectSelectionList.Entry.keyPressed`'s `isSelection` for the other lists.
         if let SubScreen::UploadSelect { .. } = &self.subscreen {
             self.activate_upload_select();
@@ -5872,7 +5880,7 @@ impl Screen {
 
     /// `ObjectSelectionList.nextFocusPath`'s `ArrowNavigation` over the product page: with
     /// no row selected an arrow takes the near end, as `nextEntry` does.
-    pub fn pdp_arrow(&mut self, up: bool) -> bool {
+    pub(crate) fn pdp_arrow(&mut self, up: bool) -> bool {
         if !self.pdp_list() {
             return false;
         }
@@ -5889,15 +5897,15 @@ impl Screen {
 
     /// The click just taken was on a product-page row, so the keyboard focus moves to the
     /// list (`AbstractSelectionList.mouseClicked` → `setFocused`).
-    pub fn take_list_click(&mut self) -> bool {
+    pub(crate) fn take_list_click(&mut self) -> bool {
         std::mem::take(&mut self.list_clicked)
     }
 
     /// `AbstractScrollArea.mouseScrolled` over the product page's list, the template and
     /// upload lists.
-    pub fn wheel(&mut self, delta: f32, cursor: (f32, f32), (_, h): (f32, f32)) {
-        if let Some(true) = self.wheel_upload_select(delta, cursor, (f32::NAN, h)) {
-            return;
+    pub fn wheel(&mut self, delta: f32, cursor: (f32, f32), (_, h): (f32, f32)) -> bool {
+        if let Some(handled) = self.wheel_upload_select(delta, cursor, (f32::NAN, h)) {
+            return handled;
         }
         if let SubScreen::AddRealm {
             scroll, content, ..
@@ -5907,10 +5915,10 @@ impl Screen {
             // it by `entryHeight / 2` = 22.
             let (top, bottom) = (44.0, h - 33.0);
             if cursor.1 < top || cursor.1 >= bottom {
-                return;
+                return false;
             }
             scroll.wheel(delta, 22.0, top, bottom, content.get());
-            return;
+            return true;
         }
         // `RealmsSettingsTab`'s `ScrollableLayout`: the column scrolls when it is taller
         // than the tab area (`setMaxHeight(getContentHeight())`).
@@ -5925,8 +5933,9 @@ impl Screen {
             if cursor.1 >= top && cursor.1 < bottom {
                 self.settings_scroll
                     .wheel(delta, 10.0, top, bottom, content);
+                return true;
             }
-            return;
+            return false;
         }
         // `ObjectSelectionList` scrolls: the server list and the pending invites too.
         let scrolled = match &self.subscreen {
@@ -5994,7 +6003,9 @@ impl Screen {
                 SubScreen::PendingInvites { scroll, .. } => {
                     scroll.wheel(delta, height / 2.0, top, bottom, content);
                 }
-                SubScreen::RegionPreference { scroll, .. } => {
+                SubScreen::RegionPreference { scroll, .. }
+                | SubScreen::Backups { scroll, .. }
+                | SubScreen::BackupInfo { scroll, .. } => {
                     scroll.wheel(delta, height / 2.0, top, bottom, content);
                 }
                 SubScreen::Configure {
@@ -6006,7 +6017,7 @@ impl Screen {
                 }
                 _ => {}
             }
-            return;
+            return true;
         }
         let (top, bottom, content, height) = match &self.subscreen {
             SubScreen::TemplateList {
@@ -6017,10 +6028,10 @@ impl Screen {
                 templates.len() as f32 * TEMPLATE_ROW,
                 TEMPLATE_ROW,
             ),
-            _ => return,
+            _ => return false,
         };
         if cursor.1 < top || cursor.1 >= bottom {
-            return;
+            return false;
         }
         match &mut self.subscreen {
             SubScreen::TemplateList { scroll, .. }
@@ -6030,6 +6041,7 @@ impl Screen {
             }
             _ => {}
         }
+        true
     }
 
     pub fn buttons(
@@ -10188,7 +10200,7 @@ impl Screen {
 
     /// `Entry.extractRealmStatus`'s tooltip: the hovered status light names the Realm's
     /// state. Drawn after the buttons, so nothing covers it (as `MultiplayerScreen`'s).
-    pub fn draw_tooltip(
+    pub(crate) fn draw_tooltip(
         &self,
         atlas: &HudAtlas,
         batch: &mut HudBatch,

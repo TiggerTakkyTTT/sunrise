@@ -28,7 +28,9 @@ pub fn resource_files(root: &Path, kind: &str) -> io::Result<BTreeMap<String, Ve
             Err(e) => return Err(e),
         };
         for file in &folder.files {
-            files.insert(format!("{ns}:{}", file.name), file.bytes()?.to_vec());
+            if crate::json_folder::valid_resource_path(&ns, &file.name) {
+                files.insert(format!("{ns}:{}", file.name), file.bytes()?.to_vec());
+            }
         }
     }
     Ok(files)
@@ -232,10 +234,7 @@ impl Catalog {
         let tags = resource_tags(root, overlay, |id, _| catalog.ids.get(id).copied())?;
         // TagLoader.loadPendingTags leaves the registry alone if no tag bound.
         if !tags.is_empty() {
-            catalog.tags = tags
-                .into_iter()
-                .map(|(id, values)| (id, values.into_iter().collect()))
-                .collect();
+            catalog.tags = tags;
         }
         Ok(catalog)
     }

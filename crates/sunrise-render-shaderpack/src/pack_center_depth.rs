@@ -287,6 +287,7 @@ mod tests {
     /// A depth texture cleared to a known depth comes back as that depth, a frame or more
     /// later, without the frame waiting for it.
     #[test]
+    #[ignore = "daily"]
     fn the_centre_depth_comes_back() {
         let _gpu = crate::test_gpu::lock();
         let Some((device, queue)) = test_device() else {

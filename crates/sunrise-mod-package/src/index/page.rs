@@ -1,4 +1,4 @@
-//! A project page's rules (docs/design/registry-v2.md): its categories, tags,
+//! A project page's rules: its categories, tags,
 //! description and images. Shared by the registry's CI ([`super::registry`]),
 //! the submission service and the index's readers.
 use super::Kind;

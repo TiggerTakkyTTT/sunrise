@@ -1,6 +1,52 @@
 use super::super::*;
 
 impl Renderer {
+    /// The timed native sky disc, before the engine draws the remaining sky features.
+    pub(in super::super) fn draw_timed_native_sky(
+        native: &mut Option<native_pack::NativePack>,
+        device: &wgpu::Device,
+        group: &wgpu::BindGroup,
+        encoder: &mut wgpu::CommandEncoder,
+        (world_view, world_depth, format): (
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+            wgpu::TextureFormat,
+        ),
+        clear: wgpu::Color,
+    ) {
+        if let Some(native) = native
+            && let Some(sky) = &native.sky
+        {
+            if let Some(t) = &mut native.timing {
+                t.mark(device, encoder, (world_view, format));
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&sky.label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: world_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: world_depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: native.timing.as_mut().and_then(|t| t.writes(&sky.label)),
+                ..Default::default()
+            });
+            pass.set_bind_group(0, group, &[]);
+            sky.draw(&mut pass, &native.frame);
+        }
+    }
+
     pub(in super::super) fn draw_sky_pass_content(
         &self,
         pass: &mut pack_timing::CountedPass<'_>,

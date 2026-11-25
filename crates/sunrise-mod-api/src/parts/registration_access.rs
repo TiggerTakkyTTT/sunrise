@@ -26,6 +26,7 @@ fn names(
         RegistrationKeyKind::Item => &keys.items,
         RegistrationKeyKind::Fluid => &keys.fluids,
         RegistrationKeyKind::Effect => &keys.effects,
+        RegistrationKeyKind::DamageType => &keys.damage_types,
         RegistrationKeyKind::BlockEntityType => &keys.block_entity_types,
         RegistrationKeyKind::EntityType => &keys.entity_types,
         RegistrationKeyKind::GameEvent => &keys.game_events,

@@ -47,6 +47,18 @@ pub fn requirement<'a>(manifest: &Manifest, cargo: &'a toml::Table) -> Requireme
 
 /// The game-code table or internals facade that ties this mod to its exact game build.
 pub fn changes_game(manifest: &Manifest, cargo: &toml::Table) -> Option<&'static str> {
+    manifest_game_code(manifest).or_else(|| {
+        dependency_tables(cargo)
+            .any(|(_, deps)| {
+                deps.iter()
+                    .any(|(key, value)| package_name(key, value) == INTERNALS_PACKAGE)
+            })
+            .then_some("internals")
+    })
+}
+
+/// The game-code table declared by a manifest, independent of its Cargo dependencies.
+pub fn manifest_game_code(manifest: &Manifest) -> Option<&'static str> {
     // Every row kind by name: a new one does not compile until it is routed here.
     if let Some(Native {
         game: _,
@@ -56,7 +68,6 @@ pub fn changes_game(manifest: &Manifest, cargo: &toml::Table) -> Option<&'static
         mixin,
         module,
         bridge,
-        state,
         r#loop,
     }) = &manifest.native
     {
@@ -64,7 +75,6 @@ pub fn changes_game(manifest: &Manifest, cargo: &toml::Table) -> Option<&'static
             (mixin.is_empty(), "[[native.mixin]]"),
             (module.is_empty(), "[[native.module]]"),
             (bridge.is_empty(), "[[native.bridge]]"),
-            (state.is_empty(), "[[native.state]]"),
             (r#loop.is_empty(), "[[native.loop]]"),
         ] {
             if !empty {
@@ -72,12 +82,7 @@ pub fn changes_game(manifest: &Manifest, cargo: &toml::Table) -> Option<&'static
             }
         }
     }
-    (!manifest.internals.is_empty()
-        || dependency_tables(cargo).any(|(_, deps)| {
-            deps.iter()
-                .any(|(key, value)| package_name(key, value) == INTERNALS_PACKAGE)
-        }))
-    .then_some("internals")
+    (!manifest.internals.is_empty()).then_some("internals")
 }
 
 fn package_name<'a>(key: &'a str, value: &'a toml::Value) -> &'a str {

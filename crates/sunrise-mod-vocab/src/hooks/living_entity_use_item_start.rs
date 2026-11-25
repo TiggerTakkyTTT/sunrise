@@ -1,5 +1,4 @@
 //! The `living_entity_use_item_start` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0104
 
 pub trait Hooks {
     /// NeoForge's `LivingEntityUseItemEvent.Start`: `entity` starts using

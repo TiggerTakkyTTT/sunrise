@@ -18,6 +18,21 @@ pub trait SideLevel {
     fn enabled_features(&self) -> &std::sync::Arc<[String]>;
     /// The merged tag tables: the server's, a client's from the join, none before they exist.
     fn tag_items(&self) -> Option<&crate::items::Items>;
+    /// Borrow the equipment of the player whose movement this side is driving.
+    fn player_equipment(&self) -> crate::health::PlayerEquipment<'_> {
+        [None; 8]
+    }
+    /// Whether a living target not lent to the mob tick still has a live body.
+    fn living_target_alive(&self, _id: u32) -> bool {
+        false
+    }
+    /// What a hit on that player needs to name and read the living entities it lends; none
+    /// where this side has no open world. Only a hit's level asks.
+    fn hit_reads(&self) -> Option<crate::health::HitReads<'_>> {
+        None
+    }
+    /// The damage-type registry of this side's current level.
+    fn damage_types(&self) -> &sunrise_world::damage_source::Catalog;
     /// The resident block entity at `pos` of `world`, as a handle of this side's level.
     fn block_entity(&self, world: &World, pos: BlockPos) -> Option<mod_api::BlockEntityRef>;
     /// Saved data for a resident handle of this side's level; never loads chunks or loot.
@@ -27,41 +42,63 @@ pub trait SideLevel {
         registry: &BlockRegistry,
         entity: mod_api::BlockEntityRef,
     ) -> Option<mod_api::Compound>;
+    /// The world open that owns motion entities on this side.
+    fn world_epoch(&self) -> Option<mod_api::WorldEpoch> {
+        None
+    }
+    /// The read-only block-state and fluid fact tables of this side. Only dry test/probe sides
+    /// have no tables.
+    fn block_states(&self) -> Option<mod_api::BlockStates<'_>> {
+        None
+    }
 }
 
-/// The level data of a side with no weather, features, tags or block entities. Only for tests and
-/// probes that never read them: a game tick lends the real data (`game_side!`).
+/// Level data for tests and probes that do not have a live game.
+#[cfg(any(test, feature = "test-dry-side"))]
+pub(crate) struct DrySide<'a>(pub &'a sunrise_world::damage_source::Catalog);
+
+#[cfg(any(test, feature = "test-dry-side"))]
+impl SideLevel for DrySide<'_> {
+    fn is_raining_at(&self, _: &World, _: BlockPos) -> bool {
+        false
+    }
+    fn enabled_features(&self) -> &std::sync::Arc<[String]> {
+        static FEATURES: std::sync::LazyLock<std::sync::Arc<[String]>> =
+            std::sync::LazyLock::new(std::sync::Arc::default);
+        &FEATURES
+    }
+    fn tag_items(&self) -> Option<&crate::items::Items> {
+        None
+    }
+    fn damage_types(&self) -> &sunrise_world::damage_source::Catalog {
+        self.0
+    }
+    fn block_entity(&self, _: &World, _: BlockPos) -> Option<mod_api::BlockEntityRef> {
+        None
+    }
+    fn block_entity_data(
+        &self,
+        _: &World,
+        _: &BlockRegistry,
+        _: mod_api::BlockEntityRef,
+    ) -> Option<mod_api::Compound> {
+        None
+    }
+}
+
+/// A side without any live level data, for tests and probes that never read it.
 #[cfg(any(test, feature = "test-dry-side"))]
 pub fn dry_side() -> &'static dyn SideLevel {
-    struct Dry(std::sync::Arc<[String]>);
-    impl SideLevel for Dry {
-        fn is_raining_at(&self, _: &World, _: BlockPos) -> bool {
-            false
-        }
-        fn enabled_features(&self) -> &std::sync::Arc<[String]> {
-            &self.0
-        }
-        fn tag_items(&self) -> Option<&crate::items::Items> {
-            None
-        }
-        fn block_entity(&self, _: &World, _: BlockPos) -> Option<mod_api::BlockEntityRef> {
-            None
-        }
-        fn block_entity_data(
-            &self,
-            _: &World,
-            _: &BlockRegistry,
-            _: mod_api::BlockEntityRef,
-        ) -> Option<mod_api::Compound> {
-            None
-        }
-    }
-    static DRY: std::sync::OnceLock<Dry> = std::sync::OnceLock::new();
-    DRY.get_or_init(|| Dry(std::sync::Arc::default()))
+    static CATALOG: std::sync::LazyLock<sunrise_world::damage_source::Catalog> =
+        std::sync::LazyLock::new(sunrise_world::damage_source::Catalog::default);
+    static SIDE: std::sync::LazyLock<DrySide<'static>> =
+        std::sync::LazyLock::new(|| DrySide(&CATALOG));
+    &*SIDE
 }
 
-/// The engine data a subscribed friction part may read. Borrows the actual world, this side's
-/// level data and the caller's coefficient table; it carries no write access or entity snapshot.
+/// The read-only level a subscribed block part reads: friction, bounce restitution, sound type
+/// and a client's step-on. Borrows the actual world, this side's level data and the caller's
+/// friction coefficient table; it carries no write access or entity snapshot.
 #[derive(Clone, Copy)]
 pub struct FrictionLevel<'a> {
     pub world: &'a World,

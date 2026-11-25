@@ -10,6 +10,7 @@ pub struct Requests {
     pub declared_fluids: HashMap<String, &'static str>,
     pub items: Names,
     pub effects: Names,
+    pub damage_types: Names,
     pub particles: Names,
     pub block_entity_types: Names,
     pub entity_types: Names,
@@ -111,6 +112,14 @@ impl Names {
         }
     }
 
+    /// Take back every request `drop` names, as [`Self::withdraw`] does for one.
+    pub fn withdraw_where(&mut self, mut drop: impl FnMut(&'static str, &str) -> bool) {
+        for entry in &mut self.entries {
+            let id = entry.id.as_str();
+            entry.mods.retain(|&mod_id| !drop(mod_id, id));
+        }
+    }
+
     pub fn id(&self, slot: u32) -> Option<&str> {
         self.entries
             .get(slot as usize)
@@ -167,6 +176,34 @@ impl Names {
         } else {
             Err(errors)
         }
+    }
+}
+
+/// A resolved entity registry with classification indexed by the same load-owned slots.
+pub struct EntityTypes {
+    names: Names,
+    living: Box<[Option<bool>]>,
+}
+
+impl EntityTypes {
+    /// Attach the living classification to the slots of the completed name table.
+    pub fn new(names: Names, mut is_living: impl FnMut(&str) -> Option<bool>) -> Self {
+        let living = names
+            .entries
+            .iter()
+            .map(|entry| is_living(&entry.id))
+            .collect();
+        Self { names, living }
+    }
+
+    /// The completed entity type names and registration order.
+    pub fn names(&self) -> &Names {
+        &self.names
+    }
+
+    /// Living classification of an exact registered type id, or None if unknown.
+    pub fn is_living(&self, id: &str) -> Option<bool> {
+        self.living[*self.names.slots.get(id)? as usize]
     }
 }
 

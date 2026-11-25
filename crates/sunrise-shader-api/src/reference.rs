@@ -41,7 +41,6 @@ pub fn path(api: Api) -> &'static str {
 const RULES_0_2: &str = "\
 **Experimental** ([stability.md](stability.md)): `sunrise-shader check` takes 0.2 packs, the game draws them only
 with `SUNRISE_HDR_FRAME=float` set, the registry doesn't list them, and anything here may change in any release.
-The design: [hdr-linear-light.md](../design/hdr-linear-light.md).
 
 ## Colour
 

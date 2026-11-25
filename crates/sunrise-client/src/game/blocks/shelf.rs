@@ -148,7 +148,7 @@ impl Game<'_> {
             if !swapped {
                 return Some(false);
             }
-            self.audio.play(
+            self.play_audio(
                 "minecraft:block.shelf.multi_swap",
                 Some(pos.map(|n| f64::from(n) + 0.5)),
                 1.0,
@@ -209,8 +209,7 @@ impl Game<'_> {
                 (false, true) => "minecraft:block.shelf.take_item",
                 (true, true) => "minecraft:block.shelf.single_swap",
             };
-            self.audio
-                .play(sound, Some(pos.map(|n| f64::from(n) + 0.5)), 1.0, 1.0);
+            self.play_audio(sound, Some(pos.map(|n| f64::from(n) + 0.5)), 1.0, 1.0);
             Some(true)
         }
     }
@@ -224,11 +223,16 @@ impl Game<'_> {
 
     /// The items [`Self::shelf_geometry`] draws, slot by slot.
     pub(super) fn shelf_items(&self, camera: glam::DVec3, mut draw: impl FnMut(BlockItemDraw)) {
+        let _items = sunrise_client::spans::raw_flight_guard("block_entity_items");
+        let reach = Reach::Default;
+        sunrise_client::spans::note_block_entity_item_visits(|| {
+            self.world.block_entities.len() as u64
+        });
         for (key, entity) in &self.world.block_entities {
             let BlockEntity::Shelf(shelf) = entity else {
                 continue;
             };
-            if !Reach::Default.should_render([key.0, key.1, key.2], camera, 0) {
+            if !reach.should_render([key.0, key.1, key.2], camera, 0) {
                 continue;
             }
             let block = self.world.block(key.0, key.1, key.2);

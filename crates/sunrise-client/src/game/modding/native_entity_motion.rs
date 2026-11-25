@@ -7,6 +7,7 @@
 use super::entity::{Entity as _, EntityHandle, with_entity, with_entity_mut};
 use super::{Game, commands::Target};
 use mod_api::{ClipBlock, ClipFluid, ClipHit, EntityRef, LevelWriteError};
+use std::ops::ControlFlow;
 use sunrise_client::{collisions::SceneCollisions, motion::player_context};
 use sunrise_core::geometry::{Aabb, Axis, Vec3};
 use sunrise_core::position::BlockPos;
@@ -139,33 +140,52 @@ impl Game<'_> {
     /// `Entity.getControllingPassenger` when it is a player.
     fn native_controlling_player(&self, t: Target, entity: EntityRef) -> Option<EntityRef> {
         let steered = self.native_steered(t);
-        let first = *self.entity_passengers(entity).ok_or(()).ok()?.first()?;
+        let mut first = None;
+        let _ = self
+            .entity_visit_passengers(entity, &mut |rider| {
+                first = Some(rider);
+                ControlFlow::Break(())
+            })
+            .ok()?;
+        let first = first?;
         let player = matches!(
             self.native_entity_target(first)?,
             Target::Player | Target::Guest(_)
         );
         (steered && player).then_some(first)
     }
-    /// Sets the entity's velocity (`Entity.setDeltaMovement`); clients see it
-    /// as they see the entity move. False for a player (its client moves
-    /// it), an entity Sunrise doesn't simulate, a value that isn't finite,
-    /// or on a client. API 379.
+    /// Replaces `Entity.deltaMovement`; a player also gets a motion packet.
     pub(super) fn entity_set_velocity(&mut self, entity: EntityRef, velocity: [f64; 3]) -> bool {
-        if self.remote.is_some()
-            || !velocity.iter().all(|v| v.is_finite())
-            || self.native_entity_target(entity).is_none()
-        {
+        if !velocity.iter().all(|v| v.is_finite()) {
             return false;
+        }
+        let Some(target) = self.native_entity_target(entity) else {
+            return false;
+        };
+        let [x, y, z] = velocity;
+        let velocity = Vec3::new(x, y, z);
+        if matches!(target, Target::Player | Target::Guest(_)) {
+            return self.write_player_velocity(target, |_| Some(velocity));
         }
         let Some(h) = self.native_walk_entity(entity.id()) else {
             return false;
         };
-        let [x, y, z] = velocity;
-        with_entity_mut!(self, h, e => *e.velocity_mut() = Vec3::new(x, y, z));
+        with_entity_mut!(self, h, e => *e.velocity_mut() = velocity);
         if let EntityHandle::Mob(i) = h {
             self.mobs[i].needs_sync = true;
         }
         true
+    }
+    /// `Entity.fallDistance` on the server body, including the player's accepted moves.
+    pub(super) fn entity_fall_distance(&self, entity: EntityRef) -> Option<f64> {
+        match self.native_entity_target(entity)? {
+            Target::Player => Some(self.player.as_ref()?.fall_distance),
+            Target::Guest(conn) => Some(self.command_guest(conn)?.motion.as_ref()?.fall_distance),
+            _ => Some(self.native_walk_entity(entity.id()).map_or(
+                0.0,
+                |handle| with_entity!(self, handle, e => e.fall_distance()),
+            )),
+        }
     }
     /// `Entity.resetFallDistance`: how far the entity has fallen is forgotten, so its next
     /// landing hurts it as a step does (a fan's or a launcher's push, a mod's soft block).
@@ -239,7 +259,7 @@ impl Game<'_> {
                     return Ok(false);
                 };
                 with_entity_mut!(self, handle, e => {
-                    e.update_retained_ground(&self.world, self.collision, on_ground, None)
+                    e.update_retained_ground(&self.world, self.collision, &world_items!(self).entity_type_tags, on_ground, None)
                         .map_err(|_| LevelWriteError::Unavailable)
                 })
             }
@@ -328,9 +348,14 @@ impl Game<'_> {
     }
 
     /// The entity's box (`Entity.getBoundingBox`): its lowest and highest
-    /// corner. Displays and markers have zero-sized physical boxes; interactions use
-    /// their saved dimensions. End crystals have their 2 x 2 box. None for the dragon; a dragon part's is its own. API 379.
+    /// corner. Displays and markers have zero-sized physical boxes. A client display's
+    /// corners coincide at its committed tick position, not its rendering box or packet target.
+    /// Interactions use their saved dimensions. End crystals have their 2 x 2 box.
+    /// None for the dragon; a dragon part's is its own. API 379.
     pub(super) fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]> {
+        if let Some(display) = self.native_client_display(entity) {
+            return Some([display.position().to_array(); 2]);
+        }
         if let Some(row) = self.native_client_general(entity) {
             return Some(corners(row.bounds()));
         }
@@ -342,7 +367,10 @@ impl Game<'_> {
             return Some(corners(g.bounds()));
         }
         if let Some(h) = self.native_walk_entity(entity.id()) {
-            return Some(corners(with_entity!(self, h, e => e.bounds())));
+            // A client's copy of a non-mob entity takes its `entity_size` answer's box.
+            return Some(corners(with_entity!(self, h, e => {
+                self.client_copy_box(e.id(), e.position(), e.bounds())
+            })));
         }
         let (lo, hi) = match t {
             Target::Other(id) => {
@@ -358,7 +386,8 @@ impl Game<'_> {
                 return Some(corners(dragon.part_geometry(part).1));
             }
             Target::Crystal(id) => {
-                return Some(corners(self.crystals.iter().find(|c| c.id == id)?.bounds()));
+                let c = self.crystals.iter().find(|c| c.id == id)?;
+                return Some(corners(self.client_copy_box(id, c.position, c.bounds())));
             }
             Target::Cushion(id) => self.cushions.iter().find(|c| c.id == id)?.bounds(),
             Target::Frame(id) => self.item_frames.iter().find(|f| f.id == id)?.bounds(),
@@ -373,8 +402,15 @@ impl Game<'_> {
     }
     /// The height of the entity's eyes above its feet (`Entity.getEyeHeight`).
     /// API 379.
-    pub(super) fn entity_eye_height(&self, entity: EntityRef) -> Option<f64> {
-        Some(self.target_eye_height(self.native_entity_read_target(entity)?))
+    pub(in crate::game) fn entity_eye_height(&self, entity: EntityRef) -> Option<f64> {
+        if let Some(target) = self.native_entity_read_target(entity) {
+            return Some(self.target_eye_height(target));
+        }
+        let (remote, id) = self.native_client_entity_context(entity).ok()?;
+        remote.tracked(id)?;
+        self.interactions
+            .get(&id)
+            .map(|i| f64::from(i.eye_height()))
     }
     /// Where the entity's eyes are (`Entity.getEyePosition`). API
     /// 379.
@@ -556,19 +592,43 @@ mod tests {
             let entity = game.entity(40).unwrap();
             // Only block 1 is under the box: it supports, not the block of the feet's own column.
             game.world.set(1, 64, 0, stone).unwrap();
-            let _ = game.mobs[0].update_retained_ground(&game.world, game.collision, true, None);
+            let _ = game.mobs[0].update_retained_ground(
+                &game.world,
+                game.collision,
+                &world_items!(game).entity_type_tags,
+                true,
+                None,
+            );
             assert_eq!(game.entity_on_block(entity), Some([1, 64, 0]));
             // Adding a nearer block doesn't change the support until the next check.
             game.world.set(0, 64, 0, stone).unwrap();
             assert_eq!(game.entity_on_block(entity), Some([1, 64, 0]));
-            let _ = game.mobs[0].update_retained_ground(&game.world, game.collision, true, None);
+            let _ = game.mobs[0].update_retained_ground(
+                &game.world,
+                game.collision,
+                &world_items!(game).entity_type_tags,
+                true,
+                None,
+            );
             assert_eq!(game.entity_on_block(entity), Some([0, 64, 0]));
             game.mobs[0].position = Vec3::new(1.1, 65.0, 0.5);
-            let _ = game.mobs[0].update_retained_ground(&game.world, game.collision, true, None);
+            let _ = game.mobs[0].update_retained_ground(
+                &game.world,
+                game.collision,
+                &world_items!(game).entity_type_tags,
+                true,
+                None,
+            );
             assert_eq!(game.entity_on_block(entity), Some([1, 64, 0]));
             // Off the ground there is no support: the cell under the feet.
             game.mobs[0].position = Vec3::new(0.9, 65.0, 0.5);
-            let _ = game.mobs[0].update_retained_ground(&game.world, game.collision, false, None);
+            let _ = game.mobs[0].update_retained_ground(
+                &game.world,
+                game.collision,
+                &world_items!(game).entity_type_tags,
+                false,
+                None,
+            );
             assert_eq!(game.entity_on_block(entity), Some([0, 64, 0]));
             let air = game
                 .pack
@@ -577,7 +637,13 @@ mod tests {
                 .default_state("minecraft:air")
                 .unwrap();
             game.world.set(0, 64, 0, air).unwrap();
-            let _ = game.mobs[0].update_retained_ground(&game.world, game.collision, true, None);
+            let _ = game.mobs[0].update_retained_ground(
+                &game.world,
+                game.collision,
+                &world_items!(game).entity_type_tags,
+                true,
+                None,
+            );
             assert_eq!(game.entity_on_block(entity), Some([1, 64, 0]));
 
             // Facing south (yaw 0) level, the eyes see a block two cells ahead.

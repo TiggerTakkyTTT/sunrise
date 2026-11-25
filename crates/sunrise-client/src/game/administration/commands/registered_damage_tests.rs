@@ -6,7 +6,7 @@ use sunrise_client::{
 use sunrise_world::damage_source::Catalog;
 
 #[path = "registered_damage_tests/creaking_borrowed.rs"]
-mod creaking_borrowed;
+pub(in crate::game) mod creaking_borrowed;
 
 #[test]
 fn formerly_aliased_types_keep_their_id_and_registry_tags() {
@@ -194,12 +194,12 @@ fn projectile_and_command_targets_classify_actual_direct_entity_families() {
         attacker: 7,
         ..Default::default()
     };
-    Game::set_projectile_attack(&mut large_attack, &large);
+    Game::set_projectile_source(&mut large_attack, &large);
     let mut small_attack = Attack {
         attacker: 7,
         ..Default::default()
     };
-    Game::set_projectile_attack(&mut small_attack, &small);
+    Game::set_projectile_source(&mut small_attack, &small);
     let fireball = Damage {
         kind: DamageKind::Fireball,
         attacker: Some(Who::Player),
@@ -619,6 +619,10 @@ fn live_damage_and_blast_warden_reactions_follow_source_entities_and_cooldown() 
 #[test]
 #[ignore = "daily"]
 fn live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
+    run_live_damage_and_blast_creaking_reactions_and_timed_player_credit();
+}
+
+pub(in crate::game) fn run_live_damage_and_blast_creaking_reactions_and_timed_player_credit() {
     use crate::game::{
         combat::PlayerCredit,
         commands::Target,

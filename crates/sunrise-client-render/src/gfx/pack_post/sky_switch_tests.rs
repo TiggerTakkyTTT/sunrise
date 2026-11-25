@@ -153,6 +153,7 @@ const ALL: [[u8; 4]; 8] = [SKY, SUNSET, SUN, MOON, STARS, VOID, CLEAR, CLEAR];
 const BOTH: &[CelestialBody] = &[Sun, Moon];
 
 #[test]
+#[ignore = "daily"]
 fn every_part_draws_without_the_keys() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -164,6 +165,7 @@ fn every_part_draws_without_the_keys() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn sky_false_leaves_out_the_disc_the_sunset_and_the_void() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -174,6 +176,7 @@ fn sky_false_leaves_out_the_disc_the_sunset_and_the_void() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn stars_false_leaves_out_the_stars() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -184,6 +187,7 @@ fn stars_false_leaves_out_the_stars() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn sun_false_leaves_out_the_sun() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -194,6 +198,7 @@ fn sun_false_leaves_out_the_sun() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn moon_false_leaves_out_the_moon() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -206,6 +211,7 @@ fn moon_false_leaves_out_the_moon() {
 /// The moon alone (the sun's sprite missing) is the first quad, and still the moon: it draws as
 /// stage MOON, `sun=false` keeps it and `moon=false` leaves it out.
 #[test]
+#[ignore = "daily"]
 fn the_moon_alone_follows_only_moon() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };
@@ -218,6 +224,7 @@ fn the_moon_alone_follows_only_moon() {
 
 /// The sun alone (the moon's sprite missing): `moon=false` keeps it, `sun=false` leaves it out.
 #[test]
+#[ignore = "daily"]
 fn the_sun_alone_follows_only_sun() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Gpu::new() else { return };

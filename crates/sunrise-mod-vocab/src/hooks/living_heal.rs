@@ -1,5 +1,4 @@
 //! The `living_heal` hook: declarations the mod API generator reads (see `hooks/mod.rs`).
-// catalog-order: 0347
 
 pub trait Hooks {
     /// A living entity is about to heal. Mods may change the amount or cancel.

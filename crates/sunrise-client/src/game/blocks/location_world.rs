@@ -62,6 +62,9 @@ impl sunrise_client::beehive::SmokeLevel for LevelLocation<'_> {
 }
 
 impl World for LevelLocation<'_> {
+    fn is_loaded(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.world.is_loaded_at(x, y, z)
+    }
     fn dimension(&self) -> &str {
         self.refs.dimension
     }
@@ -81,6 +84,9 @@ impl World for LevelLocation<'_> {
             .filter(|(_, piece)| *piece)
             .map(|(name, _)| name)
             .collect()
+    }
+    fn block_state(&self, [x, y, z]: [i32; 3]) -> Option<&sunrise_world::chunk::BlockState> {
+        self.registry.state(self.world.block(x, y, z))
     }
     fn block(&self, p: [i32; 3]) -> (String, BTreeMap<String, String>) {
         let state = self.world.block(p[0], p[1], p[2]);
@@ -143,6 +149,6 @@ impl World for LevelLocation<'_> {
         ))
     }
     fn in_tag(&self, registry: &str, tag: &str, id: &str) -> bool {
-        self.refs.tags.contains(registry, tag, id).unwrap_or(false)
+        self.refs.tags.contains(registry, tag, id)
     }
 }

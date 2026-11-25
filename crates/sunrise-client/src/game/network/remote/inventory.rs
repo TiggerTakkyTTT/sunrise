@@ -65,12 +65,35 @@ pub(super) fn predict_clicks(
     env: &sunrise_client::menu::Env,
     clicks: &[(i16, i32, Input)],
 ) -> Option<(Vec<Predicted>, bool)> {
+    predict_clicks_with(m, env, clicks, None)
+}
+
+/// Like [`predict_clicks`], applying `last_stacked` (and `env.slot_rules`) to the final click of
+/// `clicks` when client prediction decided a resolved pickup via `ItemPart::item_stacked_on_other`.
+pub(in crate::game) fn predict_clicks_with(
+    m: &mut sunrise_client::menu::Menu,
+    env: &sunrise_client::menu::Env,
+    clicks: &[(i16, i32, Input)],
+    last_stacked: Option<&sunrise_client::menu::StackedOutcome>,
+) -> Option<(Vec<Predicted>, bool)> {
     let mut predicted = Vec::with_capacity(clicks.len());
     let mut dropped = false;
-    for &(slot, button, input) in clicks {
+    let last = clicks.len().saturating_sub(1);
+    for (index, &(slot, button, input)) in clicks.iter().enumerate() {
         let before = menu_items(m);
         let thrown = m.dropped.len();
-        m.click(env, i32::from(slot), button, input).ok()?;
+        let step_env = if index == last {
+            sunrise_client::menu::Env {
+                stacked: last_stacked,
+                ..*env
+            }
+        } else {
+            sunrise_client::menu::Env {
+                stacked: None,
+                ..*env
+            }
+        };
+        m.click(&step_env, i32::from(slot), button, input).ok()?;
         dropped |= m.dropped.len() > thrown;
         let changed = changed_slots(&before, m);
         predicted.push((slot, button, input, changed, m.carried.clone()));
@@ -353,21 +376,21 @@ impl Game<'_> {
         }
     }
     // remote_send_state: remote/sync.rs
-    /// `MultiPlayerGameMode.handleCreativeModeItemAdd` for inventory slot `i` (0 to 35): the
-    /// stack goes out now and counts as synced. Nothing without a server.
+    /// `MultiPlayerGameMode.handleCreativeModeItemAdd` for inventory slot `i` (0 to 35) or the
+    /// off hand (36): the stack goes out now and counts as synced. Nothing without a server.
     pub(in crate::game) fn remote_creative_slot_add(&mut self, i: usize) {
-        let stack = self.inventory.get(i).cloned().flatten();
+        let stack = if i == 36 {
+            self.offhand.clone()
+        } else {
+            self.inventory.get(i).cloned().flatten()
+        };
         let Some(r) = self.remote.as_mut() else {
             return;
         };
         if let Some(synced) = r.synced.get_mut(i) {
             *synced = stack.clone();
         }
-        let item = self.to_network(&stack);
-        self.send(S::SetCreativeModeSlot(play::SetCreativeModeSlot {
-            slot: creative_sync_slot(i),
-            item,
-        }));
+        self.send_creative_item_add(creative_sync_slot(i), stack);
     }
     /// The server set inventory `slot` (`shield::OFFHAND_SLOT` for the off
     /// hand), `changed` from the stack this client held there. The stack

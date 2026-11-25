@@ -31,7 +31,11 @@ impl fmt::Display for Game<'_> {
 pub fn twice() {}
 #[cfg(not(unix))]
 pub fn twice() {}
-#[cfg(test)]
+#[cfg_attr(true, cfg_attr(not(false,), cfg(test,),),)]
+mod inner {
+    pub fn nested() -> u8 { 9 }
+}
+#[cfg(test,)]
 mod tests {
     fn hidden() {}
 }
@@ -151,7 +155,9 @@ fn the_index_lists_each_function_with_its_text_or_its_refusal() {
         game,
         &[ModuleFile {
             path: "crates/sunrise-client/src/game.rs".into(),
+            cfg: Vec::new(),
             sha256: sha256(GAME.as_bytes()),
+            include_cfg: None,
         }]
     );
     assert_eq!(ticks.module, "sunrise_client::game");

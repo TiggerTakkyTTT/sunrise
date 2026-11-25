@@ -62,6 +62,11 @@ impl Resources {
     pub(super) fn mob_types(&self) -> &HashMap<String, Arc<MobType>> {
         &self.rest().mob_types
     }
+    /// The player's, the armor stand's and the dragon's registry keys, resolved with these
+    /// resources.
+    pub(super) fn living_type_keys(&self) -> sunrise_client::health::LivingTypeKeys {
+        self.rest().living_type_keys
+    }
     pub(super) fn mob_data(&self) -> &sunrise_client::mobs::MobData {
         &self.rest().mob_data
     }
@@ -188,9 +193,18 @@ impl UiResources {
     /// The resolved resource generation, including the base layer and pack filters, over the
     /// game's own resources at `vanilla` (which tell the packs' core shaders from the game's).
     /// Its splash pool is empty until `with_splashes`.
+    #[cfg(test)]
     pub fn load(
         root: &sunrise_assets::resource_source::ResourceSource,
         vanilla: &Path,
+    ) -> Result<Self> {
+        Self::load_with_limit(root, vanilla, sunrise_client::hud::MAX_ATLAS_SIZE)
+    }
+    /// Build the title resources within the supplied device texture dimension.
+    pub fn load_with_limit(
+        root: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+        max_atlas_size: u32,
     ) -> Result<Self> {
         // The title screen waits for both: the panorama's six faces decode
         // beside the atlas.
@@ -203,7 +217,13 @@ impl UiResources {
             let pool = dynamic_texture_pool();
             let game = sunrise_assets::resource_source::ResourceSource::directory(vanilla.into());
             let atlas = startup::time("ui.atlas", || {
-                HudAtlas::build_over_with_dynamic_textures(root, root, &game, pool)
+                HudAtlas::build_over_with_dynamic_textures_and_limit(
+                    root,
+                    root,
+                    &game,
+                    pool,
+                    max_atlas_size,
+                )
             });
             let panorama = panorama
                 .join()
@@ -216,6 +236,32 @@ impl UiResources {
             })
         })
     }
+    /// The provisional dimensions may have refused sprites even when the base HUD itself fits.
+    /// Rebuild the final stitch from the accepted staged source on either limit change.
+    pub(super) fn stitch_for_device(
+        &mut self,
+        source: &sunrise_assets::resource_source::ResourceSource,
+        vanilla: &Path,
+        limit: u32,
+    ) -> Result<bool> {
+        if self.atlas.stitch_limit == Some(limit) {
+            return Ok(false);
+        }
+        let game =
+            sunrise_assets::resource_source::ResourceSource::directory(vanilla.to_path_buf());
+        let mut atlas = HudAtlas::build_over_with_dynamic_textures_and_limit(
+            source,
+            source,
+            &game,
+            self.atlas.dynamic_texture_pool.is_some(),
+            limit,
+        )?;
+        atlas.font.uniform = self.atlas.font.uniform;
+        atlas.font.japanese = self.atlas.font.japanese;
+        self.atlas = atlas;
+        Ok(true)
+    }
+
     /// The title's splash pool from `stack` (`sunrise_client::splashes::pool`).
     pub fn with_splashes(
         mut self,
@@ -236,6 +282,15 @@ impl UiResources {
             plain_texts: PlainTexts::default(),
         })
     }
+}
+
+pub(super) struct PackParts {
+    pub(super) assets: Arc<Assets>,
+    pub(super) render: Arc<RenderAssets>,
+    pub(super) tables: Arc<MeshTables>,
+    pub(super) item_renderer: sunrise_client::item_render::ItemRenderer,
+    pub(super) biomes: Arc<Biomes>,
+    pub(super) light: Arc<LightTables>,
 }
 
 impl PackResources {
@@ -269,7 +324,18 @@ impl PackResources {
             render.model_library.clone(),
             item_data,
         )?;
-        Self::assemble(root, assets, render, tables, item_renderer, biomes, light)
+        Self::assemble(
+            root,
+            PackParts {
+                assets,
+                render,
+                tables,
+                item_renderer,
+                biomes,
+                light,
+            },
+            true,
+        )
     }
     /// The workers' context over `biomes`: this pack's own when `biomes` is
     /// the table it was built with, else the same parts with that table.
@@ -293,13 +359,17 @@ impl PackResources {
     /// (`sunrise_client::clouds::load`).
     pub(super) fn assemble(
         root: &sunrise_assets::resource_source::ResourceRoot,
-        assets: Arc<Assets>,
-        render: Arc<RenderAssets>,
-        tables: Arc<MeshTables>,
-        item_renderer: sunrise_client::item_render::ItemRenderer,
-        biomes: Arc<Biomes>,
-        light: Arc<LightTables>,
+        parts: PackParts,
+        draws: bool,
     ) -> Result<Self> {
+        let PackParts {
+            assets,
+            render,
+            tables,
+            item_renderer,
+            biomes,
+            light,
+        } = parts;
         let water_overlay_state = assets
             .registry
             .default_state("minecraft:water")
@@ -310,38 +380,58 @@ impl PackResources {
         // images and language map together so a custom-sky pack cannot put all
         // of the pack assembly on the critical path behind its own files.
         let (names, clouds, forcefield, custom_sky, environments, polytone_particles) =
-            std::thread::scope(|scope| {
+            std::thread::scope(|scope| -> Result<_> {
                 let names = named_scope(scope, "pack.names", || Names::load(root.source()));
-                let clouds = named_scope(scope, "pack.clouds", || {
-                    sunrise_client::clouds::load(root.source())
-                });
-                let forcefield =
-                    named_scope(scope, "pack.forcefield", || load_forcefield(root.source()));
-                let custom_sky = named_scope(scope, "pack.custom_sky", || {
-                    sunrise_client::custom_sky::load(root.source())
-                });
-                let environments =
-                    named_scope(scope, "pack.environments", || pack_environments(root));
-                let particles = named_scope(scope, "pack.particles", || {
-                    pack_particles(root, assets.registry)
-                });
-                (
+                let (clouds, forcefield, custom_sky, environments, particles) = if draws {
+                    let clouds = named_scope(scope, "pack.clouds", || {
+                        sunrise_client::clouds::load(root.source())
+                    });
+                    let forcefield =
+                        named_scope(scope, "pack.forcefield", || load_forcefield(root.source()));
+                    let custom_sky = named_scope(scope, "pack.custom_sky", || {
+                        sunrise_client::custom_sky::load(root.source())
+                    });
+                    let environments =
+                        named_scope(scope, "pack.environments", || pack_environments(root));
+                    let particles = named_scope(scope, "pack.particles", || {
+                        pack_particles(root, assets.registry)
+                    });
+                    (
+                        clouds.join().unwrap().map_err(|e| e.to_string())?,
+                        forcefield.join().unwrap(),
+                        custom_sky.join().unwrap(),
+                        environments.join().unwrap(),
+                        particles.join().unwrap(),
+                    )
+                } else {
+                    (
+                        Default::default(),
+                        Default::default(),
+                        sunrise_client::custom_sky::empty(),
+                        None,
+                        None,
+                    )
+                };
+                Ok((
                     names.join().unwrap(),
-                    clouds.join().unwrap(),
-                    forcefield.join().unwrap(),
-                    custom_sky.join().unwrap(),
-                    environments.join().unwrap(),
-                    particles.join().unwrap(),
-                )
-            });
-        let clouds = clouds.map_err(|e| e.to_string())?;
-        let polytone_post = sunrise_client::polytone_post::PolytonePost::read(
-            root.source(),
-            sunrise_client::packs::polytone_configs(&sunrise_client::packs::Source::Opened(
-                root.source().clone(),
-            )),
-        )
-        .map(Arc::new);
+                    clouds,
+                    forcefield,
+                    custom_sky,
+                    environments,
+                    particles,
+                ))
+            })?;
+        let polytone_post = if draws {
+            sunrise_client::polytone_post::PolytonePost::read(
+                root.source(),
+                sunrise_client::packs::polytone_configs(&sunrise_client::packs::Source::Opened(
+                    root.source().clone(),
+                )),
+            )
+            .map(Arc::new)
+        } else {
+            None
+        };
         // Each item's own default name, which the hover name reads as `getDescriptionId` does.
         let names = names.with_item_names(&item_renderer.models.prototypes, assets.registry);
         Ok(Self {
@@ -374,7 +464,11 @@ impl PackResources {
             environments,
             polytone_particles,
             polytone_post,
-            polytone_colors: Arc::new(read_colors(root)),
+            polytone_colors: if draws {
+                Arc::new(read_colors(root))
+            } else {
+                Arc::default()
+            },
         })
     }
 }

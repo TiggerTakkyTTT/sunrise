@@ -11,8 +11,43 @@ pub const SORT_KEY: &str = "sunrise.sort";
 /// The name the options screen uses while the shader pack key waits for a key.
 pub const SHADER_PACK_KEY: &str = "sunrise.shader_pack_key";
 
-/// A screen corner for an overlay.
-pub use mod_api::client::extras::Corner;
+// no wire: this is private to the built-in HUD layout.
+/// A screen corner for Sunrise's internal extras and PvP HUD boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+impl Corner {
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Corner::TopLeft => "top_left",
+            Corner::TopRight => "top_right",
+            Corner::BottomLeft => "bottom_left",
+            Corner::BottomRight => "bottom_right",
+        }
+    }
+    pub fn parse(s: &str, default: Corner) -> Corner {
+        Self::ALL
+            .into_iter()
+            .find(|c| c.name() == s)
+            .unwrap_or(default)
+    }
+    pub fn top(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::TopRight)
+    }
+    pub fn left(self) -> bool {
+        matches!(self, Corner::TopLeft | Corner::BottomLeft)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Extras {
@@ -311,12 +346,6 @@ impl Extras {
     }
 }
 
-/// The field-of-view modifier target `Camera.tickFov` eases toward: vanilla's
-/// (`getFieldOfViewModifier`) divided by a mod's zoom (`native_zoom`). A
-/// zoom of 1 leaves it as is.
-pub fn fov_target(vanilla: f32, zoom: f32) -> f32 {
-    if zoom == 1.0 { vanilla } else { vanilla / zoom }
-}
 /// Frame times over the last few seconds: frames per second, the minimum
 /// and the 1% low, recomputed twice a second.
 pub struct FpsCounter {
@@ -901,31 +930,6 @@ mod tests {
         let e = Extras::parse("sort:maybe\nsortKey:r\nnoise");
         assert!(!e.sort);
         assert_eq!(e.sort_key, "key.keyboard.unknown");
-    }
-
-    #[test]
-    fn a_mods_zoom_eases_like_the_spyglass() {
-        // Camera.tickFov halves the distance to the target each tick.
-        let mut camera = crate::camera::Camera::default();
-        camera.tick(None, 1.0);
-        for _ in 0..30 {
-            camera.tick(None, 1.0);
-        }
-        let target = fov_target(1.0, 4.0);
-        camera.tick(None, target);
-        let first = camera.calculate_fov(1.0, 70, 1.0, None, Default::default(), false);
-        assert!((first - 70.0 * 0.625).abs() < 1e-3, "{first}");
-        for _ in 0..30 {
-            camera.tick(None, target);
-        }
-        let settled = camera.calculate_fov(1.0, 70, 1.0, None, Default::default(), false);
-        assert!((settled - 70.0 / 4.0).abs() < 1e-3, "{settled}");
-        // Deeper than the 0.1 floor stops there, as vanilla clamps.
-        for _ in 0..30 {
-            camera.tick(None, fov_target(1.0, 20.0));
-        }
-        let floor = camera.calculate_fov(1.0, 70, 1.0, None, Default::default(), false);
-        assert!((floor - 7.0).abs() < 1e-3, "{floor}");
     }
 
     #[test]

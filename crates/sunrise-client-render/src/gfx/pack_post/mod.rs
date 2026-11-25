@@ -16,6 +16,7 @@ pub use types::*;
 
 pub use sunrise_render_shaderpack::pack_post::construction::*;
 pub use sunrise_render_shaderpack::pack_post::execution::*;
+pub use sunrise_render_shaderpack::pack_post::mod_pack::*;
 
 use super::pack_entities::PackEntitiesExt as _;
 use crate::gfx::Frame;
@@ -46,7 +47,9 @@ pub trait PackPostExt: Sized {
         motion: (&[(u32, u64)], &[u32]),
     );
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
-    /// the result onto `screen`. Fails once the device is lost (`lost`).
+    /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
+    /// pack, and after the last pack world pass, before composition. Fails once the device is lost (`lost`).
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         device: &wgpu::Device,
@@ -61,6 +64,8 @@ pub trait PackPostExt: Sized {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
+        boundaries: WorldBoundaries,
+        boundary: impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
         lost: &std::sync::atomic::AtomicBool,
         poll: sunrise_render_shaderpack::PollLive,
     ) -> Result<(), String>;
@@ -77,11 +82,12 @@ fn frame_view<'a>(frame: &'a Frame) -> UniformFrameView<'a> {
         camera: frame.camera,
         yaw: frame.yaw,
         pitch: frame.pitch,
+        roll: frame.roll,
         fov_degrees: frame.fov_degrees,
         eye: frame.eye,
         eye_rotation: frame.eye_rotation,
         first_person: frame.first_person,
-        bob: frame.bob,
+        bob: frame.posed_bob(),
         spin: frame.spin,
         sky: SkyView {
             sun_angle: frame.sky.sun_angle,
@@ -172,6 +178,7 @@ impl PackPostExt for PackPost {
 
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
     /// the result onto `screen`.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &mut self,
         device: &wgpu::Device,
@@ -186,6 +193,8 @@ impl PackPostExt for PackPost {
         window: [u32; 2],
         pages: &[TerrainPage],
         terrain: &mut TerrainDraw<'_>,
+        boundaries: WorldBoundaries,
+        boundary: impl FnMut(&mut wgpu::CommandEncoder, WorldBoundary<'_>) -> bool,
         lost: &std::sync::atomic::AtomicBool,
         poll: sunrise_render_shaderpack::PollLive,
     ) -> Result<(), String> {
@@ -214,7 +223,7 @@ impl PackPostExt for PackPost {
             vertices: frame.hand,
             items: frame.hand_items,
             fov_degrees: frame.hand_fov_degrees,
-            bob: frame.bob,
+            bob: frame.posed_bob(),
             spin: frame.spin,
         };
         self.run_frame(
@@ -236,6 +245,8 @@ impl PackPostExt for PackPost {
             frame.shadow_scene_revision,
             frame.ticks,
             frame.pack.day_time,
+            boundaries,
+            boundary,
             lost,
             poll,
         )
@@ -298,10 +309,16 @@ mod shadow_faces_tests;
 mod r11f_image_tests;
 
 #[cfg(test)]
+mod normalized_image_tests;
+
+#[cfg(test)]
 mod work_group_fold_tests;
 
 #[cfg(test)]
 mod forced_flip_tests;
+
+#[cfg(test)]
+mod flip_only_tests;
 
 #[cfg(test)]
 mod weather_depth_tests;
@@ -328,6 +345,9 @@ mod runtime_length_tests;
 mod translucent_color_tests;
 
 #[cfg(test)]
+mod water_blend_tests;
+
+#[cfg(test)]
 mod noise_resolution_tests;
 
 #[cfg(test)]
@@ -335,6 +355,9 @@ mod player_boolean_tests;
 
 #[cfg(test)]
 mod snorm_tests;
+
+#[cfg(test)]
+mod far_location_tests;
 
 #[cfg(test)]
 mod terrain_parts_tests;
@@ -397,3 +420,14 @@ mod colortex_mip_blend_tests;
 
 #[cfg(test)]
 mod material_route_tests;
+
+#[cfg(test)]
+mod sign_text_target_tests;
+
+#[cfg(test)]
+mod block_atlas_group_tests;
+#[cfg(test)]
+mod mod_stage_tests;
+
+#[cfg(test)]
+mod mod_pack_binding_tests;

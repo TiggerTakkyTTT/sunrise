@@ -1,5 +1,4 @@
-//! What special model renderers cost the frame (matrix row 13 of
-//! `docs/design/mod-api/resource-renderers.md`, and the measurement in
+//! What special model renderers cost the frame (see the measurement in
 //! `docs/performance/special-item-renderers.md`). Each test runs alone in its own process, the
 //! measurement by hand: it registers the process's renderers.
 use crate::game::Game;

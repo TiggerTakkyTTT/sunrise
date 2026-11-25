@@ -31,8 +31,8 @@ def main():
         test = f'game::remote::tests::placement_preview_tests::{case}'
         recording = work / f'{case}.log'
         with recording.open('w', encoding='utf-8') as output:
-            base.run(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib',
-                      test, '--', '--exact', '--ignored'], stdout=output,
+            base.run([lab.parity_fixtures(),
+                      test, '--exact', '--ignored'], stdout=output,
                      env={**os.environ, "SUNRISE_TEST_RESOURCES": str(lab.RESOURCES)})
         if f'test {test} ... ok' not in recording.read_text(encoding='utf-8').splitlines():
             raise AssertionError(f'{test} did not run')

@@ -201,7 +201,9 @@ impl Game<'_> {
                 Some(world_items!(self)),
                 Some(&self.pack.block_registries),
                 &self.damage_hooks,
-            );
+            )
+            .with_mob_uuids(&self.persist.uuids)
+            .with_reads(crate::game::entity::hit_reads_of!(self));
             let m = &mut mobs[index];
             let mut selector = if targets {
                 std::mem::take(&mut m.ai.targets)

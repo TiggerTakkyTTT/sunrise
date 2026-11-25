@@ -770,13 +770,14 @@ mod tests {
     /// The off path is main's: a device opened without ray queries (every device without
     /// `SUNRISE_RAY_TRACING`, and every plain build) gets no scene, and its buffers no usage.
     #[test]
+    #[ignore = "daily"]
     fn without_ray_queries_there_is_no_scene() {
         let _gpu = crate::gfx::test_gpu::lock();
-        let instance = crate::gfx::test_gpu::instance();
-        let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+        let Some(adapter) = crate::gfx::test_gpu::adapter() else {
             return;
         };
-        let Ok((device, _)) = pollster::block_on(adapter.request_device(&Default::default()))
+        let Some((device, _)) =
+            crate::gfx::test_gpu::optional_device_with(&adapter, &Default::default())
         else {
             return;
         };

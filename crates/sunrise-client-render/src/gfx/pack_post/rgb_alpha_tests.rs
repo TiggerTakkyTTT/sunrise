@@ -67,6 +67,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn three_channel_buffers_read_alpha_1() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

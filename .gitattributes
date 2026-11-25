@@ -4,6 +4,7 @@ docs/sunrise-ctl-commands.md text eol=lf
 crates/sunrise-theme/tokens.css text eol=lf
 docs/api/*-reference.md text eol=lf
 crates/sunrise-mod-api-gen/crossing-foreign.json text eol=lf
+crates/sunrise-render-shaderpack/tests/spirv_dump/** text eol=lf
 # The package layout's one number, read by Rust, Python and shell alike.
 crates/sunrise-mod-package/src/sdk/package-format text eol=lf
 

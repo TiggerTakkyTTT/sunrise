@@ -314,7 +314,7 @@ impl<'g> Game<'g> {
             200 | stations::RESULT => Role::Result,
             500..=504 | mount_menu::SADDLE | mount_menu::ARMOR => Role::Equipment,
             s if (stations::INPUT..stations::RESULT).contains(&s) => Role::Input,
-            s if (mount_menu::CHEST..mount_menu::CHEST + 15).contains(&s) => Role::Storage,
+            s if self.is_mount_chest_slot(s) => Role::Storage,
             s if crate::game::inventory_slots::container_slot_index(s).is_some() => {
                 match self.container_kind() {
                     Some(BlockEntity::Furnace(_)) if slot == 302 => Role::Result,

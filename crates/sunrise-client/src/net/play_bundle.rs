@@ -13,6 +13,8 @@ const BUNDLE_SIZE_LIMIT: usize = 4096;
 pub enum BundleMember {
     Packet(C),
     AttachmentSync(Box<attachment_sync::StagedMessage>),
+    /// Defer the logger fault, not the unusable array, until the bundle handles this member.
+    OversizedDebugSample,
 }
 
 impl BundleMember {
@@ -21,6 +23,7 @@ impl BundleMember {
             Self::Packet(packet) => packet.owned_heap_bytes(),
             Self::AttachmentSync(staged) => std::mem::size_of::<attachment_sync::StagedMessage>()
                 .saturating_add(staged.owned_heap_bytes()),
+            Self::OversizedDebugSample => 0,
         }
     }
 }
@@ -37,6 +40,19 @@ pub(super) enum PlayTurn {
 pub(super) enum InvalidBundle {
     Terminal,
     TooManyPackets,
+}
+
+impl std::fmt::Display for InvalidBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Terminal => {
+                "io.netty.handler.codec.DecoderException: Terminal message received in bundle"
+            }
+            Self::TooManyPackets => {
+                "io.netty.handler.codec.DecoderException: java.lang.IllegalStateException: Too many packets in a bundle"
+            }
+        })
+    }
 }
 
 impl PlayBundle {
@@ -97,6 +113,7 @@ pub enum BundleStep {
     Payload(CustomPayload),
     Transfer(sunrise_protocol::packets::configuration::Transfer),
     Close(Event),
+    HandlerFailed,
     Continue,
 }
 
@@ -107,8 +124,14 @@ impl PlayIo {
         self.common.accepts_packets()
     }
 
+    /// `ClientCommonPacketListenerImpl.onPacketError`, after a main-thread handler fails.
+    pub fn packet_error(&self) -> Event {
+        Reason::keyed("disconnect.packetError", &self.lang).ended(false, true)
+    }
+
     pub fn incompatible_payload(&self, detail: &str) -> Event {
-        Reason::keyed_arg("multiplayer.disconnect.incompatible", &self.lang, detail).ended(false)
+        Reason::keyed_arg("multiplayer.disconnect.incompatible", &self.lang, detail)
+            .ended(false, true)
     }
 
     pub fn bundle_member(&self, member: BundleMember) -> BundleStep {
@@ -117,6 +140,7 @@ impl PlayIo {
             BundleMember::AttachmentSync(staged) => {
                 return BundleStep::Event(Event::AttachmentSync(staged));
             }
+            BundleMember::OversizedDebugSample => return BundleStep::HandlerFailed,
         };
         let action = match packet {
             C::KeepAlive(p) => PlayIoAction::KeepAlive(p),
@@ -147,7 +171,7 @@ impl PlayIo {
                 return BundleStep::Transfer(p);
             }
             C::Disconnect(p) => {
-                return BundleStep::Close(Reason::tag(&p.reason, &self.lang).ended(true));
+                return BundleStep::Close(Reason::tag(&p.reason, &self.lang).ended(true, true));
             }
             C::CustomPayload(p) if p.channel == "minecraft:brand" => {
                 return brand_event(&p).map_or(BundleStep::Continue, BundleStep::Event);

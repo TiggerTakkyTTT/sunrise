@@ -58,6 +58,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn atlas_names_read_colortex0_in_deferred_composite_and_final() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

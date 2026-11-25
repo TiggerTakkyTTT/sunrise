@@ -1,5 +1,0 @@
-id = "refused_manifest_long_rule_reason"
-name = "Refused manifest long rule reason"
-version = "1.2.3"
-[discouraged]
-other = { reason = "Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. Too long. " }

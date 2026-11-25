@@ -17,9 +17,8 @@ const SKIES: [[f32; 3]; 3] = [
 const RINGS: [[u8; 3]; 3] = [[255, 213, 74], [255, 255, 170], [255, 255, 217]];
 
 fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = crate::gfx::test_gpu::instance();
-    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-    pollster::block_on(adapter.request_device(&Default::default())).ok()
+    let (_, device, queue) = crate::gfx::test_gpu::optional_device()?;
+    Some((device, queue))
 }
 
 /// The brightest channel of stored colour `c` as light, past S held at S as the tone curve does.
@@ -247,6 +246,7 @@ fn draw_as(
 }
 
 #[test]
+#[ignore = "daily"]
 fn the_suns_disc_shows_vanillas_colour_with_white_at_the_peak() {
     for sky in SKIES {
         let Some(out) = draw(true, &RINGS, VERY_BRIGHT, sky, S) else {
@@ -268,6 +268,7 @@ fn the_suns_disc_shows_vanillas_colour_with_white_at_the_peak() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn the_halo_and_the_moon_add_as_before_below_the_peak() {
     // The disc's edge, then a halo like sun.png's falling away from it.
     let halo = [40u8, 36, 32, 27, 23, 19, 14, 10, 7, 4, 2, 1].map(|v| [v, v, v / 2]);
@@ -301,6 +302,7 @@ fn the_halo_and_the_moon_add_as_before_below_the_peak() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn a_soft_edged_sun_fades_into_the_sky_without_a_ring() {
     // A resource pack's sun: warm white falling smoothly to black, through the whole of the
     // very bright tier's window.
@@ -331,6 +333,7 @@ fn a_soft_edged_sun_fades_into_the_sky_without_a_ring() {
 /// of 203): the disc's white is the display's, and what isn't the disc is drawn exactly as on a
 /// display at the scene's peak.
 #[test]
+#[ignore = "daily"]
 fn on_a_brighter_display_only_the_disc_follows_its_peak() {
     let halo = [40u8, 36, 27, 19, 10, 4, 1].map(|v| [v, v, v / 2]);
     let row: Vec<_> = RINGS.into_iter().chain(halo).collect();
@@ -371,6 +374,7 @@ fn on_a_brighter_display_only_the_disc_follows_its_peak() {
 /// Only the quad that is the sun takes the sun's passes in the lifted world: the same texels
 /// given as the moon's quad, or the End's flash, are added as when the world isn't lifted.
 #[test]
+#[ignore = "daily"]
 fn only_the_suns_quad_takes_the_suns_passes() {
     for sky in SKIES {
         let (Some(sun), Some(added)) = (

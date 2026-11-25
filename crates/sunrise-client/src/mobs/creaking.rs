@@ -155,7 +155,7 @@ pub fn take_hurt(m: &mut Mob, events: &mut Vec<MobEvent>) -> Option<([i32; 3], b
 /// `Mob.playHurtSound` of a heart-bound creaking: the ambient sound clock
 /// restarts and it sways.
 pub fn sway(m: &mut Mob, events: &mut Vec<MobEvent>) {
-    m.ambient_timer = -m.kind.ambient_interval;
+    m.ambient_timer = m.kind.ambient_interval.wrapping_neg();
     m.voice("entity.creaking.sway", events);
 }
 /// `Creaking.doHurtTarget`: the attack animation (the sound is the

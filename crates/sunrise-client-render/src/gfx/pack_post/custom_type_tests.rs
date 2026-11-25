@@ -60,6 +60,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn a_custom_uniform_declared_with_another_type_reads_zero() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

@@ -179,6 +179,14 @@ impl Outbox {
     /// Past [`MAX_PENDING`] a capped connection closes. The thread to wake, if
     /// this is the first news it has since it last looked.
     pub(super) fn push(&self, bodies: Vec<Body>, end: Option<End>) -> Option<&Arc<Worker>> {
+        self.push_checked(bodies, end).ok().flatten()
+    }
+    // An accepted send may need no wake: its worker is already listed or not attached yet.
+    fn push_checked(
+        &self,
+        bodies: Vec<Body>,
+        end: Option<End>,
+    ) -> Result<Option<&Arc<Worker>>, ()> {
         let bodies = bodies
             .into_iter()
             .map(|body| Queued {
@@ -187,13 +195,10 @@ impl Outbox {
                 body,
                 pending: self.pending.clone(),
             })
-            .collect();
-        self.push_queued(bodies, end)
-    }
-    fn push_queued(&self, bodies: Vec<Queued>, end: Option<End>) -> Option<&Arc<Worker>> {
+            .collect::<Vec<_>>();
         let mut q = self.queue();
         match (q.at, q.end) {
-            (At::Closed, _) => return None,
+            (At::Closed, _) => return Err(()),
             (_, None) => {
                 if q.bodies.is_empty() {
                     q.bodies = bodies;
@@ -207,24 +212,33 @@ impl Outbox {
                 };
             }
             (_, Some(End::Disconnect)) if end == Some(End::Close) => q.end = end,
-            (_, Some(_)) => return None,
+            (_, Some(_)) => return Err(()),
         }
         let At::Slot(slot) = q.at else {
-            return None;
+            return Ok(None);
         };
         if std::mem::replace(&mut q.listed, true) {
-            return None;
+            return Ok(None);
         }
         drop(q);
-        self.worker
+        Ok(self
+            .worker
             .post(|i| i.serve.push(slot))
-            .then_some(&self.worker)
+            .then_some(&self.worker))
     }
     /// [`Self::push`], waking the thread at once.
     pub(super) fn send(&self, bodies: Vec<Body>, end: Option<End>) {
-        if let Some(worker) = self.push(bodies, end) {
+        self.try_send(bodies, end);
+    }
+    /// Whether the already reserved bodies were admitted, independently of waking a worker.
+    pub(super) fn try_send(&self, bodies: Vec<Body>, end: Option<End>) -> bool {
+        let Ok(wake) = self.push_checked(bodies, end) else {
+            return false;
+        };
+        if let Some(worker) = wake {
             worker.wake();
         }
+        true
     }
     #[cfg(any(test, feature = "test-payload-probe"))]
     pub(super) fn queued_contents(&self) -> Vec<Vec<u8>> {
@@ -667,6 +681,7 @@ impl Conn {
                 super::conn::frame_body(&mut self.writer, &body.body, &mut self.out)
             };
             if let Err(e) = result {
+                log::warn!("[lan] failed to frame outgoing packet: {e}");
                 self.end(now, e.to_string());
                 return false;
             }

@@ -311,7 +311,7 @@ mod tests {
         // WGL can hang while creating a test instance on Windows (#5238).
         descriptor.backends = wgpu::Backends::PRIMARY;
         let instance = wgpu::Instance::new(descriptor);
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let adapter = crate::gfx::test_gpu::request_adapter(&instance, &Default::default())?;
         if !adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             return None;
         }
@@ -335,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn successful_readback_releases_slot() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((_device, _queue, mut timer)) = mapped_timer() else {
@@ -351,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn destroyed_readback_stops_timing_without_unmapping() {
         let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue, mut timer)) = mapped_timer() else {

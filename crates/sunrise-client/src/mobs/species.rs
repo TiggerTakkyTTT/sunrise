@@ -1540,7 +1540,7 @@ impl Def {
             flying: matches!(s, S::Ghast | S::Phantom | S::HappyGhast),
             climber: matches!(s, S::Spider | S::CaveSpider),
             lava_walker: s == S::Strider,
-            powder_snow_walkable: false,
+            entity_tag_slot: None,
             omnidirectional: matches!(s, S::Bee | S::Parrot),
             fire_immune: fire_immune
                 || matches!(
@@ -1554,23 +1554,7 @@ impl Def {
                         | S::Zoglin
                         | S::Wither
                 ),
-            burns_in_day: false,
             undead,
-            // `#can_breathe_under_water`. Not the dolphin: it holds its breath
-            // (4800 ticks) and surfaces for air; nor the iron golem, which keeps
-            // its air through its own `decreaseAirSupply` (`ai.rs`).
-            breathes_water: (aquatic && s != S::Dolphin)
-                || undead
-                || matches!(
-                    s,
-                    S::Axolotl
-                        | S::Frog
-                        | S::Turtle
-                        | S::Guardian
-                        | S::ElderGuardian
-                        | S::CopperGolem
-                        | S::Nautilus
-                ),
             // WaterAnimal.handleAirSupply: it dries out on land; Nautilus's
             // does the same. Dolphin.handleAirSupply is empty, so a dolphin
             // takes LivingEntity.baseTick's air like a land mob.
@@ -1625,7 +1609,6 @@ impl Def {
                     | S::ZombieVillager
                     | S::ZombifiedPiglin
             ),
-            tick_alone: false,
         }
     }
     fn hostile_class(&self) -> bool {

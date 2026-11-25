@@ -3,8 +3,8 @@
 //! Each test runs in its own process and changes the game's stick into a special model.
 use crate::game::Game;
 use mod_api::{
-    ClientHost, SpecialModelBakeContext, SpecialModelCollector, SpecialModelContext,
-    SpecialModelFactory, SpecialModelGeometry, SpecialModelRenderer, SpecialModelStack,
+    ClientHost, SpecialModelCollector, SpecialModelContext, SpecialModelFactory,
+    SpecialModelGeometry, SpecialModelQuad, SpecialModelRenderer, SpecialModelStack,
     SpecialModelTints,
 };
 use std::{
@@ -18,7 +18,6 @@ use sunrise_client::item_render::{ItemRenderState, OwnedSpecialModelFactory};
 #[test]
 #[ignore = "daily"]
 fn a_special_dropped_item_outlines_only_its_committed_world_vertices() {
-    use mod_api::SpecialModelQuad;
     use sunrise_client::{
         chunk::{Chunk, Light, index},
         entities::ItemEntity,
@@ -36,18 +35,7 @@ fn a_special_dropped_item_outlines_only_its_committed_world_vertices() {
         "game::native_special_renderers::frame_tests::a_special_dropped_item_outlines_only_its_committed_world_vertices",
         || {
             crate::game::native_entity_refs::tests::with_client_game(|game| {
-                install_stick_with(game, |bake| {
-                    bake.bake_geometry(&[SpecialModelQuad::new(
-                        [
-                            [0.0, 0.0, 0.0],
-                            [1.0, 0.0, 0.0],
-                            [1.0, 1.0, 0.0],
-                            [0.0, 1.0, 0.0],
-                        ],
-                        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-                        "minecraft:block/stone",
-                    )])
-                });
+                install_special_stick(game);
                 game.gui.atlas.sprites.insert(
                     "block/stone".into(),
                     Rect {
@@ -60,7 +48,7 @@ fn a_special_dropped_item_outlines_only_its_committed_world_vertices() {
                     },
                 );
                 game.glint_frame = GlintFrame {
-                    millis: 0.0,
+                    millis: 0,
                     speed: 0.5,
                     alpha: 0.75,
                     sprite: true,
@@ -165,28 +153,33 @@ pub(in crate::game) fn asked(count: u32) -> usize {
         .count()
 }
 
-/// Makes `game`'s stick a `minecraft:special` model of the type `test:stick`, drawn by [`Stick`]:
-/// in the game's own item definitions, which every route that resolves a stick reads.
+/// Installs a special renderer for sticks in this game's item definitions. The fixture submits
+/// its own quad and needs no display transforms from a client-only model library.
 pub(in crate::game) fn install_special_stick(game: &mut Game<'_>) {
-    install_stick_with(game, |bake| bake.bake_model("minecraft:item/stick"));
-}
-
-fn install_stick_with(
-    game: &mut Game<'_>,
-    bake_geometry: impl Fn(&dyn SpecialModelBakeContext) -> Result<SpecialModelGeometry, String>
-    + Send
-    + Sync
-    + 'static,
-) {
     let factories = BTreeMap::from([(
         mod_api::Identifier::parse("test:stick").unwrap(),
         OwnedSpecialModelFactory::new(
             "test",
-            SpecialModelFactory::new(|_| Ok(()), move |(), bake| bake_geometry(bake).map(Stick)),
+            SpecialModelFactory::new(
+                |_| Ok(()),
+                |(), bake| {
+                    bake.bake_geometry(&[SpecialModelQuad::new(
+                        [
+                            [0.0, 0.0, 0.0],
+                            [1.0, 0.0, 0.0],
+                            [1.0, 1.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                        ],
+                        [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                        "minecraft:block/stone",
+                    )])
+                    .map(Stick)
+                },
+            ),
         ),
     )]);
     let definition = game.pack.item_renderer.decode_definition(
-        r#"{"model":{"type":"minecraft:special","base":"minecraft:item/stick","model":{"type":"test:stick"}}}"#,
+        r#"{"model":{"type":"minecraft:special","base":"minecraft:builtin/missing","model":{"type":"test:stick"}}}"#,
         &sunrise_client::item_render::ItemProviderTables {
             special: Some(&factories),
             ..Default::default()

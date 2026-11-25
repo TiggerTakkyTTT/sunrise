@@ -1,5 +1,5 @@
 manifest:
-refused: sunrise-mod.toml: rule for other: url is not https://
+refused: sunrise-mod.toml: url is not https:// (line 5, column 17)
 
 icon:
 unavailable

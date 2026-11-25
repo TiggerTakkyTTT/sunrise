@@ -48,8 +48,8 @@ def main():
                            timeout=180, check=True)
     resources = Path(os.environ.get('SUNRISE_TEST_RESOURCES', lab.RESOURCES)).resolve(strict=True)
     env = lab.game_env(SUNRISE_TEST_RESOURCES=resources, SUNRISE_STEERABLE_BOARDING_REPORT=rust)
-    oracle_harness.run_logged(['cargo', 'test', '--locked', '-p', 'sunrise-client', '--lib',
-                               TEST, '--', '--exact', '--ignored', '--nocapture'], build, 'rust', env=env)
+    oracle_harness.run_logged([lab.parity_fixtures(),
+                               TEST, '--exact', '--ignored', '--nocapture'], build, 'rust', env=env)
     expected, actual = (json.loads(path.read_text(encoding='utf-8')) for path in (vanilla, rust))
     if expected.keys() != CASES or actual.keys() != CASES:
         raise AssertionError(f'{NAME}: incomplete observations')

@@ -45,6 +45,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn a_dispatch_over_the_limit_reads_its_declared_work_groups() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

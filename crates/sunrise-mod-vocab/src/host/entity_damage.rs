@@ -59,6 +59,32 @@ pub trait EntityDamageBackend {
 #[sunrise_mod_api_macros::host_area]
 pub trait EntityDamageBackendMut {
     /// Side: server.
+    /// Roll this live entity's death loot table as `LivingEntity.dropFromLootTable`, but
+    /// return the stacks without killing the entity, dropping items or experience, or
+    /// taking its equipment. Only the entity's loot table is rolled, not its custom death
+    /// drops. `None` uses its own table, including a mob's `DeathLootTable` override.
+    ///
+    /// The `ENTITY` context uses the entity's position as ORIGIN and `source`'s causing
+    /// and direct entities as ATTACKING_ENTITY and DIRECT_ATTACKING_ENTITY. The credited
+    /// player, if supplied, sets LAST_DAMAGE_PLAYER and luck; it need not be the attacker.
+    /// There is no TOOL. The living target must be in the server level in place; stale
+    /// references, unknown IDs and non-living targets are refused before drawing.
+    ///
+    /// This uses a mob's nonzero death-table seed if set, otherwise the named random
+    /// sequence or the level random. The latter draws advance the live streams.
+    ///
+    /// The roll asks `enchanted_entity_loot` for its enchantment levels, as a death does
+    /// (NeoForge's `EventHooks.getEntityLootEnchantmentLevel` fires for any entity loot
+    /// with a damage source). A listener of that hook that rolls from inside it rolls
+    /// again inside itself, so it must stop its own recursion.
+    fn entity_roll_death_loot(
+        &mut self,
+        entity: EntityRef,
+        table: Option<&Identifier>,
+        source: LootDamageSource<'_>,
+        last_damage_player: Option<PlayerRef>,
+    ) -> Result<Vec<ItemStack>, DeathLootError>;
+    /// Side: server.
     /// `Entity.setInvulnerable`: sets a mob's `Invulnerable` flag, saved
     /// with it. False for the other kinds.
     fn entity_set_invulnerable(&mut self, entity: EntityRef, invulnerable: bool) -> bool;

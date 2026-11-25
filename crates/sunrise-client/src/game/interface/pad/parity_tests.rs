@@ -2,6 +2,7 @@
 //! What needs a renderer (inventory slots, screenshots) is covered by tools/pad_parity_e2e.py.
 
 use super::super::{Audio, Game, Options, Progress, Screen, Settings, load_resources};
+use crate::game::native_entity_refs::tests::run_fresh_cases;
 use sunrise_client::actions::Action;
 use sunrise_client::command::args::GameMode;
 use sunrise_client::gamepad::{Button, PadState};
@@ -108,13 +109,40 @@ fn a_keyboard_release_keeps_the_sneak_the_pad_went_on_to_hold() {
 #[test]
 #[ignore = "daily"]
 fn pad_smooth_camera_binding_toggles_the_cinematic_camera() {
+    if run_fresh_cases(
+        "game::pad::parity_tests::pad_smooth_camera_binding_toggles_the_cinematic_camera",
+        "SUNRISE_PAD_SMOOTH_CAMERA_CHILD",
+        &["binding"],
+    ) {
+        return;
+    }
+
     playing(|game| {
+        game.settings.controller.bind("key.togglePerspective", None);
         game.settings
             .controller
             .bind("key.smoothCamera", Some(Button::Select));
         assert!(!game.smooth_camera);
-        game.pad_action("key.smoothCamera", true).unwrap();
-        assert!(game.smooth_camera, "as its key does in play");
+        pad_press(game, Button::Select, "key.smoothCamera");
+        pad_release(game, Button::Select);
+        assert!(
+            !game.smooth_camera,
+            "the pad click waits for keybind polling"
+        );
+        game.handle_play_keybinds();
+        assert!(game.smooth_camera);
+        game.handle_play_keybinds();
+        assert!(game.smooth_camera, "the pad click was consumed");
+
+        game.settings.keys.set("key.smoothCamera", "key.keyboard.k");
+        game.mapped_key_event(KeyCode::KeyK, true, false).unwrap();
+        game.mapped_key_event(KeyCode::KeyK, false, false).unwrap();
+        assert!(
+            game.smooth_camera,
+            "the keyboard click also waits for polling"
+        );
+        game.handle_play_keybinds();
+        assert!(!game.smooth_camera, "the keyboard toggles the same camera");
     });
 }
 
@@ -286,20 +314,17 @@ fn a_held_pad_toolbar_action_counts_as_the_toolbar_key() {
 
 #[test]
 #[ignore = "daily"]
-fn the_pads_attack_and_use_reach_what_the_mouse_tells_mods() {
+fn the_pads_attack_and_use_reach_the_vanilla_key_mappings() {
     playing(|game| {
         game.options.execution_role = ExecutionRole::Client;
         let attack_mapping = game.vanilla_key_mapping("key.attack").unwrap();
         let use_mapping = game.vanilla_key_mapping("key.use").unwrap();
-        assert_eq!(game.native_clicks(), (0, 0));
         pad_press(game, Button::RightTrigger, "key.attack");
         assert!(attack_mapping.is_down(game).unwrap());
-        assert_eq!(game.native_clicks(), (1, 0));
         pad_release(game, Button::RightTrigger);
         assert!(!attack_mapping.is_down(game).unwrap());
         pad_press(game, Button::LeftTrigger, "key.use");
         assert!(use_mapping.is_down(game).unwrap());
-        assert_eq!(game.native_clicks(), (1, 1));
     });
 }
 

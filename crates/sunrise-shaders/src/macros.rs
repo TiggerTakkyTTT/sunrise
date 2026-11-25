@@ -178,6 +178,21 @@ impl Macros {
         self.define("MC_MIPMAP_LEVEL", mipmap_levels.to_string());
     }
 
+    /// The `MC_GL_KHR_shader_subgroup_*` macros of a device with subgroup operations
+    /// (`wgpu::Features::SUBGROUP`): the GL extensions the translator then takes.
+    pub fn define_subgroups(&mut self) {
+        for ext in [
+            "basic",
+            "vote",
+            "arithmetic",
+            "ballot",
+            "shuffle",
+            "shuffle_relative",
+        ] {
+            self.define(format!("MC_GL_KHR_shader_subgroup_{ext}"), "");
+        }
+    }
+
     /// A note for each feature `iris.features.required` names that Sunrise lacks; a name matches
     /// in any case. Optional features need nothing: no macro is defined for them (see `FEATURES`).
     pub fn feature_notes(properties: &crate::Properties) -> Vec<String> {
@@ -536,6 +551,7 @@ mod tests {
             &crate::preprocess(&pack, "composite.vsh", m),
             &crate::preprocess(&pack, "composite.fsh", m),
             crate::Target::Buffers,
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
         )
         .map(|_| ())
         .map_err(|e| format!("{e:?}"))

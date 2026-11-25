@@ -157,6 +157,8 @@ jobs:
       - name: Build and pack the tool
         env:
           SUNRISE_TOOL_COMMIT: ${{ needs.decide.outputs.commit }}
+          # Marks this build as the rolling release's, the only one `self-update` follows.
+          SUNRISE_TOOL_CHANNEL: mod-tool
         run: python tools/prebuilt_game.py tool dist
       - name: The tool starts and names this commit
         run: |

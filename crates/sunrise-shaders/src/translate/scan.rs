@@ -18,6 +18,8 @@ pub(super) struct Var {
     /// Of a struct type: the pack's declaration stays as a private global, and the members
     /// travel in varyings of ours (`struct_parts`).
     pub(super) structure: bool,
+    /// The token of its type, where an error about it points.
+    pub(super) at: usize,
 }
 
 /// `layout(rgba16f) uniform writeonly image2D colorimg4;`
@@ -242,6 +244,37 @@ const VULKAN_TYPES: [(&str, &str); 9] = [
 
 pub(super) fn significant(t: &str) -> bool {
     !t.trim().is_empty()
+}
+
+/// A layout qualifier's value as `Stage::layout_value` reads it.
+enum LayoutValue {
+    Value(u32),
+    /// Past `u32::MAX`, as the pack wrote it: refused where it is used, never wrapped.
+    TooLarge(String),
+    /// Missing, negative or not a constant Sunrise can work out: where it is used, the output
+    /// takes the next free location, or component 0.
+    Unread,
+}
+
+/// The note for a fragment output whose `component` (as written) doesn't fit the location's four.
+fn unsupported_component(
+    name: &str,
+    ty: &str,
+    array: &str,
+    component: &dyn std::fmt::Display,
+) -> String {
+    format!("`{name}`: a `{ty}{array}` output at component {component} is not supported")
+}
+
+/// `word` is an integer literal of any size as `ConstantSize` reads one: `0x` and hexadecimal
+/// digits, or decimal digits (an octal literal, or one with a leading `0` that `ConstantSize`
+/// reads as decimal), with an optional `u`.
+fn is_integer_literal(word: &str) -> bool {
+    let digits = word.strip_suffix(['u', 'U']).unwrap_or(word);
+    match digits.strip_prefix("0x").or(digits.strip_prefix("0X")) {
+        Some(hex) => !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()),
+        None => !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+    }
 }
 
 /// A fragment output narrower than four components: the vec4 of its kind, and the components
@@ -586,6 +619,7 @@ impl<'p> Stage<'p> {
                 name,
                 decl: format!("{ty} @;"),
                 structure: false,
+                at: 0,
             });
         }
     }
@@ -714,6 +748,8 @@ impl<'p> Stage<'p> {
         let mut storage = None;
         let mut location = None;
         let mut component = None;
+        // A `location` or `component` past `u32`.
+        let mut too_large = None;
         let mut format = None;
         let mut access = "";
         let mut coherent = false;
@@ -726,15 +762,15 @@ impl<'p> Stage<'p> {
                 while let Some(&t) = words.get(j) {
                     j += 1;
                     match self.tokens[t] {
-                        "location" => {
-                            location = words
-                                .get(j + 1)
-                                .and_then(|&n| self.tokens[n].parse::<u32>().ok());
-                        }
-                        "component" => {
-                            component = words
-                                .get(j + 1)
-                                .and_then(|&n| self.tokens[n].parse::<usize>().ok());
+                        key @ ("location" | "component") => {
+                            let (value, end) = self.layout_value(&words, j);
+                            match value {
+                                LayoutValue::Value(n) if key == "location" => location = Some(n),
+                                LayoutValue::Value(n) => component = Some(n),
+                                LayoutValue::TooLarge(text) => too_large = Some((key, text)),
+                                LayoutValue::Unread => {}
+                            }
+                            j = end;
                         }
                         f if IMAGE_FORMATS.contains(&f) => format = Some(f),
                         ")" => break,
@@ -864,6 +900,7 @@ impl<'p> Stage<'p> {
                         name,
                         decl,
                         structure: true,
+                        at: ty_at,
                     };
                     if input {
                         self.ins.push(var);
@@ -875,12 +912,32 @@ impl<'p> Stage<'p> {
                     name,
                     decl,
                     structure: false,
+                    at: ty_at,
                 }),
                 _ if fragment => {
+                    // A location or component past `u32` can't be the output's: refused, not
+                    // wrapped to another.
+                    if let Some((key, text)) = &too_large {
+                        let message = if *key == "component" {
+                            unsupported_component(&name, &ty, &array, text)
+                        } else {
+                            format!("`{name}`: its `location` {text} is past 4294967295")
+                        };
+                        self.errors.push(self.error(ty_at, &message));
+                        continue;
+                    }
                     let n = location.unwrap_or(self.outputs.len() as u32);
+                    // Ours declares it again with the location as a decimal literal, an `int`
+                    // (GLSL 4.60, 4.1.3): one past `i32::MAX` is refused here, at the pack's line.
+                    if i32::try_from(n).is_err() {
+                        let message = format!("`{name}`: its `location` {n} is past 2147483647");
+                        self.errors.push(self.error(ty_at, &message));
+                        continue;
+                    }
+                    let component = component.unwrap_or(0);
                     let shared = self.wide_outs.contains_key(&n);
-                    if component.is_some_and(|c| c > 0) || shared {
-                        self.output_part(n, component.unwrap_or(0), &ty, &name, &array, ty_at);
+                    if component > 0 || shared {
+                        self.output_part(n, component, &ty, &name, &array, ty_at);
                         continue;
                     }
                     self.outputs.insert(n);
@@ -908,6 +965,7 @@ impl<'p> Stage<'p> {
                     name,
                     decl,
                     structure: false,
+                    at: ty_at,
                 }),
             }
         }
@@ -919,20 +977,28 @@ impl<'p> Stage<'p> {
     fn output_part(
         &mut self,
         n: u32,
-        component: usize,
+        component: u32,
         ty: &str,
         name: &str,
         array: &str,
         ty_at: usize,
     ) {
         let kind = output_kind(ty).filter(|_| array.is_empty());
-        let Some((wide, width, fill)) = kind.filter(|&(_, width, _)| component + width <= 4) else {
-            let message = format!(
-                "`{name}`: a `{ty}{array}` output at component {component} is not supported"
-            );
+        // The components it fills, `start..end`, within the location's four.
+        let fits = |width: usize| {
+            let start = usize::try_from(component).ok()?;
+            start
+                .checked_add(width)
+                .filter(|&end| end <= 4)
+                .map(|end| (start, end))
+        };
+        let Some(((wide, width, fill), (start, end))) =
+            kind.and_then(|kind| Some((kind, fits(kind.1)?)))
+        else {
+            let message = unsupported_component(name, ty, array, &component);
             return self.errors.push(self.error(ty_at, &message));
         };
-        let mask = ((1u8 << width) - 1) << component;
+        let mask = ((1u8 << width) - 1) << start;
         match self.wide_outs.get_mut(&n) {
             Some((other, _)) if *other != wide => {
                 let message =
@@ -957,9 +1023,42 @@ impl<'p> Stage<'p> {
                 self.out_copies.push(format!("hz_out{n} = {fill};"));
             }
         }
-        let swizzle = &"xyzw"[component..component + width];
+        let swizzle = &"xyzw"[start..end];
         self.out_copies
             .push(format!("hz_out{n}.{swizzle} = {name};"));
+    }
+
+    /// The value of the layout qualifier whose `=` is `words[at]` (`location = 1u`,
+    /// `component = 1 + 1`), read as GLSL's integer constant expressions are (4.4), and the index
+    /// of the `,` or `)` that ends it.
+    fn layout_value(&self, words: &[usize], at: usize) -> (LayoutValue, usize) {
+        if words.get(at).is_none_or(|&i| self.tokens[i] != "=") {
+            return (LayoutValue::Unread, at);
+        }
+        let mut depth = 0usize;
+        let mut end = at + 1;
+        while let Some(&i) = words.get(end) {
+            match self.tokens[i] {
+                "(" => depth += 1,
+                ")" if depth > 0 => depth -= 1,
+                "," | ")" if depth == 0 => break,
+                _ => {}
+            }
+            end += 1;
+        }
+        let value: Vec<&str> = words[at + 1..end].iter().map(|&i| self.tokens[i]).collect();
+        let too_large = || LayoutValue::TooLarge(value.join(" "));
+        let value = match super::ConstantSize::value(&value) {
+            Some(v) => match u32::try_from(v) {
+                Ok(v) => LayoutValue::Value(v),
+                Err(_) if v > 0 => too_large(),
+                Err(_) => LayoutValue::Unread,
+            },
+            // A lone integer literal too large for the evaluator (`18446744073709551615`).
+            None if matches!(value[..], [word] if is_integer_literal(word)) => too_large(),
+            None => LayoutValue::Unread,
+        };
+        (value, end)
     }
 
     /// A global `T name = a ? b : c;` or, without `const`, any initialized global: naga only

@@ -56,6 +56,7 @@ fn binds(pass: &Pass) -> [bool; 2] {
 }
 
 #[test]
+#[ignore = "daily"]
 fn compute_and_quad_programs_read_only_the_listed_player_booleans() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

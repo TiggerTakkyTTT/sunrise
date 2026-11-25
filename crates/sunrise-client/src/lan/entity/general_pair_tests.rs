@@ -288,7 +288,7 @@ fn leaving_range_removes_the_row_and_coming_back_spawns_it_afresh() {
     assert_eq!(spawn_ids(&sunrise.sent[2]), [7]);
 }
 
-/// A key the spawn cannot carry (registration refuses one; a row may not have one): no client is
+/// A key the protocol spawn message cannot carry (past `general_entity::MAX_KEY`): no client is
 /// introduced to the row, so none is recorded as tracking it or sent its moves.
 #[test]
 fn a_row_whose_spawn_cannot_be_written_is_tracked_by_nobody() {

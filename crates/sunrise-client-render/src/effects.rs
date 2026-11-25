@@ -65,7 +65,7 @@ impl EffectInstance {
         self.show_icon = visible;
         self
     }
-    fn infinite(&self) -> bool {
+    pub fn infinite(&self) -> bool {
         self.duration == -1
     }
     /// This effect as its entity's swirls are computed from.
@@ -143,7 +143,7 @@ impl EffectInstance {
             self.duration = self.duration.wrapping_sub(1);
         }
     }
-    fn downgrade(&mut self) -> bool {
+    pub fn downgrade(&mut self) -> bool {
         if self.duration == 0
             && let Some(h) = self.hidden.take()
         {
@@ -177,7 +177,7 @@ pub enum EffectAction {
     Remove(&'static str),
 }
 /// `shouldApplyEffectTickThisTick` + `applyEffectTick` for the periodic effects.
-fn periodic(id: &str, tick: i32, amp: i32) -> Option<EffectAction> {
+pub fn periodic(id: &str, tick: i32, amp: i32) -> Option<EffectAction> {
     // Java's `>>` and `<<` take the shift distance modulo 32 (`wrapping_*`).
     let every = |base: i32| {
         let interval = base.wrapping_shr(amp as u32);
@@ -379,6 +379,58 @@ pub struct PlayerEffects {
     /// `onEffectAdded` or `onEffectUpdated` (`EffectsChangedTrigger`).
     pub changes: u32,
 }
+/// Copyable metadata of the active effect currently being ticked, so the pass
+/// never clones `EffectInstance` (or its boxed hidden-effect chain) while
+/// callbacks run against the live host.
+#[derive(Clone, Copy, Debug)]
+pub struct TickingEffect {
+    pub id: &'static str,
+    pub registry_index: Option<usize>,
+    pub duration: i32,
+    pub amplifier: i32,
+}
+
+impl TickingEffect {
+    pub fn infinite(self) -> bool {
+        self.duration == -1
+    }
+
+    fn from_instance(e: &EffectInstance) -> Self {
+        Self {
+            id: e.id,
+            registry_index: e.registry_index,
+            duration: e.duration,
+            amplifier: e.amplifier,
+        }
+    }
+}
+
+/// Host callbacks for [`PlayerEffects::tick_on`], allowing the single
+/// `LivingEntity.tickEffects` pass to keep the active-effect map live on its
+/// owner without cloning `EffectInstance`s.
+pub trait EffectTickHost {
+    fn effects(&self) -> &PlayerEffects;
+    fn effects_mut(&mut self) -> &mut PlayerEffects;
+    fn apply_action(&mut self, action: EffectAction);
+    fn tick_special(&mut self, effect: TickingEffect, tick_count: i32) -> OmenTick;
+    /// Add `effect` returned by [`OmenTick::Add`], returning `true` when a new
+    /// entry was inserted into `effects().list` (vanilla's CME stop condition).
+    fn add_effect(&mut self, effect: EffectInstance) -> bool;
+    fn on_promoted(&mut self, id: &'static str, amplifier: i32);
+    fn on_removed(&mut self, id: &'static str);
+    /// Ask `MobEffectEvent.Expired` when an effect has no remaining duration.
+    /// Returning `true` keeps the effect at 0 ticks for the next pass.
+    fn keep_expired(&self, effect: TickingEffect) -> bool;
+}
+
+fn locate_effect(list: &[EffectInstance], hint: usize, id: &'static str) -> Option<usize> {
+    if hint < list.len() && list[hint].id == id {
+        Some(hint)
+    } else {
+        list.iter().position(|cur| cur.id == id)
+    }
+}
+
 impl PlayerEffects {
     pub fn get(&self, id: &str) -> Option<&EffectInstance> {
         self.list.iter().find(|e| e.id == id)
@@ -430,96 +482,103 @@ impl PlayerEffects {
     pub fn flags(e: &EffectInstance) -> i8 {
         i8::from(e.ambient) | i8::from(e.visible) << 1 | i8::from(e.show_icon) << 2
     }
-    /// `LivingEntity.tickEffects` (server part) with the omens' effect ticks:
-    /// `omen` answers `BadOmenMobEffect` (every tick), `RaidOmenMobEffect`
-    /// (on its last tick) and a content mod's effect (every tick, with the
-    /// tick count `shouldApplyEffectTickThisTick` takes); `absorption_empty`
-    /// is `AbsorptionMobEffect`'s answer: the effect ends once the
-    /// absorption is used up. Returns the actions to apply, in order, and
-    /// whether Raid Omen was newly added.
+    /// `LivingEntity.tickEffects` (server part) running directly against a host
+    /// that owns [`PlayerEffects`], keeping the active-effect list live during
+    /// callbacks without cloning any [`EffectInstance`].
     ///
     /// Bad Omen turning into a new Raid Omen adds an entry to the map being
     /// iterated: vanilla's iterator then throws a
     /// `ConcurrentModificationException`, which `tickEffects` swallows. Bad
     /// Omen stays (not counted down) and the effects after it are not
     /// ticked; the next tick refreshes Raid Omen and drops Bad Omen.
-    pub fn tick_with(
-        &mut self,
-        omen: &mut dyn FnMut(
-            &EffectInstance,
-            i32,
-            &mut Vec<EffectAction>,
-            bool,
-            &[EffectInstance],
-        ) -> OmenTick,
-        absorption_empty: bool,
-        keep_expired: &[&'static str],
-    ) -> (Vec<EffectAction>, bool) {
-        self.tick_count = self.tick_count.wrapping_add(1);
-        let mut actions = Vec::new();
-        let mut added = false;
+    pub fn tick_on<H: EffectTickHost>(host: &mut H) {
+        let tick_count = {
+            let fx = host.effects_mut();
+            fx.tick_count = fx.tick_count.wrapping_add(1);
+            fx.tick_count
+        };
         let mut i = 0;
-        while i < self.list.len() {
-            let e = &self.list[i];
-            if !(e.infinite() || e.duration > 0) {
-                // `MobEffectEvent.Expired`: a refused expiry keeps the
-                // effect at no ticks, asking again next tick.
-                if keep_expired.contains(&e.id) {
+        while i < host.effects().list.len() {
+            let eff = TickingEffect::from_instance(&host.effects().list[i]);
+            if !(eff.infinite() || eff.duration > 0) {
+                if host.keep_expired(eff) {
                     i += 1;
                 } else {
-                    actions.push(EffectAction::Remove(self.list.remove(i).id));
+                    let removed = host.effects_mut().list.remove(i);
+                    host.on_removed(removed.id);
                 }
                 continue;
             }
-            let t = if e.infinite() {
-                self.tick_count
+            let t = if eff.infinite() {
+                tick_count
             } else {
-                e.duration
+                eff.duration
             };
-            if let Some(a) = periodic(e.id, t, e.amplifier) {
-                actions.push(a);
+            if let Some(a) = periodic(eff.id, t, eff.amplifier) {
+                host.apply_action(a);
             }
-            omen(e, t, &mut actions, false, &self.list);
-            let answer = match e.id {
-                "bad_omen" => omen(e, t, &mut actions, true, &self.list),
-                "raid_omen" if t == 1 => omen(e, t, &mut actions, true, &self.list),
-                id if potions::is_mod_effect(id) => omen(e, t, &mut actions, true, &self.list),
-                "absorption" if absorption_empty => OmenTick::Remove,
+            let answer = match eff.id {
+                "bad_omen" | "absorption" => host.tick_special(eff, t),
+                "raid_omen" if t == 1 => host.tick_special(eff, t),
+                id if potions::is_mod_effect(id) => host.tick_special(eff, t),
                 _ => OmenTick::Continue,
             };
             match answer {
                 OmenTick::Continue => {}
                 OmenTick::Remove => {
-                    actions.push(EffectAction::Remove(self.list.remove(i).id));
+                    if let Some(pos) = locate_effect(&host.effects().list, i, eff.id) {
+                        let removed = host.effects_mut().list.remove(pos);
+                        host.on_removed(removed.id);
+                        if pos < i {
+                            i -= 1;
+                        }
+                    }
                     continue;
                 }
                 OmenTick::Add(effect) => {
-                    if let Some(existing) = self.list.iter_mut().find(|x| x.id == effect.id) {
-                        if existing.update(&effect) {
-                            actions.push(EffectAction::Update(existing.id, existing.amplifier));
-                        }
-                        actions.push(EffectAction::Remove(self.list.remove(i).id));
-                        continue;
+                    // `LivingEntity.tickEffects` + `BadOmenMobEffect.applyEffectTick`:
+                    // inserting a new entry structurally modifies `activeEffects`, so
+                    // `iterator.remove()` throws `ConcurrentModificationException`,
+                    // leaving `bad_omen` for the next tick and ending this pass.
+                    // Updating an existing entry (or a denied add) does not structurally
+                    // modify the map, so `bad_omen` is removed and the pass continues.
+                    if host.add_effect(effect) {
+                        break;
                     }
-                    self.list.push(effect);
-                    added = true;
-                    break;
+                    if let Some(pos) = locate_effect(&host.effects().list, i, eff.id) {
+                        let removed = host.effects_mut().list.remove(pos);
+                        host.on_removed(removed.id);
+                        if pos < i {
+                            i -= 1;
+                        }
+                    }
+                    continue;
                 }
             }
-            let e = &mut self.list[i];
-            e.tick_down();
-            if e.downgrade() {
-                actions.push(EffectAction::Update(e.id, e.amplifier));
+            let Some(pos) = locate_effect(&host.effects().list, i, eff.id) else {
+                continue;
+            };
+            let (promoted, expired) = {
+                let cur = &mut host.effects_mut().list[pos];
+                cur.tick_down();
+                let promoted = cur.downgrade().then_some((cur.id, cur.amplifier));
+                let expired = (!(cur.infinite() || cur.duration > 0))
+                    .then(|| TickingEffect::from_instance(cur));
+                (promoted, expired)
+            };
+            if let Some((id, amplifier)) = promoted {
+                host.on_promoted(id, amplifier);
             }
-            // `MobEffectEvent.Expired`: a kept expiry leaves the effect at
-            // no ticks instead of removing it here.
-            if e.infinite() || e.duration > 0 || keep_expired.contains(&e.id) {
-                i += 1;
+            if let Some(expired_eff) = expired
+                && !host.keep_expired(expired_eff)
+            {
+                let removed = host.effects_mut().list.remove(pos);
+                host.on_removed(removed.id);
+                i = pos;
             } else {
-                actions.push(EffectAction::Remove(self.list.remove(i).id));
+                i = pos + 1;
             }
         }
-        (actions, added)
     }
     /// `LivingEntity.tickEffects` (server part): actions to apply, in order.
     pub fn tick(&mut self) -> Vec<EffectAction> {
@@ -808,28 +867,84 @@ mod tests {
         assert_eq!(fx.changes, 2);
     }
 
+    struct TestTickHost<'a, F> {
+        fx: &'a mut PlayerEffects,
+        special: F,
+        actions: Vec<EffectAction>,
+        added: bool,
+    }
+
+    impl<F> EffectTickHost for TestTickHost<'_, F>
+    where
+        F: FnMut(TickingEffect, i32, &mut Vec<EffectAction>) -> OmenTick,
+    {
+        fn effects(&self) -> &PlayerEffects {
+            self.fx
+        }
+        fn effects_mut(&mut self) -> &mut PlayerEffects {
+            self.fx
+        }
+        fn apply_action(&mut self, action: EffectAction) {
+            self.actions.push(action);
+        }
+        fn tick_special(&mut self, effect: TickingEffect, tick_count: i32) -> OmenTick {
+            (self.special)(effect, tick_count, &mut self.actions)
+        }
+        fn add_effect(&mut self, effect: EffectInstance) -> bool {
+            if let Some(existing) = self.fx.list.iter_mut().find(|x| x.id == effect.id) {
+                if existing.update(&effect) {
+                    self.actions
+                        .push(EffectAction::Update(existing.id, existing.amplifier));
+                }
+                return false;
+            }
+            self.fx.list.push(effect);
+            self.added = true;
+            true
+        }
+        fn on_promoted(&mut self, id: &'static str, amplifier: i32) {
+            self.actions.push(EffectAction::Update(id, amplifier));
+        }
+        fn on_removed(&mut self, id: &'static str) {
+            self.actions.push(EffectAction::Remove(id));
+        }
+        fn keep_expired(&self, _: TickingEffect) -> bool {
+            false
+        }
+    }
+
+    fn run_tick_on(
+        fx: &mut PlayerEffects,
+        special: impl FnMut(TickingEffect, i32, &mut Vec<EffectAction>) -> OmenTick,
+    ) -> (Vec<EffectAction>, bool) {
+        let mut host = TestTickHost {
+            fx,
+            special,
+            actions: Vec::new(),
+            added: false,
+        };
+        PlayerEffects::tick_on(&mut host);
+        (host.actions, host.added)
+    }
+
     #[test]
     fn bad_omen_in_a_village_becomes_raid_omen_over_two_ticks() {
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new("bad_omen", 100, 1));
         fx.add(EffectInstance::new("speed", 50, 0));
-        let mut convert = |e: &EffectInstance,
-                           _: i32,
-                           _: &mut Vec<EffectAction>,
-                           dispatch: bool,
-                           _: &[EffectInstance]| match (dispatch, e.id) {
-            (true, "bad_omen") => OmenTick::Add(EffectInstance::new("raid_omen", 600, e.amplifier)),
+        let mut convert = |e: TickingEffect, _: i32, _: &mut Vec<EffectAction>| match e.id {
+            "bad_omen" => OmenTick::Add(EffectInstance::new("raid_omen", 600, e.amplifier)),
             _ => OmenTick::Continue,
         };
         // The first tick adds Raid Omen and stops there (the iterator's
         // ConcurrentModificationException): Bad Omen and Speed stay as they were.
-        let (_, added) = fx.tick_with(&mut convert, false, &[]);
+        let (_, added) = run_tick_on(&mut fx, &mut convert);
         assert!(added);
         assert_eq!(fx.get("bad_omen").unwrap().duration, 100);
         assert_eq!(fx.get("speed").unwrap().duration, 50);
         assert_eq!(fx.get("raid_omen").unwrap().duration, 600);
         // The second refreshes Raid Omen and drops Bad Omen.
-        let (_, added) = fx.tick_with(&mut convert, false, &[]);
+        let (_, added) = run_tick_on(&mut fx, &mut convert);
         assert!(!added);
         assert!(fx.get("bad_omen").is_none());
         assert_eq!(fx.get("speed").unwrap().duration, 49);
@@ -873,16 +988,10 @@ mod tests {
         ordered.add(EffectInstance::new("regeneration", 50, 0));
         ordered.add(EffectInstance::new("ruby:glow", 10, 0));
         ordered.add(EffectInstance::new("wither", 40, 0));
-        let (actions, _) = ordered.tick_with(
-            &mut |_, _, actions, dispatch, _| {
-                if dispatch {
-                    actions.push(EffectAction::Eat(2, 0.5));
-                }
-                OmenTick::Continue
-            },
-            false,
-            &[],
-        );
+        let (actions, _) = run_tick_on(&mut ordered, |_, _, actions| {
+            actions.push(EffectAction::Eat(2, 0.5));
+            OmenTick::Continue
+        });
         assert_eq!(
             actions,
             [
@@ -906,22 +1015,15 @@ mod tests {
         fx.add(EffectInstance::new("ruby:glow", 3, 1));
         fx.add(EffectInstance::new("ruby:bleed", -1, 0));
         let mut seen = Vec::new();
-        let mut answer = |e: &EffectInstance,
-                          t: i32,
-                          _: &mut Vec<EffectAction>,
-                          dispatch: bool,
-                          _: &[EffectInstance]| {
-            if !dispatch {
-                return OmenTick::Continue;
-            }
+        let mut answer = |e: TickingEffect, t: i32, _: &mut Vec<EffectAction>| {
             seen.push((e.id, t));
             match (e.id, t) {
                 ("ruby:glow", 2) => OmenTick::Remove,
                 _ => OmenTick::Continue,
             }
         };
-        fx.tick_with(&mut answer, false, &[]);
-        fx.tick_with(&mut answer, false, &[]);
+        run_tick_on(&mut fx, &mut answer);
+        run_tick_on(&mut fx, &mut answer);
         let ticks = [
             ("ruby:glow", 3),
             ("ruby:bleed", 1),
@@ -937,20 +1039,13 @@ mod tests {
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new("raid_omen", 2, 0));
         let mut seen = Vec::new();
-        let mut watch = |e: &EffectInstance,
-                         _: i32,
-                         _: &mut Vec<EffectAction>,
-                         dispatch: bool,
-                         _: &[EffectInstance]| {
-            if !dispatch {
-                return OmenTick::Continue;
-            }
+        let mut watch = |e: TickingEffect, _: i32, _: &mut Vec<EffectAction>| {
             seen.push(e.duration);
             OmenTick::Remove
         };
-        fx.tick_with(&mut watch, false, &[]);
+        run_tick_on(&mut fx, &mut watch);
         assert!(fx.get("raid_omen").is_some());
-        fx.tick_with(&mut watch, false, &[]);
+        run_tick_on(&mut fx, &mut watch);
         assert!(fx.get("raid_omen").is_none());
         assert_eq!(seen, vec![1]);
     }

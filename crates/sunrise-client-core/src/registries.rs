@@ -265,6 +265,13 @@ impl Registries {
                 },
             );
         }
+        // `CommandSourceStack.getAvailableSounds` lists built-in sound events;
+        // a dedicated server does not open the client's sound definitions.
+        if self.sounds.is_empty()
+            && let Some(events) = self.by_registry.get("minecraft:sound_event")
+        {
+            self.sounds.clone_from(&events.ids);
+        }
         if self.block_entities.is_empty() {
             self.block_entities = strings(&r["block_entities"]).into_iter().collect();
         }
@@ -309,6 +316,7 @@ impl Registries {
         fill(&mut self.templates, &e.templates);
         fill(&mut self.persistent_components, &e.persistent_components);
         fill(&mut self.learnable_recipes, &e.learnable_recipes);
+        fill(&mut self.sounds, &e.sounds);
         if self.summonable.is_empty() {
             self.summonable.clone_from(&e.summonable);
             self.summonable.sort();

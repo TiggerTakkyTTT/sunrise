@@ -124,8 +124,10 @@ fn execute(
         let epoch = incoming.epoch.clone();
         let prepared = match main.prepare(incoming, credit) {
             Ok(prepared) => prepared,
-            Err(error) => {
-                disconnect(failure(&format!("payload main refused: {error:?}")));
+            Err((error, work_failure)) => {
+                if work_failure.is_none() {
+                    disconnect(failure(&format!("payload main refused: {error:?}")));
+                }
                 return;
             }
         };
@@ -140,9 +142,7 @@ fn execute(
         }
         return;
     }
-    let Body::Payload(bytes) =
-        std::mem::replace(&mut incoming.body, Body::Payload(PayloadBytes(Vec::new())))
-    else {
+    let Body::Payload(bytes) = incoming.take_body() else {
         unreachable!("work is sent to main above");
     };
     let mut context = NetworkContext {
@@ -152,8 +152,10 @@ fn execute(
         after: Vec::new(),
         disconnect: None,
         finish_task: None,
+        failure: None,
     };
-    match incoming.receiver.handle(bytes, &mut context) {
+    let result = incoming.receiver.handle(bytes, &mut context);
+    match context.failure.take().map_or(result, Err) {
         Err(CallbackFailure::Refused(error)) => {
             // Drop reservations and staged work before reporting failure; publish no partial actions.
             drop(context);
@@ -242,6 +244,7 @@ struct NetworkContext<'a> {
     after: Vec<Option<After>>,
     disconnect: Option<Text>,
     finish_task: Option<(Arc<crate::lan::configuration_tasks::Session>, usize)>,
+    failure: Option<CallbackFailure>,
 }
 impl IPayloadContext for NetworkContext<'_> {
     fn player(&self) -> Result<PlayerRef, PayloadContextError> {
@@ -314,7 +317,7 @@ impl IPayloadContext for NetworkContext<'_> {
         id: &PayloadId,
         bytes: PayloadBytes,
     ) -> Result<u32, PayloadSendError> {
-        if self.disconnect.is_some() || !self.incoming.epoch.active() {
+        if self.disconnect.is_some() || self.failure.is_some() || !self.incoming.epoch.active() {
             return Err(PayloadSendError::Disconnected);
         }
         if self.endpoint.side() != Side::Server {
@@ -363,11 +366,20 @@ impl IPayloadContext for NetworkContext<'_> {
         &mut self,
         work: Arc<dyn PayloadWork>,
     ) -> Result<PayloadWorkStatus, PayloadContextError> {
-        if self.disconnect.is_some() {
+        if self.disconnect.is_some() || self.failure.is_some() {
+            if let Err(error) = self.incoming.receiver.dispose_work(work) {
+                self.failure = Some(error);
+            }
             return Err(PayloadContextError::Disconnected);
         }
-        let work = self.incoming.work(self.endpoint.transport(), work)?;
-        let prepared = self.main.prepare(work, None)?;
+        let prepared = self
+            .incoming
+            .work(self.endpoint.transport(), work)
+            .and_then(|work| self.main.prepare(work, None))
+            .map_err(|(error, work_failure)| {
+                self.failure = work_failure;
+                error
+            })?;
         self.after.push(Some(After::Work(prepared)));
         #[cfg(any(test, feature = "test-payload-probe"))]
         super::staging_probe::prepared(&self.incoming.id.0, true);

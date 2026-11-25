@@ -25,8 +25,22 @@ pub const MAX_INDEX: u64 = 16 << 20;
 pub const MAX_FILE: u64 = 64 << 20;
 /// The biggest native binary build ID, in bytes.
 pub const MAX_NATIVE_BUILD: usize = 128;
-/// Where files may be downloaded from: the registry's release assets.
-pub const FILE_HOST: &str = "https://github.com/horizon-rust/horizon-mods/releases/download/";
+
+// The GitHub API takes the repository slug; the index needs the full download prefix.
+macro_rules! registry_repo {
+    () => {
+        "sunrise-org/sunrise-mods"
+    };
+}
+
+/// The default GitHub repository for the registry's staging and published releases.
+pub const REGISTRY_REPO: &str = registry_repo!();
+/// The default base URL for mirrored packages and native binaries.
+pub const FILE_HOST: &str = concat!(
+    "https://github.com/",
+    registry_repo!(),
+    "/releases/download/"
+);
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Index {
@@ -841,7 +855,7 @@ fn check_project(p: &Project) -> Result<(), String> {
         return Err(format!("project id {:?} is not [a-z0-9_]{{1,64}}", p.id));
     }
     if let Some(nightly) = &p.nightly {
-        registry::check_nightly_source(&nightly.repo, nightly.path.as_deref()).map_err(at)?;
+        check_nightly_source(&nightly.repo, nightly.path.as_deref()).map_err(at)?;
     }
     if p.nightly.is_some() && p.versions.is_empty() {
         if let Some(problem) = page::check_title(&p.name, &p.summary).into_iter().next() {
@@ -1086,6 +1100,7 @@ pub fn verify_signature(key: &str, signature: &str, path: &Path) -> Result<(), S
         .map_err(|_| "the signature doesn't match the project's key".to_string())
 }
 
+#[cfg(feature = "index")]
 fn verify_signature_bytes(key: &str, signature: &str, bytes: &[u8]) -> Result<(), String> {
     let key =
         minisign_verify::PublicKey::from_base64(key.trim()).map_err(|e| format!("key: {e}"))?;
@@ -1457,6 +1472,38 @@ fn names(caps: &[Capability]) -> String {
     format!("[{}]", names.join(", "))
 }
 
+/// `owner/name` of a GitHub repository.
+pub fn valid_repo(repo: &str) -> bool {
+    let part = |p: &str, max: usize| {
+        !p.is_empty()
+            && p.len() <= max
+            && p != "."
+            && p != ".."
+            && p.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    repo.split_once('/')
+        .is_some_and(|(owner, name)| part(owner, 39) && part(name, 100))
+}
+
+pub(crate) fn check_nightly_source(repo: &str, path: Option<&str>) -> Result<(), String> {
+    if !valid_repo(repo) {
+        return Err(format!(
+            "nightly.repo {repo:?} must be owner/name on GitHub"
+        ));
+    }
+    if let Some(path) = path
+        && (path.contains(['\\', ':'])
+            || path.chars().any(char::is_control)
+            || path.split('/').any(|part| matches!(part, "" | "." | "..")))
+    {
+        return Err(format!(
+            "nightly.path {path:?} must be a relative directory in the repository"
+        ));
+    }
+    Ok(())
+}
+
 pub mod browser_state;
 mod collections;
 pub use collections::{Collection, MAX_COLLECTION_MEMBERS, Member};
@@ -1464,7 +1511,11 @@ mod dependencies;
 pub mod native;
 pub mod page;
 mod read;
+#[cfg(feature = "index")]
 pub mod registry;
+#[cfg(feature = "index")]
 pub mod resolve;
-#[cfg(test)]
+#[cfg(all(test, feature = "index"))]
 mod tests;
+#[cfg(feature = "index")]
+pub mod v2;

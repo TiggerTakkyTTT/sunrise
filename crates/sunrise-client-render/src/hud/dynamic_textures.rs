@@ -512,14 +512,12 @@ mod tests {
 
     /// An id's owners (the GUI list: none, a sprite or a removal; a model sprite; a live texture
     /// made before the reload) are separate lanes. For every combination: the prepare answers
-    /// from the GUI lane alone, a reload with replay lets the live texture win the lookup and the
-    /// checked paint, skips a GUI sprite it brought for the held id, never overwrites a model's
+    /// from the GUI lane alone, a reload with replay lets the live texture win the lookup, skips a GUI sprite it brought for the held id, never overwrites a model's
     /// packed sprite, and a free clears only the live lane, leaving the model's sprite and the
     /// GUI list's removal.
     #[test]
-    fn each_lane_of_an_id_keeps_its_own_owner_through_prepare_reload_lookup_paint_and_free() {
+    fn each_lane_of_an_id_keeps_its_own_owner_through_prepare_reload_lookup_and_free() {
         use crate::hud::{GuiSprite, HudAtlas};
-        use crate::hud_layout::{GuiDraw, undrawable};
         // The id, whether the GUI list has a sprite (true), removes it (false) or says nothing,
         // and whether a model has a sprite.
         let cases = [
@@ -581,19 +579,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         let size = |atlas: &HudAtlas, id: &str| atlas.gui_rect(id).map(|rect| (rect.w, rect.h));
         let missing = size(&atlas, crate::hud::MISSING_SPRITE);
-        let refused = |atlas: &HudAtlas, id: &str| {
-            let draw = GuiDraw::Sprite {
-                sprite: id.to_owned().into(),
-                x: 0,
-                y: 0,
-                w: 4,
-                h: 4,
-                region: None,
-                color: u32::MAX,
-                blend: crate::hud_layout::Blend::Textured,
-            };
-            undrawable(atlas, &[draw]).is_some()
-        };
         // Prepare: the GUI lane alone answers; a model-only id is unknown.
         for (id, gui, _) in cases {
             match gui {
@@ -603,7 +588,6 @@ mod tests {
                         "{id}"
                     );
                     assert_eq!(size(&atlas, id), Some((1, 1)), "{id}");
-                    assert!(!refused(&atlas, id), "{id}");
                 }
                 Some(false) => {
                     assert!(
@@ -611,11 +595,9 @@ mod tests {
                         "{id}"
                     );
                     assert_eq!(size(&atlas, id), missing, "{id}");
-                    assert!(refused(&atlas, id), "{id}");
                 }
                 None => {
                     assert!(atlas.gui_lookup(id).is_none(), "{id}");
-                    assert!(refused(&atlas, id), "{id}");
                 }
             }
         }
@@ -658,7 +640,6 @@ mod tests {
                 Some((3, 2)),
                 "{id}: the texture wins the lookup"
             );
-            assert!(!refused(&atlas, id), "{id}: and the checked paint");
             assert_eq!(
                 atlas.gui.contains_key(id),
                 gui == Some(false),
@@ -691,10 +672,8 @@ mod tests {
             );
             if gui == Some(false) {
                 assert_eq!(size(&atlas, id), missing, "{id}: the removal stays");
-                assert!(refused(&atlas, id), "{id}");
             } else {
                 assert!(atlas.gui_lookup(id).is_none(), "{id}: no GUI owner");
-                assert!(refused(&atlas, id), "{id}");
             }
         }
     }

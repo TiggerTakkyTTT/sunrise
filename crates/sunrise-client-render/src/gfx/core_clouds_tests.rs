@@ -69,10 +69,10 @@ const SIZE: u32 = 8;
 
 /// `program` as the classic clouds' only.
 fn classic(
-    program: &crate::core_shader::CoreProgram,
+    program: &sunrise_glsl::Translated,
 ) -> (
-    Option<&crate::core_shader::CoreProgram>,
-    Option<&[crate::core_shader::CoreProgram; 3]>,
+    Option<&sunrise_glsl::Translated>,
+    Option<&[sunrise_glsl::Translated; 3]>,
 ) {
     (Some(program), None)
 }
@@ -442,11 +442,13 @@ fn oit_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         return None;
     }
     eprintln!("adapter {:?}", adapter.get_info());
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: features,
-        ..Default::default()
-    }))
-    .ok()
+    crate::gfx::test_gpu::optional_device_with(
+        &adapter,
+        &wgpu::DeviceDescriptor {
+            required_features: features,
+            ..Default::default()
+        },
+    )
 }
 
 /// A vertex stage covering the target with each face's quad at device depth 0.5, wound so fancy
@@ -462,7 +464,7 @@ const OIT_VSH: &str = "#version 330\n\
 fn oit_programs(
     fragment: &str,
     include: &dyn Fn(&str) -> Option<String>,
-) -> [crate::core_shader::CoreProgram; 3] {
+) -> [sunrise_glsl::Translated; 3] {
     oit_programs_of(OIT_VSH, fragment, include)
 }
 
@@ -471,12 +473,12 @@ fn oit_programs_of(
     vertex: &str,
     fragment: &str,
     include: &dyn Fn(&str) -> Option<String>,
-) -> [crate::core_shader::CoreProgram; 3] {
+) -> [sunrise_glsl::Translated; 3] {
     let stage = |s: &OitStageSource| {
         crate::core_shader::translate_core_with(vertex, fragment, s.defines, include, &GLUE, &|b| {
             b == INFO_BLOCK || b == FACES || s.samplers.contains(&b)
         })
-        .unwrap_or_else(|e| panic!("{}: {e}", s.pipeline))
+        .unwrap_or_else(|e| panic!("{}: {e:?}", s.pipeline))
     };
     [
         stage(&OIT_STAGES[0]),
@@ -1031,6 +1033,7 @@ fn the_native_clouds_draw_in_the_frames_path_without_a_pack() {
 }
 
 #[test]
+#[ignore = "daily"]
 fn linear_light_links_the_required_programs_before_suppressing_the_draw() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some((device, _queue)) = oit_device() else {

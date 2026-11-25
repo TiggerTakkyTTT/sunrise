@@ -172,7 +172,7 @@ fn a_world_text_pipeline_over_the_block_limit_is_refused_alone() {
         (1, 13)
     );
     let text = core_text(&device, &queue, &shaders, [0; 4]).expect("the world text's pipeline");
-    assert!(text.polygon_offset.is_some());
+    assert!(text.world.is_some());
     assert!(text.see_through.is_none());
 }
 

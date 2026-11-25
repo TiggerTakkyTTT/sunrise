@@ -164,10 +164,7 @@ impl Endpoint {
     ) -> Result<Prepared, PayloadSendError> {
         #[cfg(any(test, feature = "test-payload-probe"))]
         super::staging_probe::capture(&id.0, self);
-        if !epoch.active() {
-            return Err(PayloadSendError::StaleEpoch);
-        }
-        epoch.peer.can_send(epoch.phase, id)?;
+        epoch.can_send(id)?;
         // A raw channel keeps vanilla's clientbound custom-payload limit, by name.
         let limit = sunrise_protocol::packets::custom_payload::CLIENTBOUND_LIMIT;
         if epoch.peer.local.is_raw(&id.0) && bytes.0.len() > limit {
@@ -280,6 +277,7 @@ impl Endpoint {
                     reason: reason.plain(),
                     key: None,
                     from_server: false,
+                    after_login: true,
                 });
                 if let Some(writer) = writer.as_ref() {
                     if configuring.load(Ordering::Acquire) {

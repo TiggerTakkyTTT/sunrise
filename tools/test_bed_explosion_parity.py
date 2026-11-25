@@ -192,11 +192,11 @@ def main():
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
     sunrise_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     client = ['java', '-Xmx1g', '-cp', str(classes) + os.pathsep + dependencies, 'dev.sunriselab.parity.KnockbackClient']
-    kb.CASES, kb.SETUP, kb.PLAYERS = CASES, SETUP, ('Alice',)
+    kb.SETUP, kb.PLAYERS = SETUP, ('Alice',)
     kb.PROPERTIES['allow-flight'] = 'true'
     world = generate_world(vanilla_server, build)
-    vanilla = compared(kb.run_side('vanilla', vanilla_server, client, build, world))
-    sunrise = compared(kb.run_side('sunrise', sunrise_server, client, build, world))
+    vanilla = compared(kb.run_side('vanilla', vanilla_server, client, build, world, CASES))
+    sunrise = compared(kb.run_side('sunrise', sunrise_server, client, build, world, CASES))
     differ = []
     for case in CASES:
         want, got = vanilla.get(case, []), sunrise.get(case, [])

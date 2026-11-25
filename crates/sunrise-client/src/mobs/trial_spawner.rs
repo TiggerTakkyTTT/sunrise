@@ -199,13 +199,20 @@ pub fn load_registry(root: &Path) {
                     ) else {
                         continue;
                     };
+                    let id = rel
+                        .iter()
+                        .map(|part| part.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    if !sunrise_world::json_folder::valid_resource_path(&ns, &id) {
+                        continue;
+                    }
                     let config = std::fs::read(&path)
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
                         .and_then(|v| TrialConfig::decode(&crate::scoreboard::json_to_tag(&v)));
                     match config {
                         Some(c) => {
-                            let id = rel.to_string_lossy().replace('\\', "/");
                             out.insert(format!("{ns}:{id}"), c);
                         }
                         None => log::warn!("Sunrise: bad trial spawner config {}", path.display()),
@@ -225,8 +232,8 @@ pub fn registry_contains(id: &str) -> Option<bool> {
     Some(REGISTRY.get()?.contains_key(id))
 }
 /// The identities of the same immutable registry gameplay reads.
-pub fn registry_ids() -> Option<Vec<&'static str>> {
-    Some(REGISTRY.get()?.keys().map(String::as_str).collect())
+pub fn registry_ids() -> Option<impl Iterator<Item = &'static str>> {
+    Some(REGISTRY.get()?.keys().map(String::as_str))
 }
 
 fn float(t: &Tag) -> Option<f32> {
@@ -1123,21 +1130,7 @@ impl TrialSpawnerExt for TrialSpawner {
             mob.width as f32 * scale,
             mob.height as f32 * scale,
         );
-        let pending = spawn_selection::Pending {
-            yaw,
-            fresh: data.unconfigured(),
-        };
-        if !spawn_selection::position_ok(l, &id, Reason::TrialSpawner, placed, pending, || {
-            spawn_selection::spawn_obstruction(
-                species,
-                l,
-                bounds,
-                Some(&[]),
-                own[0],
-                own[1],
-                own[2],
-            )
-        }) {
+        if !spawn_selection::spawn_obstruction(species, l, bounds, true, own[0], own[1], own[2]) {
             return None;
         }
         let request = SpawnerSpawn {

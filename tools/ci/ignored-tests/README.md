@@ -27,8 +27,9 @@ when the variable is absent and require it to pass when present.
 `#[ignore = "daily"]` in its source, and its row, in a new `daily-PACKAGE-TOPIC.txt` with the rows sorted,
 names its cargo target
 (`lib`, `bin:NAME` or `test:NAME`) and why it is a daily test (`slow`, `game-boot`, `resources`, `child-process`,
-`network`, `windows`, `own-sdk`, or `stable-line` for a check `verify` runs too that a stable release's green daily
-must include). It is not a known failure: it runs every day and must pass, and a row whose test no
+`network`, `gpu`, `windows`, `own-sdk`, or `stable-line` for a check `verify` runs too that a stable release's green
+daily must include). For `gpu` daily rows, a missing adapter fails the test instead of skipping it; these are
+distinct from the existing adapter-gated `gpu` policy rows above. It is not a known failure: it runs every day and must pass, and a row whose test no
 longer runs fails. Its package's shard runs it when that shard builds its target, and the `daily-rows` leg runs
 every other one except the tests run by the Windows or book quickstart jobs.
 An `own-sdk` row names an integration test that needs the daily head's SDK. The daily calls

@@ -9,6 +9,13 @@ impl Game<'_> {
     pub(super) fn creative_tab_open(&self) -> bool {
         self.screen == Screen::Creative && !self.creative_screen.tab().inventory
     }
+    /// The stack at a resolved display slot on the active item tab, accounting for scroll.
+    pub(super) fn creative_display_stack(&self, slot: usize) -> Option<ItemStack> {
+        let names = &self.pack.names;
+        let cell = slot - Creative::DISPLAY;
+        let first_row = self.creative_screen.first_row(names);
+        self.creative_screen.shown(names, first_row * 9 + cell)
+    }
     pub(super) fn creative_origin(batch: &HudBatch) -> (f32, f32) {
         batch.centered_origin(Creative::WIDTH, Creative::HEIGHT)
     }
@@ -37,15 +44,12 @@ impl Game<'_> {
     /// Vanilla tooltip: dark box with a purple gradient border, laid out and
     /// drawn like an item tooltip (4 px of padding on every side).
     pub(super) fn tooltip(&self, batch: &mut HudBatch, text: &str, x: f32, y: f32) {
-        let atlas = &self.gui.atlas;
-        let lines = vec![(sunrise_client::text::Text::literal(text), u32::MAX)];
-        let screen = (batch.width, batch.height);
-        let Some(at) = self.tooltip_pre(batch, None, &lines, &[], (x, y), screen) else {
-            return;
-        };
-        let (x, y, w, h) = Self::tooltip_geometry(atlas, &lines, at, screen, [0.0; 2]);
-        self.tooltip_box(batch, None, x, y, w, h);
-        Self::tooltip_text(batch, atlas, &lines, x, y);
+        self.draw_tooltip_lines(
+            batch,
+            &[(sunrise_client::text::Text::literal(text), u32::MAX)],
+            x,
+            y,
+        );
     }
     /// `CreativeModeInventoryScreen.getTooltipFromContainerItem`: the lines
     /// that follow the item's name, none for a category tab's own grid slots
@@ -385,7 +389,7 @@ impl Game<'_> {
             self.inv_clicks.skip_release();
             let page = self.creative_screen.page as i64 + step;
             if (0..self.creative_screen.pages() as i64).contains(&page) {
-                self.audio.play_button_click();
+                self.play_audio_button_click();
                 self.creative_screen.set_page(page as u32);
                 self.refresh_saved_hotbars();
             }

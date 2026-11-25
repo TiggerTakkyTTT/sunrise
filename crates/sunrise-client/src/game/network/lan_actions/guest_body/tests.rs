@@ -254,7 +254,7 @@ impl mod_api::Hooks for Breather {
         struct Granted;
         impl mod_api::CriterionTest for Granted {
             fn test(
-                &self,
+                &mut self,
                 _: &dyn mod_api::CriterionContext,
             ) -> Result<bool, mod_api::CriterionTestError> {
                 Ok(true)
@@ -281,7 +281,7 @@ impl mod_api::Hooks for Breather {
             player.trigger_criterion(
                 host,
                 &mod_api::Identifier::parse("breathing:tick").unwrap(),
-                Arc::new(Granted),
+                &mut Granted,
             ),
             Ok(())
         );

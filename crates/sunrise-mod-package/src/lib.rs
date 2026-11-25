@@ -1,6 +1,8 @@
 //! Sunrise's mod files (`docs/modding/src/how-to/content-mods.md`): content mods (`.smod`: blocks, items, data and
 //! assets, no code), modpacks and, with `index`, the mod registry's index. Code mods are
 //! native (docs/modding/src/how-to/native-mods.md).
+#[cfg(feature = "index")]
+mod checkout;
 pub mod content;
 pub mod dependencies;
 pub mod durable;
@@ -13,10 +15,11 @@ pub mod game_identity;
 ))]
 pub mod holder;
 pub mod icon;
-#[cfg(feature = "index")]
+#[cfg(feature = "index-read")]
 pub mod index;
 pub mod install_lock;
 pub mod internals;
+pub mod library_identity;
 #[cfg(all(
     feature = "runtime-process",
     any(target_os = "linux", target_os = "macos", windows)
@@ -32,9 +35,12 @@ pub mod native_route;
 #[cfg(feature = "runtime-process")]
 pub mod output;
 pub mod packages;
+#[cfg(feature = "index")]
+pub mod page;
 pub mod runtime;
 #[cfg(feature = "runtime-process")]
 pub mod runtime_leases;
+#[cfg(feature = "sdk")]
 pub mod sdk;
 pub mod selection;
 

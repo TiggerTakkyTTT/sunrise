@@ -61,6 +61,7 @@ fn pack() -> Post {
 }
 
 #[test]
+#[ignore = "daily"]
 fn small_packed_buffers_keep_their_bits() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

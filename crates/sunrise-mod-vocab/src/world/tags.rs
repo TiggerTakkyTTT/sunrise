@@ -30,8 +30,8 @@ pub enum TagMembers<K> {
     Unavailable,
 }
 
-/// Read merged block, item and fluid tags without borrowing the game's registry structs.
-/// A client reads the tags its server sent. The list methods distinguish absent tags
+/// Read merged block, item, fluid and damage type tags without borrowing the game's registry
+/// structs. A client reads the tags its server sent. The list methods distinguish absent tags
 /// from loaded empty tags, and report unavailable until that registry's authoritative tags
 /// are applied or if a member key cannot be resolved. A retained tag key reads the current
 /// snapshot on each call, including after reload.
@@ -45,6 +45,45 @@ pub trait Tags {
     /// unavailable authoritative tags or item mappings answer None.
     fn is_in_tag(&self, _item: ItemKey, _tag: TagKey) -> Option<bool> {
         unimplemented!("Tags::is_in_tag")
+    }
+    /// `DamageSource.is(TagKey)`: whether damage type `damage_type`, a hit's
+    /// [`HurtSource::damage_type`](crate::HurtSource::damage_type) (`minecraft:arrow`), is in the
+    /// current damage type tag, as bound at the last data reload. An unknown tag is false;
+    /// an unknown damage type, or unavailable authoritative damage type tags, answer None.
+    /// A tag service with no damage type data, such as a crafting kind's, answers None.
+    fn damage_type_in_tag(&self, _damage_type: &str, _tag: TagKey) -> Option<bool> {
+        None
+    }
+    /// The names of the tags that currently contain `item`, each once, in no specified order.
+    /// `None` means the item mapping or authoritative tag names are unavailable.
+    /// A known item with no tags returns an empty list. This does not resolve tag keys.
+    ///
+    /// Each call tests the item against every bound item tag and builds a new list: keep it
+    /// out of per-tick and per-entity hooks. Read it when the answer is needed, or after a
+    /// data reload, and keep the list; for one known tag, [`is_in_tag`](Self::is_in_tag) is
+    /// a single lookup.
+    fn item_tags(&self, _item: ItemKey) -> Option<Vec<Identifier>> {
+        unimplemented!("Tags::item_tags")
+    }
+    /// Every currently bound item tag's name, including empty tags, each once in no specified order.
+    /// `None` means the authoritative tag names are unavailable.
+    /// A loaded item registry with no bound tags returns an empty list.
+    /// Call [`key`](Self::key) separately if you need a key for membership reads.
+    ///
+    /// Each call builds a new list of every bound item tag: keep it out of per-tick and
+    /// per-entity hooks, and keep the list between data reloads.
+    fn item_tag_names(&self) -> Option<Vec<Identifier>> {
+        unimplemented!("Tags::item_tag_names")
+    }
+    /// Whether `block` is in the current block tag (`BlockState.is(TagKey)`). An unknown tag
+    /// is false; unavailable authoritative tags or block mappings answer None.
+    fn block_in_tag(&self, _block: BlockKey, _tag: TagKey) -> Option<bool> {
+        unimplemented!("Tags::block_in_tag")
+    }
+    /// Whether `fluid` is in the current fluid tag (`FluidState.is(TagKey)`). An unknown tag
+    /// is false; unavailable authoritative tags or fluid mappings answer None.
+    fn fluid_in_tag(&self, _fluid: FluidKey, _tag: TagKey) -> Option<bool> {
+        unimplemented!("Tags::fluid_in_tag")
     }
     /// Read the current item tag in vanilla's order, including unrequested vanilla items.
     fn items(&self, _tag: TagKey) -> TagMembers<ItemKey> {

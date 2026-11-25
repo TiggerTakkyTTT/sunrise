@@ -41,7 +41,9 @@ impl Game<'_> {
         let host = self.lan.as_mut()?;
         let mut prepared = host.hub.prepare_click(conn, p, &self.world, false)?;
         let frozen = if Self::stacked_listened() {
-            host.hub.stacked_click(&mut prepared, p)
+            host.hub
+                .stacked_click(&mut prepared, p)
+                .filter(Self::stacked_listens_for)
         } else {
             None
         };
@@ -62,7 +64,7 @@ impl Game<'_> {
         if let Some(frozen) = frozen {
             let shared = &prepared;
             let outcome_ref = &outcome;
-            let (stacks, slot) = (frozen.clone(), frozen.slot);
+            let (stacks, slot, primary) = (frozen.clone(), frozen.slot, frozen.primary);
             let picked = self.stacked_pickup(
                 route,
                 frozen,
@@ -73,6 +75,25 @@ impl Game<'_> {
                             .hub
                             .click_stacks(conn, slot, &game.world)?;
                     (carried == stacks.carried && clicked == stacks.clicked).then(|| stacks.clone())
+                },
+                |game, carried, clicked| {
+                    game.with_lan_lifted(|game, host| {
+                        let mut prepared = prepared.borrow_mut();
+                        let Some(prepared) = prepared.as_mut() else {
+                            return false;
+                        };
+                        let rules = ItemRules(
+                            world_items!(game),
+                            &world_stations!(game).enchantments,
+                            Some(&*game),
+                            None,
+                            prepared.container_insert_rules().to_vec(),
+                        );
+                        host.hub.probe_carried_vanilla_override(
+                            prepared, slot, primary, carried, clicked, &rules,
+                        )
+                    })
+                    .unwrap_or(false)
                 },
                 move |game, answer| {
                     // What the click writes belongs to the action: the guest's inventory and

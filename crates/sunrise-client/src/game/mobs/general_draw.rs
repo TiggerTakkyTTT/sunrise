@@ -1,8 +1,9 @@
 //! A mod's general entity rows on the window (#792, stage 5): each row the server shows
 //! (`game/network/remote/general.rs`), drawn by the renderer a mod registered for its type
 //! (`register_entity_renderers`), with the row's shared, frozen synced attachments. A general
-//! type has no look of its own: without a renderer, or with one that failed until the next
-//! resource load, its rows draw nothing.
+//! type has no look of its own: without a renderer, when its renderer returns an `Err` for
+//! that draw, or when its renderer has been disabled for the session after a panic, its rows
+//! draw nothing.
 use super::native_entity_renderers::EntityRendererTable;
 use super::remote::general::RemoteGeneral;
 use super::{Game, entity_culling};
@@ -67,6 +68,9 @@ impl Game<'_> {
         out: &mut Vec<Vertex>,
     ) {
         for (&id, row) in frame.rows[range].iter() {
+            if self.hides_as_camera(id as u32) {
+                continue;
+            }
             self.general_entity_geometry(frame, id as u32, row, out);
         }
     }
@@ -83,7 +87,7 @@ impl Game<'_> {
         let Some(resolved) = frame.renderers.general(row.type_slot) else {
             return;
         };
-        if resolved.failed.load(std::sync::atomic::Ordering::Relaxed) {
+        if !resolved.is_enabled() {
             return;
         }
         let position = DVec3::from_array(row.position);

@@ -59,16 +59,13 @@ impl Game<'_> {
                     |_, yaw| yaw,
                     |_| false,
                 );
-                self.remote_ride(
-                    Keys {
-                        left: case.keys[0],
-                        right: case.keys[1],
-                        forward: case.keys[2],
-                        backward: case.keys[3],
-                        ..Keys::default()
-                    },
-                    7,
-                )?;
+                self.remote_ride(Keys {
+                    left: case.keys[0],
+                    right: case.keys[1],
+                    forward: case.keys[2],
+                    backward: case.keys[3],
+                    ..Keys::default()
+                });
                 let packets = self.remote_vehicle_packets();
                 if case.event != 0 {
                     self.remote_boat_event(3, case.event);

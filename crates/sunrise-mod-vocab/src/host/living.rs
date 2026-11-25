@@ -27,11 +27,17 @@ pub trait LivingBackend {
     /// local player, whose copy of what the server sent it is read.
     fn living_effect(&self, living: LivingRef, effect: EffectKey) -> Option<ActiveEffect>;
     /// Side: both.
-    /// The entity's active effects (`LivingEntity.getActiveEffects`), in the
-    /// order their store keeps them, in `Some` even when it has none. None
-    /// for an armor stand, the dragon or a stale handle; on a client, for any
-    /// entity but the local player (its copy of what the server sent it).
-    fn living_effects(&self, living: LivingRef) -> Option<Vec<ActiveEffect>>;
+    /// Visits the entity's active effects (`LivingEntity.getActiveEffects`) in their store's
+    /// order, passing one owned effect value at a time. `Break(())` stops the visit and is
+    /// returned; `Continue(())` means it completed, with no calls when there are no effects.
+    /// A stale handle returns [`EntityReadError::Stale`]. Armor stands, the dragon and other
+    /// bodies without readable effects return [`EntityReadError::Unavailable`]. On a client,
+    /// only the local player's server-synced effects can be read.
+    fn living_visit_effects(
+        &self,
+        living: LivingRef,
+        visit: &mut dyn FnMut(ActiveEffect) -> core::ops::ControlFlow<()>,
+    ) -> Result<core::ops::ControlFlow<()>, EntityReadError>;
     /// Side: both.
     /// Whether the entity has `effect` (`LivingEntity.hasEffect`), using its resolved key.
     /// False before effect resolution, for an armor stand, the dragon or a stale handle;
@@ -69,6 +75,12 @@ pub trait LivingBackend {
     /// jump controller in the game's own AI, so both read false. None for
     /// an armor stand or the dragon.
     fn living_is_jumping(&self, living: LivingRef) -> Option<bool>;
+    /// Side: both.
+    /// The ticks before a held jump can jump again (`LivingEntity.noJumpDelay`: 10 after a
+    /// ground jump, counting down each tick): the player in place or a mob on a server, the
+    /// local player's own prediction on a client. None for a server's guests (their clients
+    /// keep their jump), other entities on a client, armor stands, the dragon and stale handles.
+    fn living_no_jump_delay(&self, living: LivingRef) -> Option<i32>;
     /// Side: both.
     /// Whether the entity is on a climbable block this tick
     /// (`LivingEntity.onClimbable`; Paper's `LivingEntity#isClimbing`), by
@@ -109,7 +121,9 @@ pub trait LivingBackend {
     /// Side: server.
     /// `LivingEntity.getKillCredit`: the remembered player takes precedence,
     /// even if the player cannot be resolved; otherwise the last hurting mob,
-    /// as [`Self::living_last_attacker`] finds it.
+    /// as [`Self::living_last_attacker`] finds it. A mob's death does not clear
+    /// the player reference: it can still resolve during the death animation,
+    /// until the `LivingEntity.baseTick` timer expires or the mob is removed.
     fn living_kill_credit(&self, living: LivingRef) -> Option<EntityRef>;
     /// Side: server.
     /// `LivingEntity.getLastHurtByMob`: the entity that last hurt this one,
@@ -121,6 +135,13 @@ pub trait LivingBackend {
     /// has passed, an attacker that is gone, an armor stand, the dragon or a
     /// client.
     fn living_last_attacker(&self, living: LivingRef) -> Option<EntityRef>;
+    /// Side: server.
+    /// The last living target recorded by `LivingEntity.setLastHurtMob`, with
+    /// the holder's `tickCount` at that moment (the same clock as `EntityRef::tick_count`).
+    /// There is no age cutoff. None for a stale holder, no remembered target,
+    /// or a target that is dead or gone.
+    #[goal_view]
+    fn living_last_hurt_mob(&self, living: LivingRef) -> Option<(EntityRef, i32)>;
     /// Side: server.
     /// `LivingEntity.hasLineOfSight(Entity)`: whether nothing that collides
     /// (`ClipContext.Block.COLLIDER`, fluids ignored) lies between the
@@ -143,26 +164,31 @@ pub trait LivingBackend {
     /// (`AttributeMap.getBaseValue`), read as the effective value is.
     fn living_attribute_base(&self, living: LivingRef, id: &str) -> Option<f64>;
     /// Side: both.
-    /// The ids of the attributes the entity's type has
-    /// (`AttributeMap`'s holder's attribute set), in registry order: the same
-    /// set the value and base reads answer for. None for a stale handle or an
-    /// unavailable entity; on a client, for any entity but the local player
-    /// (the client keeps no attribute map of another entity's, only the few
-    /// fields it draws).
-    fn living_attributes(&self, living: LivingRef) -> Option<Vec<Identifier>>;
+    /// Lends the ids of the attributes the entity's type has (`LivingEntity.getAttributes`),
+    /// one per call in registry order. These are the same attributes the value and base reads
+    /// answer for. Copy an id in the visitor if it must outlive the call.
+    /// `Break(())` stops the visit and is returned; `Continue(())` means it completed.
+    /// A stale handle returns [`EntityReadError::Stale`]; an unreadable entity returns
+    /// [`EntityReadError::Unavailable`]. On a client, only the local player is readable.
+    fn living_visit_attributes(
+        &self,
+        living: LivingRef,
+        visit: &mut dyn for<'a> FnMut(&'a str) -> core::ops::ControlFlow<()>,
+    ) -> Result<core::ops::ControlFlow<()>, EntityReadError>;
     /// Side: both.
-    /// The modifiers on the entity's attribute `id`
-    /// (`AttributeInstance.getModifiers`), in the order they were added: a
-    /// mod's transient and permanent ones, the saved list's, and what the
-    /// worn and held items grant. An attribute no modifier is on answers an
-    /// empty list; None for an attribute the entity type does not have, a
-    /// stale handle, or on a client for any entity but the local player,
-    /// whose copy of the synced instances it reads.
-    fn living_attribute_modifiers(
+    /// Lends the modifiers on the entity's attribute `id` (`AttributeInstance.getModifiers`)
+    /// in the order they were added, including transient, permanent, saved and equipment
+    /// modifiers. Copy any borrowed id needed after the visit. `Break(())` stops the visit
+    /// and is returned; `Continue(())` means it completed, with no calls for an attribute
+    /// that has no modifiers. An unknown or unsupported attribute or an unreadable entity
+    /// returns [`EntityReadError::Unavailable`]; a stale handle returns [`EntityReadError::Stale`].
+    /// On a client, only the local player's server-synced instances can be read.
+    fn living_visit_attribute_modifiers(
         &self,
         living: LivingRef,
         id: &str,
-    ) -> Option<Vec<AttributeModifier>>;
+        visit: &mut dyn for<'a> FnMut(AttributeModifierView<'a>) -> core::ops::ControlFlow<()>,
+    ) -> Result<core::ops::ControlFlow<()>, EntityReadError>;
     /// Side: both.
     /// Lend the stack in `slot` once, as in [`LivingRef::with_equipment`].
     #[manual_handle]
@@ -257,14 +283,10 @@ pub trait LivingBackend {
     /// None for a stale handle, an armor stand or the dragon.
     fn living_can_freeze(&self, living: LivingRef) -> Option<bool>;
     /// Side: server.
-    /// `LivingEntity.canBreatheUnderwater`: the species' own breath —
-    /// `is(#can_breathe_under_water)` in vanilla, `breathes_water` here (a
-    /// squid's true, a dolphin's false); a player answers false (no player
-    /// kind is in the tag). This is the tag read only, not the whole drown
-    /// decision: the air tick itself also keeps the air up behind Water
-    /// Breathing, the conduit's power and a player's invulnerability,
-    /// which this read does not carry. None for a stale handle, an armor
-    /// stand or the dragon.
+    /// Membership in the world's `#can_breathe_under_water` tag for a mob; a player
+    /// answers false. This is the tag read only, not the whole drown decision,
+    /// which also considers species overrides, effects and invulnerability.
+    /// None for a stale handle, an armor stand or the dragon.
     fn living_can_breathe_underwater(&self, living: LivingRef) -> Option<bool>;
     /// Side: server.
     /// The bed a sleeper lies in, as its block faces
@@ -306,11 +328,18 @@ pub trait LivingClientBackend {
 #[sunrise_mod_api_macros::host_area]
 pub trait LivingBackendMut {
     /// Side: server.
+    /// Pushes the living entity away from `direction` ([x, z]) using `LivingEntity.knockback`.
+    /// `living_knockback` can edit or cancel the push before knockback resistance is applied.
+    /// A successful push also sends the resulting motion to a player's own client.
+    /// False for an unavailable body, a non-finite input, a canceled push, or a strength
+    /// that is zero or less after resistance. This does not deal damage or assign credit.
+    fn living_knockback(&mut self, living: LivingRef, strength: f64, direction: [f64; 2]) -> bool;
+    /// Side: server.
     /// Apply one loaded consumable effect without consuming the item.
-    /// Mod-defined kinds enter the normal consume_effect hook: Some(true) means
-    /// dispatch was entered, not that a listener changed game state. Reapplying
-    /// the same kind from its own handler on this call stack returns Some(false)
-    /// without recursing; other kinds dispatch normally. None means an unavailable
+    /// Mod-defined kinds enter the normal `consume_effect` hook: `Some(true)` means
+    /// the callback completed, not that it changed game state. A missing, disabled
+    /// or failing callback returns `Some(false)`. Nested effects of any kind run
+    /// normally. `None` means an unavailable
     /// item/index/target or an unsupported vanilla effect for that target.
     fn living_apply_consume_effect(
         &mut self,
@@ -321,13 +350,13 @@ pub trait LivingBackendMut {
     /// Side: server.
     /// `LivingEntity.addEffect(instance)`: gives the living entity the
     /// effect by the game's own path. A player's or a guest's goes through
-    /// `add_player_effect` (so `MobEffectInstance.update`'s rules, the
-    /// attribute modifiers, absorption and the added-effect hooks of a
-    /// content mod's effect all apply); a mob's goes past `canBeAffected`
-    /// (a spider shrugs off poison) into its effects with the same hooks.
+    /// `add_player_effect` and a mob's goes through `add_mob_effect`, so
+    /// `canBeAffected`, `mob_effect_applicable`, `mob_effect_added`,
+    /// `MobEffectInstance.update`, attribute modifiers, absorption and
+    /// `MobEffectPart::on_effect_added` all apply in vanilla/NeoForge order.
     /// The amplifier is cut to 0..=255 and the duration is -1 (infinite) or
     /// ticks. False before effect resolution, for a duration below -1, an armor
-    /// stand, the dragon, a stale handle or a client, or when the active
+    /// stand, the dragon, a wither, a stale handle or a client, or when the active
     /// instance did not change, as in vanilla's `addEffect`.
     fn living_add_effect(&mut self, living: LivingRef, effect: &ActiveEffect) -> bool;
     /// Side: server.
@@ -346,6 +375,13 @@ pub trait LivingBackendMut {
     /// them. False when the entity has none, or for an armor stand, the
     /// dragon, a stale handle or a client.
     fn living_remove_all_effects(&mut self, living: LivingRef) -> bool;
+    /// Side: server.
+    /// `LivingEntity.startFallFlying`: sets the glide flag, so the next tick glides,
+    /// wears the glider and the players around learn it with the entity's next flag
+    /// sync. This is the raw flag write, not `tryToStartFallFlying`: it does not check
+    /// the glider, the ground, levitation, a liquid or a vehicle. True for a player, a
+    /// guest or a mob; false for an armor stand, the dragon, a stale handle or a client.
+    fn living_start_gliding(&mut self, living: LivingRef) -> bool;
     /// Side: server.
     /// `LivingEntity.stopFallFlying`: clears the glide flag, so the glide's
     /// wear and sound stop and the next fall is a fall. The players around
@@ -498,7 +534,8 @@ pub trait LivingBackendMut {
     /// Puts `stack` in hand `hand` (`LivingEntity.setItemInHand`): the main
     /// hand's slot or the off hand's, written as `set_equipment`
     /// writes them, with its equip events and sound. None, air or a zero count
-    /// empties the hand. False means unsupported or stale.
+    /// empties the hand. A resident dead player can still be edited. False means
+    /// unsupported or unavailable.
     fn living_set_hand_item(
         &mut self,
         living: LivingRef,

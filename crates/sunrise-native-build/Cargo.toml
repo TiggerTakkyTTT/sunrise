@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Native mods compiled against a signed prebuilt SDK: the launcher's build and `cargo sunrise-mod native-build`"
+description = "Native mods compiled against a signed prebuilt SDK by cargo sunrise-mod"
 
 [dependencies]
 sunrise-addresses = { path = "../sunrise-addresses" }

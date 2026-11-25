@@ -5,7 +5,7 @@ use sunrise_client::{
     advancements::Tree,
     crafting::ResolvedSources,
     items::Items,
-    lan::data::{FrozenDamage, PackRegistryDefinitions, SyncData},
+    lan::data::{FrozenDamage, PackRegistryDefinitions, SyncData, WorldTags},
 };
 use sunrise_world::item_defaults::ItemData;
 
@@ -207,6 +207,9 @@ pub(super) struct Synced {
 pub(in crate::game) struct SyncCache {
     pub(super) data: Option<Synced>,
     pub(super) damage: Option<FrozenDamage>,
+    pub(super) world_tags: Option<WorldTags>,
+    // The admitted biome table, and whether a vanilla preload differs from it.
+    pub(super) biomes: Option<(Arc<sunrise_client::biome::Biomes>, bool)>,
     pub(super) packed_registries: Option<Arc<PackRegistryDefinitions>>,
     pub(super) advancements: Option<Arc<Tree>>,
     pub(super) world_packs: bool,
@@ -215,6 +218,8 @@ pub(in crate::game) struct SyncCache {
 static SYNC: Mutex<SyncCache> = Mutex::new(SyncCache {
     data: None,
     damage: None,
+    world_tags: None,
+    biomes: None,
     packed_registries: None,
     advancements: None,
     world_packs: false,
@@ -247,7 +252,7 @@ pub(super) fn cached_sync_data(
     {
         sync.data = None;
     }
-    let load = |packed, advancements| {
+    let load = |packed, advancements, world_tags| {
         let sources =
             server_sources(root, item_data, items, overlay).map_err(|error| error.to_string())?;
         match &sync.damage {
@@ -255,10 +260,12 @@ pub(super) fn cached_sync_data(
                 root,
                 overlay,
                 damage,
+                sync.biomes.as_ref().map(|(table, _)| table.as_ref()),
                 packed,
                 item_data.defaults(),
                 &sources,
                 advancements,
+                world_tags,
             ),
             None => SyncData::load(root, overlay, item_data.defaults(), &sources),
         }
@@ -266,7 +273,7 @@ pub(super) fn cached_sync_data(
     };
     // A late vanilla preload must not replace a packed world's lazy snapshot.
     if sync.data.is_none() && sync.world_packs && !packs {
-        return load(None, None);
+        return load(None, None, None);
     }
     let advancements = sync.advancements.as_ref();
     sync.data
@@ -274,7 +281,11 @@ pub(super) fn cached_sync_data(
             root: root.to_owned(),
             with_packs: packs,
             generation,
-            result: load(sync.packed_registries.as_ref(), advancements),
+            result: load(
+                sync.packed_registries.as_ref(),
+                advancements,
+                sync.world_tags.as_ref(),
+            ),
         })
         .result
         .clone()
@@ -285,19 +296,22 @@ pub(super) fn cached_sync_data(
 pub(in crate::game) fn prepare_world_sync_data(
     root: &std::path::Path,
     item_data: &ItemData,
-    items: &Items,
     overlay: &sunrise_world::loot::PackOverlay,
     damage: &sunrise_world::damage_source::Catalog,
+    biomes: Option<(Arc<sunrise_client::biome::Biomes>, bool)>,
+    items: Arc<Items>,
     packed_registries: Option<Arc<PackRegistryDefinitions>>,
     advancements: Arc<Tree>,
 ) -> std::result::Result<SyncCache, String> {
     let mut staged = SyncCache {
         data: SYNC.lock().unwrap_or_else(|e| e.into_inner()).data.clone(),
+        biomes,
         packed_registries,
+        world_tags: Some(WorldTags::new(items.clone(), damage)),
         advancements: Some(advancements),
         ..Default::default()
     };
-    initialize_world_sync_data(&mut staged, root, overlay, damage, item_data, items)?;
+    initialize_world_sync_data(&mut staged, root, overlay, damage, item_data, &items)?;
     Ok(staged)
 }
 
@@ -313,7 +327,8 @@ pub(super) fn initialize_world_sync_data(
     item_data: &ItemData,
     items: &Items,
 ) -> std::result::Result<(), String> {
-    sync.world_packs = !overlay.files.is_empty();
+    sync.world_packs =
+        !overlay.files.is_empty() || sync.biomes.as_ref().is_some_and(|(_, differs)| *differs);
     if sync.world_packs
         || sync.data.as_ref().is_some_and(|cached| {
             cached.generation != item_data.defaults().generation() || cached.root != root
@@ -370,6 +385,7 @@ pub(in crate::game) fn prepare_wire_reload(
     kept: &SyncData,
     sources: &ResolvedSources,
     advancements: &Arc<Tree>,
+    world_tags: &WorldTags,
 ) -> std::result::Result<Arc<SyncData>, String> {
     SyncData::reload(
         root,
@@ -378,6 +394,7 @@ pub(in crate::game) fn prepare_wire_reload(
         item_data.defaults(),
         sources,
         advancements,
+        Some(world_tags),
     )
     .map(|mut sync| {
         sync.features.clone_from(&kept.features);
@@ -391,12 +408,15 @@ pub(in crate::game) fn install_wire_reload(
     overlay: &sunrise_world::loot::PackOverlay,
     sync: Option<Arc<SyncData>>,
     advancements: Arc<Tree>,
+    world_tags: WorldTags,
 ) {
     // Kept pack dialogs count as packs: a world opened without packs after
     // a `/reload` that dropped them must read its own registries again.
     let mut cache = SYNC.lock().unwrap_or_else(|e| e.into_inner());
-    cache.world_packs = !overlay.files.is_empty();
+    cache.world_packs =
+        !overlay.files.is_empty() || cache.biomes.as_ref().is_some_and(|(_, differs)| *differs);
     cache.advancements = Some(advancements);
+    cache.world_tags = Some(world_tags);
     cache.data = sync.map(|sync| Synced {
         root: root.to_owned(),
         with_packs: !overlay.files.is_empty() || sync.has_pack_entries(),
@@ -465,6 +485,7 @@ pub(in crate::game) struct SyncPreload {
 pub(in crate::game) fn preload_sync_data(
     item_data: &Arc<ItemData>,
     items: Arc<Items>,
+    biomes: &Arc<sunrise_client::biome::Biomes>,
 ) -> Option<SyncPreload> {
     let generation = item_data.defaults().generation();
     if !SYNC.try_lock().is_ok_and(|sync| {
@@ -477,6 +498,18 @@ pub(in crate::game) fn preload_sync_data(
         return None;
     }
     let root = item_data.root().to_owned();
+    // Only the prepared vanilla table can be sent before world registry admission.
+    if !sunrise_client::mod_content::biomes::modified(&root).is_empty()
+        || biomes.registry_order().into_iter().any(|name| {
+            biomes.pack_file(name).is_some()
+                || biomes
+                    .builtin_file(name)
+                    .is_some_and(|file| file.get("neoforge:conditions").is_some())
+        })
+    {
+        return None;
+    }
+    let biomes = biomes.clone();
     let item_data = Arc::clone(item_data);
     // Loading recipes asks mods' ingredient and recipe property set hooks.
     std::thread::Builder::new()
@@ -484,9 +517,10 @@ pub(in crate::game) fn preload_sync_data(
         .name("Server data preload".into())
         .spawn(move || {
             let none = sunrise_world::loot::PackOverlay::NONE;
-            SyncData::load(
+            SyncData::load_with(
                 item_data.root(),
                 &none,
+                Some(&biomes),
                 item_data.defaults(),
                 server_sources(item_data.root(), &item_data, &items, &none)
                     .map_err(|error| error.to_string())?

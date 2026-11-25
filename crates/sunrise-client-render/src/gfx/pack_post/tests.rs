@@ -11,6 +11,7 @@ use super::*;
 /// A pack's pipelines are made together on several threads: each lands in its pass's slot,
 /// and one wgpu refuses comes back by name (the pack is then built a program at a time).
 #[test]
+#[ignore = "daily"]
 fn pipelines_compile_together_and_a_refused_one_is_named() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some((_adapter, device, _queue)) = crate::gfx::test_gpu::optional_device() else {
@@ -58,6 +59,7 @@ fn pipelines_compile_together_and_a_refused_one_is_named() {
 /// #3525: naga's SPIR-V writer panicked on Photon's gbuffers programs as the pipeline was
 /// made. Such a panic skips the pass, as a validation error does, and the device goes on.
 #[test]
+#[ignore = "daily"]
 fn a_shader_compiler_panic_skips_the_pass() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some((_adapter, device, _queue)) = crate::gfx::test_gpu::optional_device() else {
@@ -87,6 +89,7 @@ fn a_shader_compiler_panic_skips_the_pass() {
 /// them flips that buffer; later ones, and `final`, read the buffer (Super Duper Vanilla,
 /// Bliss, SEUS PTGI HRR). Another stage's flips don't release it.
 #[test]
+#[ignore = "daily"]
 fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some((adapter, device, _queue)) = crate::gfx::test_gpu::optional_device() else {
@@ -123,6 +126,7 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &textures,
         images: &[],
@@ -137,6 +141,11 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let reads = |group: Group| {
         let (_, samplers, ..) = bindings(
@@ -167,6 +176,7 @@ fn a_custom_texture_over_a_buffer_ends_when_its_stage_flips_it() {
 /// game's; a raw texture there, a PNG over `gaux2` or `noisetex`, and a `customTexture` PNG
 /// were bound.
 #[test]
+#[ignore = "daily"]
 fn a_png_under_a_name_of_its_own_is_not_bound() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some((adapter, device, _queue)) = crate::gfx::test_gpu::optional_device() else {
@@ -215,6 +225,7 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &textures,
         images: &[],
@@ -229,6 +240,11 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
         shadow_linear: 0,
         jobs: None,
         packed: [None; BUFFERS],
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let (_, samplers, ..) = bindings(
         device.features(),
@@ -259,6 +275,7 @@ fn a_png_under_a_name_of_its_own_is_not_bound() {
 /// (observed with a probe pack). Its pass is kept, the image bound to a stand-in of its
 /// declared format, zero again before each pass even after one stored into it.
 #[test]
+#[ignore = "daily"]
 fn an_image_without_an_entry_reads_zero() {
     let _gpu = crate::gfx::test_gpu::lock();
     use wgpu::TextureViewDimension as D;
@@ -294,6 +311,7 @@ fn an_image_without_an_entry_reads_zero() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &[],
         images: &[],
@@ -308,6 +326,11 @@ fn an_image_without_an_entry_reads_zero() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let mut notes = Vec::new();
     let (.., images) = bindings(
@@ -369,10 +392,10 @@ fn an_image_without_an_entry_reads_zero() {
 /// holds (Iris 1.11.7, probed: 0.25 over 0.75 with SRC_ALPHA ONE_MINUS_SRC_ALPHA ONE ZERO and
 /// a source alpha of 0.25 reads 0.625).
 #[test]
+#[ignore = "daily"]
 fn a_composite_program_blends_onto_its_buffer() {
     let _gpu = crate::gfx::test_gpu::lock();
-    let instance = crate::gfx::test_gpu::instance();
-    let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+    let Some(adapter) = crate::gfx::test_gpu::adapter() else {
         return;
     };
     // A pass's pipeline layout has six bind group slots.
@@ -380,7 +403,7 @@ fn a_composite_program_blends_onto_its_buffer() {
         required_limits: adapter.limits(),
         ..Default::default()
     };
-    let Ok((device, queue)) = pollster::block_on(adapter.request_device(&desc)) else {
+    let Some((device, queue)) = crate::gfx::test_gpu::optional_device_with(&adapter, &desc) else {
         return;
     };
     let dir = std::env::temp_dir().join(format!("hz-composite-blend-{}", std::process::id()));
@@ -417,6 +440,7 @@ fn a_composite_program_blends_onto_its_buffer() {
         wgpu::ShaderStages::FRAGMENT,
     );
     let stand_ins = std::cell::RefCell::new(Vec::new());
+    let mod_uniform_mismatches = std::cell::RefCell::new(std::collections::HashSet::new());
     let pack = Resources {
         textures: &[],
         images: &[],
@@ -431,6 +455,11 @@ fn a_composite_program_blends_onto_its_buffer() {
         stand_ins: &stand_ins,
         shadow_linear: 0,
         jobs: None,
+        mod_depth_targets: &[],
+        mod_uniforms: &[],
+        mod_uniform_mismatches: &mod_uniform_mismatches,
+        mod_depth_target: std::cell::Cell::new(None),
+        depth_compare: std::cell::Cell::new(wgpu::CompareFunction::LessEqual),
     };
     let draws = DrawUniforms::new(&device);
     let mut notes = Vec::new();
@@ -445,6 +474,7 @@ fn a_composite_program_blends_onto_its_buffer() {
         &[],
         &draws.layout,
         &pack,
+        false,
         false,
     )
     .unwrap_or_else(|| panic!("the pass builds: {notes:?}"));

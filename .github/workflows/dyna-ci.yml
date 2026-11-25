@@ -395,21 +395,62 @@ jobs:
         id: formatting
         run: |
           python3 tools/ci/format_scan.py
-      - name: Lint native targets
+      - name: Lint native targets and server build
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
         id: native-lint
-        run: python3 tools/ci/check_warnings.py cargo clippy $JOBS --keep-going --workspace --all-targets
+        run: |
+          # Split JOBS into two complementary counts that sum to it, at least 1 each.
+          # When JOBS is empty (e.g. GitHub-hosted runners), run the two lints sequentially
+          # to avoid doubling the runner's default parallelism.
+          if [ -n "${JOBS:-}" ]; then
+            n=${JOBS#-j}
+            j_native="-j$(( (n + 1) / 2 ))"
+            j_server="-j$(( n / 2 ))"
+            [ "$j_server" = "-j0" ] && j_server="-j1"
+          else
+            j_native=""
+            j_server=""
+          fi
+
+          status_native=0
+          status_server=0
+
+          if [ -n "$j_server" ]; then
+            python3 tools/ci/check_warnings.py cargo clippy $j_server --keep-going --target-dir target/server-lint \
+              -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features \
+              > "$RUNNER_TEMP/server-lint.log" 2>&1 &
+            server_pid=$!
+
+            python3 tools/ci/check_warnings.py cargo clippy $j_native --keep-going --workspace --all-targets || status_native=$?
+            wait "$server_pid" || status_server=$?
+          else
+            python3 tools/ci/check_warnings.py cargo clippy --keep-going --workspace --all-targets || status_native=$?
+            python3 tools/ci/check_warnings.py cargo clippy --keep-going --target-dir target/server-lint \
+              -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features \
+              > "$RUNNER_TEMP/server-lint.log" 2>&1 || status_server=$?
+          fi
+
+          if [ "$status_native" -eq 0 ]; then
+            echo "workspace_lint=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "workspace_lint=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$status_server" -ne 0 ]; then
+            echo "Server lint failed:"
+            cat "$RUNNER_TEMP/server-lint.log"
+          fi
+
+          if [ "$status_native" -ne 0 ] || [ "$status_server" -ne 0 ]; then
+            exit 1
+          fi
       # The full boundary audit: the mod API's generated signatures (mod_api_generated*.rs, written by sunrise-mod-vocab's
       # build script during the lint above), which the source-only check cannot see. Only Cargo's build-script outputs
       # are scanned: the persistent target holds far more.
       - name: Check generated mod API signatures
         id: generated_api_boundary
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' && steps.native-lint.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' && steps.native-lint.outputs.workspace_lint == 'success' }}
         run: python3 tools/ci/check_api_boundary.py --generated-root target/debug/build
-      - name: Lint the server build without sound or controllers
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
-        id: server-lint
-        run: python3 tools/ci/check_warnings.py cargo clippy $JOBS --keep-going -p sunrise-client -p sunrise-game -p sunrise-mod-host --all-targets --no-default-features
       # The prebuilt SDK's own feature graph: a release --lib build with prefer-dynamic and warnings rejected, as
       # tools/prebuilt_game.py builds it, for the host and for the Windows archive (system-allocator there,
       # cargo_features). The checks above unify test and dev features (test-support) into one host build, which hid
@@ -485,16 +526,13 @@ jobs:
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' && (needs.changes.result != 'success' || needs.changes.outputs.heavy == 'true') }}
     runs-on: ${{ needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.self_hosted == 'true' && 'dyna-large' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
     timeout-minutes: ${{ needs.changes.outputs.self_hosted == 'true' && 50 || 45 }}
-    # Dyna's runner image now carries lavapipe, Mesa's software Vulkan driver, for ignored-tests' `gpu` tests.
-    # verify's tests were written to skip GPU work when no adapter exists, and one of them
-    # (gfx::frame_gen::optical_flow, horizon-rust/horizon#8627) fails on lavapipe, so verify hides the driver and runs
-    # exactly as before. ignored-tests is where the GPU tests run.
+    # GPU device tests belong in the daily on lavapipe, not in verify. Hide Vulkan and disallow GL so that
+    # a stray plain GPU test fails on every runner rather than running or silently skipping.
     env:
       VK_ICD_FILENAMES: /nonexistent/no-vulkan-in-verify.json
       VK_DRIVER_FILES: /nonexistent/no-vulkan-in-verify.json
-      # With Vulkan hidden, a runner with Mesa's GL software adapter (boat's image) would still run the GPU tests,
-      # on GL, and fail (#2841); Vulkan only leaves every runner with no adapter, so GPU tests skip here everywhere.
       WGPU_BACKEND: vulkan
+      SUNRISE_GPU_TESTS_REQUIRE_ADAPTER: '1'
       RUNNER_KIND: ${{ needs.changes.outputs.self_hosted == 'true' && 'dyna' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && 'other' || startsWith(needs.changes.outputs.hosted_label, 'boat') && 'boat' || 'github' }}
     steps:
       - name: Require successful check selection
@@ -602,11 +640,6 @@ jobs:
       - name: Setup done
         id: setup
         run: 'true'
-      - name: Build the runtime holder test actor
-        id: actor
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
-        # The command lives in tools/ci/ignored_shards.py PREPARE, which the daily run uses too.
-        run: python3 tools/ci/ignored_shards.py --prepare sunrise-mod-package $JOBS
       # Compile first, apart from running: the build's time and its slowest units show on their own.
       - name: Build Rust core test binaries
         id: core_build
@@ -649,7 +682,7 @@ jobs:
       # The guard library is built here only; the daily run does not preload it. Unix sockets remain available.
       - name: Test Rust core and voxel kernel correctness
         id: test_rust_core_and_voxel_kernel_correctness
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') && steps.core_build.outcome == 'success' && steps.actor.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') && steps.core_build.outcome == 'success' }}
         run: |
           cc -shared -fPIC -O2 -Wall -Wextra -Werror tools/ci/network_guard.c -o target/network_guard.so
           python3 tools/ci/run_test_binaries.py --jobs 3 --time-limits 2,5 --network-guard target/network_guard.so --no-data-skips -- cargo test $JOBS --profile test --workspace --lib --bins --tests
@@ -662,7 +695,7 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false' && (github.event_name == 'pull_request' || inputs.pr != '')) }}
         run: |
           started=$SECONDS
-          cargo build $JOBS --locked --profile test -p sunrise-mod-api-gen --bin sunrise-stage --message-format=json-render-diagnostics > "$RUNNER_TEMP/stage-artifacts.jsonl"
+          cargo build $JOBS --locked --profile test -p sunrise-stage --bin sunrise-stage --message-format=json-render-diagnostics > "$RUNNER_TEMP/stage-artifacts.jsonl"
           echo "Stage generator build: $((SECONDS - started))s"
           python3 - <<'PY'
           import json
@@ -762,16 +795,12 @@ jobs:
     # finishes in 8 to 11 minutes, so eight CPUs only took a large slot from the gate's compiling jobs.
     runs-on: ${{ needs.changes.outputs.heavy == 'false' && 'ubuntu-latest' || needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.trusted != 'true' && 'ubuntu-latest' || needs.changes.outputs.self_hosted == 'true' && 'dyna-medium' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
     timeout-minutes: ${{ needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 20 || 45 }}
-    # Dyna's runner image now carries lavapipe, Mesa's software Vulkan driver, for ignored-tests' `gpu` tests.
-    # verify's tests were written to skip GPU work when no adapter exists, and one of them
-    # (gfx::frame_gen::optical_flow, horizon-rust/horizon#8627) fails on lavapipe, so verify hides the driver and runs
-    # exactly as before. ignored-tests is where the GPU tests run.
+    # Use verify's hidden-GPU environment so a stray plain GPU test fails instead of silently skipping.
     env:
       VK_ICD_FILENAMES: /nonexistent/no-vulkan-in-verify.json
       VK_DRIVER_FILES: /nonexistent/no-vulkan-in-verify.json
-      # With Vulkan hidden, a runner with Mesa's GL software adapter (boat's image) would still run the GPU tests,
-      # on GL, and fail (#2841); Vulkan only leaves every runner with no adapter, so GPU tests skip here everywhere.
       WGPU_BACKEND: vulkan
+      SUNRISE_GPU_TESTS_REQUIRE_ADAPTER: '1'
       RUNNER_KIND: ${{ needs.changes.outputs.heavy == 'false' && 'github' || needs.changes.outputs.trusted != 'true' && 'github' || needs.changes.outputs.self_hosted == 'true' && 'dyna' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && 'other' || startsWith(needs.changes.outputs.hosted_label, 'boat') && 'boat' || 'github' }}
     steps:
       - name: Require successful check selection

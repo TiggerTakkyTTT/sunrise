@@ -59,6 +59,7 @@ fn one_colour(pixels: &[[u8; 4]]) -> ([u8; 4], usize) {
 /// still 4×4: the program is skipped there, as one whose sizes never meet is (Iris refused
 /// the whole pack in that case; Sunrise skips only the program).
 #[test]
+#[ignore = "daily"]
 fn a_program_writing_buffers_that_come_to_one_size_draws() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };
@@ -74,6 +75,7 @@ fn a_program_writing_buffers_that_come_to_one_size_draws() {
 
 /// Sizes of one kind that differ never meet: the program is skipped as the pack loads.
 #[test]
+#[ignore = "daily"]
 fn a_program_writing_buffers_of_different_relative_sizes_is_skipped() {
     let _gpu = crate::gfx::test_gpu::lock();
     let Some(gpu) = Fixture::new() else { return };

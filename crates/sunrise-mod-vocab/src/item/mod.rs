@@ -8,8 +8,9 @@ pub mod containers;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod crafting;
+pub(crate) mod creative_give;
 pub(crate) mod creative_tabs;
-pub(crate) mod enchantment_damage;
+pub(crate) mod enchantment_effects;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod enchantments;

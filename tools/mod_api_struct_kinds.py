@@ -38,7 +38,6 @@ PLATFORM_SOCKET_FILES = frozenset(
         'parts/registration_access.rs',
         'content/crash.rs',
         'world/phase.rs',
-        'block/unresolved_fluid.rs',
     )
 )
 

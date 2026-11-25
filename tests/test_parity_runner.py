@@ -30,6 +30,12 @@ class ParityRunnerTests(unittest.TestCase):
                          [["example", "c", "fast", [], True]])
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--example", "d"]), [["example", "d", "dev", [], True]])
 
+    def test_the_test_profile_builds_into_devs_folder(self):
+        # lab.parity_fixtures() builds sunrise-parity-fixtures with --profile test: its dep-info is under debug/.
+        self.assertEqual(parity.artifact_path("bin", "sunrise-parity-fixtures", "test"),
+                         parity.TARGET / "debug" / "sunrise-parity-fixtures")
+        self.assertEqual(parity.artifact_path("example", "probe", "fast"), parity.TARGET / "fast" / "examples" / "probe")
+
     def test_artifacts_keep_the_package_and_feature_selection(self):
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--locked", "--profile=fast", "-j", "4", "--package",
                                               "sunrise-client", "--bins", "-F", "x"]),
@@ -567,6 +573,45 @@ class OracleReuseTests(unittest.TestCase):
                                      capture_output=True, text=True, stdin=self.subprocess.DEVNULL, check=True)
         self.assertEqual(result.stdout, "done\n")
         return int((self.input.parent / "runs").read_text())
+
+    def test_cold_cache_setup_holds_the_setup_lock(self):
+        import hashlib
+        import sqlite3
+        from tools import file_lock, parity_shim
+
+        cache = Path(self.env["PARITY_SHIM_CACHE"])
+
+        def held():
+            # A second open file description conflicts with the shim's flock even in this process.
+            with (cache / "hashes.lock").open("a+b") as other:
+                return not file_lock.lock(other, wait=False)
+
+        during = []
+
+        class Probed:
+            def __init__(self, db):
+                self.db = db
+
+            def execute(self, *args):
+                during.append(held())
+                return self.db.execute(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.db, name)
+
+        connect = sqlite3.connect
+
+        def probed_connect(*args, **kwargs):
+            during.append(held())
+            return Probed(connect(*args, **kwargs))
+
+        with mock.patch.object(parity_shim, "CACHE", cache), mock.patch.object(sqlite3, "connect", probed_connect):
+            hashes = parity_shim.Hashes()
+        # The connect, the switch to WAL and the create table all run under the lock.
+        self.assertEqual(during, [True, True, True])
+        self.assertFalse(held())
+        with contextlib.closing(hashes.db.db):
+            self.assertEqual(hashes.file(str(self.input)), hashlib.sha256(b"a").hexdigest())
 
     def test_reuses_until_an_input_or_output_changes(self):
         self.assertEqual(self.oracle(), 1)

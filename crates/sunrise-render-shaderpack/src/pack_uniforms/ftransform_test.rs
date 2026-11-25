@@ -13,8 +13,7 @@ use wgpu::util::DeviceExt;
 #[ignore = "daily"]
 fn ftransform_applies_the_model_view_matrix_before_the_projection() {
     let _gpu = crate::test_gpu::lock();
-    let instance = crate::test_gpu::instance();
-    let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+    let Some(adapter) = crate::test_gpu::adapter() else {
         return;
     };
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
@@ -66,13 +65,19 @@ fn ftransform(
         ..Default::default()
     };
     let program = if shadow {
-        sunrise_shaders::translate_shadow(&vertex, &fragment, &inputs)
+        sunrise_shaders::translate_shadow(
+            &vertex,
+            &fragment,
+            &inputs,
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
+        )
     } else {
         sunrise_shaders::translate_gbuffers(
             &vertex,
             &fragment,
             sunrise_shaders::Target::Buffers,
             &inputs,
+            naga::front::glsl::InterfaceLimits::WGPU_DEFAULT,
         )
     }
     .unwrap();

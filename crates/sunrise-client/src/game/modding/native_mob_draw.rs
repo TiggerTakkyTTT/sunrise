@@ -6,8 +6,9 @@
 //! renderer a mod registered for its type (`register_entity_renderers`); after them, the layers mods added
 //! to its type or player model (`register_entity_layers`, `EntityRenderersEvent.AddLayers`), then
 //! `render_living_post` and `render_player_post`. A canceled pre hook skips all of the entity's
-//! drawing this frame, the later passes' name tag, shadow, flames and leash included: they ask
-//! [`Game::render_canceled`], which the frame's entity pass starts afresh.
+//! own drawing this frame, the later passes' name tag and leash included: they ask
+//! [`Game::render_canceled`], which the frame's entity pass starts afresh. The flames of a burning
+//! entity and its shadow are queued by the frame after the entity's drawing and stay (#1285).
 pub use mod_api::game::{MobRender, PlayerRender};
 
 use super::{Game, native_block_entity_draw::BlockEntityDraw};
@@ -158,17 +159,14 @@ impl Game<'_> {
         FRAME.with_borrow(|frame| frame.living_post || (player && frame.player_post))
     }
     /// Whether a mod's pre hook canceled the drawing of entity `id` this frame: the later passes
-    /// (flames, name tags, shadows, leashes) leave it out too.
+    /// that are part of its drawing (its name tag and leash) leave it out too; its flames and
+    /// shadow don't ask.
     pub(in crate::game) fn render_canceled(&self, id: u32) -> bool {
         FRAME.with_borrow(|frame| !frame.canceled.is_empty() && frame.canceled.contains(&id))
     }
     /// Whether this window's own player was canceled this frame.
     pub(in crate::game) fn own_render_canceled(&self) -> bool {
         u32::try_from(self.own_entity_id()).is_ok_and(|id| self.render_canceled(id))
-    }
-    /// The mobs of the level a pre hook didn't cancel this frame.
-    pub(in crate::game) fn drawn_mobs(&self) -> impl Iterator<Item = &Mob> {
-        self.mobs.iter().filter(|m| !self.render_canceled(m.id))
     }
     /// The mods' pre hooks for `mob`, before any of its model is drawn, lit by `light` (packed as
     /// the entity pass packs it): `render_player_pre` for a player (`who`: its name, and whether
@@ -202,6 +200,7 @@ impl Game<'_> {
             return true;
         };
         let local = who.as_ref().is_some_and(|who| who.local);
+        let pre_start = out.len();
         let mut canceled = false;
         if let Some(who) = player_pre {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
@@ -222,6 +221,9 @@ impl Game<'_> {
             }
         }
         if !canceled {
+            if out.len() != pre_start {
+                frame_draw.mark_pre_vertices(pre_start);
+            }
             return true;
         }
         let id = render_id(mob.id, local, self.own_entity_id());
@@ -230,8 +232,9 @@ impl Game<'_> {
     }
     /// The renderer a mod registered for `mob`'s type (`register_entity_renderers`), drawn in place
     /// of its model and its vanilla layers, from a draw at its feet, not turned: true when it
-    /// drew. False when none is registered for the type, and when it fails this frame (then it is
-    /// asked no more until resources reload): the type draws its own model.
+    /// drew. False when none is registered for the type, when it returns an `Err` for this draw
+    /// (it stays active for later draws), or when it has been disabled for the session after a
+    /// panic: the type draws its own model.
     pub(super) fn mod_living_renderer_geometry(
         &self,
         mob: &Mob,
@@ -328,18 +331,72 @@ impl Game<'_> {
         let a = f64::from(partial);
         let feet = mob.previous.lerp(mob.position, a);
         let feet = DVec3::new(feet.x, feet.y, feet.z);
+        let pose = mob_pose(feet - camera, render.body_yaw);
+        self.entity_draw(partial, light, feet, pose, out, |draw| hook(&render, draw));
+    }
+    /// Gives `hook` a draw posed by `pose` (camera-relative) for an entity at `origin`, lit by
+    /// `light`, whose geometry is added to `out`.
+    fn entity_draw(
+        &self,
+        partial: f32,
+        light: u32,
+        origin: DVec3,
+        pose: Mat4,
+        out: &mut Vec<Vertex>,
+        hook: impl FnOnce(&mut BlockEntityDraw),
+    ) {
         let mut draw = BlockEntityDraw::posed(
             partial,
             self.world.game_time,
             light,
-            [feet.x, feet.y, feet.z].map(|c| c.floor() as i32),
-            mob_pose(feet - camera, render.body_yaw),
+            [origin.x, origin.y, origin.z].map(|c| c.floor() as i32),
+            pose,
             diffuse_lights(self.nether_lighting()),
             std::mem::take(out),
         )
+        .with_quad_budget(
+            self.entity_quad_capacity(),
+            self.entity_batch_reserved_quads(),
+        )
         .animated(self.animation_time());
-        hook(&render, &mut draw);
+        hook(&mut draw);
         *out = draw.into_vertices();
+    }
+    /// `render_name_tag_do_render` for one line of a name tag (`EntityRenderer.submitNameDisplay`):
+    /// a draw at the entity's render `origin`, not turned, raised by the line's `lift`, as vanilla's
+    /// pose is at `submitNameTag`. True when a listener canceled vanilla's drawing of the line.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::game) fn mod_name_tag_line(
+        &self,
+        entity_id: u32,
+        kind: &str,
+        line: mod_api::NameTagLine,
+        content: &str,
+        origin: DVec3,
+        lift: f64,
+        attachment: DVec3,
+        partial: f32,
+        camera: DVec3,
+        light: u8,
+        out: &mut Vec<Vertex>,
+    ) -> bool {
+        let mut canceled = false;
+        // The entity's light as `packed_light` packs it.
+        let light = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
+        let pose = Mat4::from_translation((origin - camera + DVec3::new(0.0, lift, 0.0)).as_vec3());
+        self.entity_draw(partial, light, origin, pose, out, |draw| {
+            self.native_render_name_tag_do_render(
+                entity_id,
+                kind,
+                line,
+                content,
+                attachment.to_array(),
+                partial,
+                draw,
+                &mut canceled,
+            );
+        });
+        canceled
     }
 }
 

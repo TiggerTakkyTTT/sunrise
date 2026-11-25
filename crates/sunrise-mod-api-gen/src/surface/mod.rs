@@ -45,53 +45,22 @@ pub(crate) struct Boundary {
     unions: Vec<(String, String)>,
 }
 
-const HOST_AREAS: &[(&str, &str, &str)] = &[
-    ("ConfigFiles", "", ""),
-    ("Commands", "server_host_mut", "Ok(h.commands())"),
-    ("Levels", "server_host", "Ok(h.levels())"),
-    ("Messages", "server_host", "Ok(h.messages())"),
-    ("Players", "server_host", "Ok(h.players())"),
-    ("RuntimeLevels", "server_host_mut", "Ok(h.runtime_levels())"),
-    ("ClientSession", "client_host", "Ok(h.client_session())"),
-    ("RenderAssets", "client_host", "Ok(h.render_assets())"),
-    ("InstanceGroups", "client_host", "Ok(h.instance_groups())"),
-    // Type metadata belongs to load, so retained snapshots need no live world host.
-    (
-        "AttachmentDeclarations",
-        "",
-        "Ok(crate::__private::attachment_declarations())",
-    ),
-    // A level hook's host first: inside a level write it is the one the call hands over.
-    (
-        "AttachmentStore",
-        "",
-        "level_random_host_mut().map(|h| h.attachments()).or_else(|_| host_mut().map(|h| h.attachments()))",
-    ),
-    (
-        "CapabilityProviders",
-        "host",
-        "Ok(h.capability_providers())",
-    ),
-    (
-        "ServerReloadResources",
-        "server_host",
-        "Ok(h.reload_resources())",
-    ),
-    (
-        "Backend",
-        "host",
-        "h.backend().map(crate::BackendRef::open).ok_or_else(|| missing(\"game backend\"))",
-    ),
-    (
-        "BackendMut",
-        "server_host_mut",
-        "crate::backend_mut_of(h).ok_or_else(|| missing(\"game backend\"))",
-    ),
-    (
-        "ClientBackendMut",
-        "client_host_mut",
-        "crate::client_backend_mut_of(h).ok_or_else(|| missing(\"client game backend\"))",
-    ),
+/// Host unions and host-accessed services whose traits belong to one logical side;
+/// unlisted boundary traits default to [`Side::Both`].
+const HOST_SIDES: &[(&str, Side)] = &[
+    ("ServerHost", Side::Server),
+    ("Commands", Side::Server),
+    ("Levels", Side::Server),
+    ("Messages", Side::Server),
+    ("Players", Side::Server),
+    ("RuntimeLevels", Side::Server),
+    ("ServerReloadResources", Side::Server),
+    ("BackendMut", Side::Server),
+    ("ClientHost", Side::Client),
+    ("ClientSession", Side::Client),
+    ("RenderAssets", Side::Client),
+    ("InstanceGroups", Side::Client),
+    ("ClientBackendMut", Side::Client),
 ];
 
 impl Boundary {
@@ -111,7 +80,7 @@ impl Boundary {
                 boundary.roles.push((name.to_owned(), role));
             }
         }
-        for shape in crate::capability_providers::key_shapes(index)? {
+        for shape in crate::capability_keys::key_shapes(index)? {
             for owner in [shape.handler.clone(), shape.provider()] {
                 if !boundary.roles.iter().any(|(name, _)| name == &owner) {
                     boundary.roles.push((owner, Role::Implement));
@@ -148,20 +117,11 @@ impl Boundary {
                 }
             }
         }
-        boundary.sides.extend([
-            ("ServerHost".into(), Side::Server),
-            ("ClientHost".into(), Side::Client),
-        ]);
-        for (owner, accessor, _) in HOST_AREAS {
-            let side = if accessor.starts_with("server_host") {
-                Side::Server
-            } else if accessor.starts_with("client_host") {
-                Side::Client
-            } else {
-                continue;
-            };
-            boundary.sides.push(((*owner).to_owned(), side));
-        }
+        boundary.sides.extend(
+            HOST_SIDES
+                .iter()
+                .map(|&(owner, side)| (owner.to_owned(), side)),
+        );
         Ok(boundary)
     }
 }
@@ -317,10 +277,10 @@ fn export_here(root: &Path, options: ExportOptions) -> Result<Export, String> {
         ("mod_api_generated.rs", generated.hooks.as_str()),
         ("mod_api_generated_host.rs", generated.host.as_str()),
     ];
-    let providers = crate::capability_providers::generate(root, &included)?.0;
-    let mut with_providers = included.to_vec();
-    with_providers.push(("capability_providers_generated.rs", providers.as_str()));
-    let mut index = crate::index::game(root, &with_providers);
+    let (keys, _) = crate::capability_keys::generate(root, &included)?;
+    let mut with_keys = included.to_vec();
+    with_keys.push((crate::capability_keys::OUTPUT, keys.as_str()));
+    let mut index = crate::index::game(root, &with_keys);
     let boundary = Boundary::read(root, &mut index)?;
     let engine = if options.with_loops || options.with_internals {
         Some(engine_catalogs(root, options.with_internals)?)
@@ -780,6 +740,7 @@ pub(crate) fn build(
                         signature,
                         impl_generics: String::new(),
                         refs,
+                        behaviour_versions: BTreeMap::new(),
                     },
                 );
                 record.paths = paths;
@@ -839,6 +800,7 @@ pub(crate) fn build(
                     signature,
                     impl_generics,
                     refs,
+                    behaviour_versions: BTreeMap::new(),
                 },
             );
             handles.insert(handle_id, record);
@@ -904,10 +866,11 @@ pub(crate) fn build(
         types.push(built);
     }
 
-    let hooks = hook_records(hooks, &types, &mut notes);
-    let parts = part_records(&hooks, &traits, &mut notes);
+    let catalog_hooks = hooks;
+    let hooks = hook_records(catalog_hooks, &types, &mut notes);
+    let parts = part_records(&hooks, catalog_hooks, &traits, &mut notes);
     capabilities.extend(manifest_capabilities(root, &mut notes));
-    let behaviours = behaviours::read(root).map_err(|e| e.to_string())?;
+    let behaviours = behaviours::read(root, &mut handles).map_err(|e| e.to_string())?;
     notes.sort();
     notes.dedup();
     Ok(Export {
@@ -1512,15 +1475,6 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
                 arguments.push(argument);
             }
         }
-        let snake = |kind: catalog::PartKind| match kind {
-            catalog::PartKind::Block => "block",
-            catalog::PartKind::BlockEntity => "block_entity",
-            catalog::PartKind::Item => "item",
-            catalog::PartKind::Menu => "menu",
-            catalog::PartKind::Effect => "effect",
-            catalog::PartKind::Fluid => "fluid",
-            catalog::PartKind::Entity => "entity",
-        };
         out.push(Hook::new(
             format!("hook:{}", hook.name),
             hook.doc.clone(),
@@ -1545,7 +1499,9 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
                         catalog::PhaseContext::ClientReload => "client_reload",
                         catalog::PhaseContext::ClientReloadListener => "client_reload_listener",
                         catalog::PhaseContext::ClientSetup => "client_setup",
+                        catalog::PhaseContext::ClientIdentity => "client_identity",
                         catalog::PhaseContext::PackDiscovery => "pack_discovery",
+                        catalog::PhaseContext::ItemAbility => "item_ability",
                     }
                     .to_owned()
                 }),
@@ -1562,7 +1518,7 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
                     crate::Contract::Replace => HookKind::Replace,
                 },
                 scope: hook.scope.as_ref().map(|scope| Scope {
-                    kind: snake(scope.kind).to_owned(),
+                    kind: part_kind_snake(scope.kind).to_owned(),
                     key: scope.key.clone(),
                 }),
                 cancellable: hook.cancellable,
@@ -1586,8 +1542,26 @@ fn hook_records(hooks: &[catalog::Hook], types: &[Type], notes: &mut Vec<String>
     out
 }
 
-/// One Part kind per kind the catalog's scoped hooks name, implemented through `<Kind>Part`.
-fn part_records(hooks: &[Hook], traits: &[Trait], notes: &mut Vec<String>) -> Vec<Part> {
+fn part_kind_snake(kind: catalog::PartKind) -> &'static str {
+    match kind {
+        catalog::PartKind::Block => "block",
+        catalog::PartKind::BlockEntity => "block_entity",
+        catalog::PartKind::Item => "item",
+        catalog::PartKind::Menu => "menu",
+        catalog::PartKind::Effect => "effect",
+        catalog::PartKind::Fluid => "fluid",
+        catalog::PartKind::Entity => "entity",
+    }
+}
+
+/// One Part kind per kind the catalog's scoped or `part`-linked hooks name, implemented through
+/// `<Kind>Part`.
+fn part_records(
+    hooks: &[Hook],
+    catalog_hooks: &[catalog::Hook],
+    traits: &[Trait],
+    notes: &mut Vec<String>,
+) -> Vec<Part> {
     let mut kinds: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for hook in hooks {
         if let Some(scope) = &hook.contract.scope {
@@ -1597,8 +1571,21 @@ fn part_records(hooks: &[Hook], traits: &[Trait], notes: &mut Vec<String>) -> Ve
                 .push(hook.id.clone());
         }
     }
+    for hook in catalog_hooks {
+        if let Some(part_kind) = hook.part {
+            let id = format!("hook:{}", hook.name);
+            let entry = kinds
+                .entry(part_kind_snake(part_kind).to_owned())
+                .or_default();
+            if !entry.contains(&id) {
+                entry.push(id);
+            }
+        }
+    }
     let mut out = Vec::new();
-    for (kind, scoped) in kinds {
+    for (kind, mut scoped) in kinds {
+        scoped.sort();
+        scoped.dedup();
         let name = format!(
             "{}Part",
             heck::ToUpperCamelCase::to_upper_camel_case(kind.as_str())

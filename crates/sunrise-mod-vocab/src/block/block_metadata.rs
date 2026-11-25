@@ -22,6 +22,26 @@ pub enum BlockStateError {
     /// The requested combination is not a registered state.
     InvalidCombination,
 }
+impl std::fmt::Display for BlockStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("block metadata unavailable"),
+            Self::UnknownBlock => f.write_str("unknown block"),
+            Self::UnknownState => f.write_str("unknown block state"),
+            Self::UnknownProperty(index) => {
+                write!(f, "unknown block property at constraint {index}")
+            }
+            Self::InvalidValue(index) => {
+                write!(f, "invalid block property value at constraint {index}")
+            }
+            Self::DuplicateProperty(index) => {
+                write!(f, "duplicate block property at constraint {index}")
+            }
+            Self::InvalidCombination => f.write_str("unregistered block state combination"),
+        }
+    }
+}
+impl std::error::Error for BlockStateError {}
 impl crate::NoBackend for BlockStateError {
     fn no_backend() -> Self {
         Self::Unavailable

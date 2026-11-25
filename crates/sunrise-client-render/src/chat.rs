@@ -58,7 +58,7 @@ pub fn filtered_message(
 /// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
 const COMMAND_HISTORY_FILE: &str = "command_history.txt";
 const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
-/// GuiMessageTag.systemSinglePlayer's indicator colour.
+/// The indicator colour shared by `GuiMessageTag.system` and `systemSinglePlayer`.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
 /// `GuiMessageTag.CHAT_MODIFIED_INDICATOR_COLOR`.
 const MODIFIED_INDICATOR: u32 = 0x60_6060;
@@ -271,6 +271,14 @@ pub struct Tag {
     pub text: Text,
 }
 impl Tag {
+    /// `GuiMessageTag.system`: disguised chat and deleted-message markers.
+    pub fn system() -> Self {
+        Self {
+            color: SYSTEM_INDICATOR,
+            icon: false,
+            text: Text::translate("chat.tag.system", &[]),
+        }
+    }
     /// `GuiMessageTag.systemSinglePlayer`, in `color`.
     pub fn system_single_player(color: u32) -> Self {
         Self {
@@ -760,9 +768,7 @@ impl Chat {
             wrapped: 0,
             content: Self::deleted_marker(),
             inline_images: None,
-            tag: Some(std::sync::Arc::new(Tag::system_single_player(
-                SYSTEM_INDICATOR,
-            ))),
+            tag: Some(std::sync::Arc::new(Tag::system())),
             source: ChatSource::Server,
             signature: None,
         };
@@ -1604,6 +1610,10 @@ impl ChatScreen {
     pub fn value(&self) -> &str {
         &self.input.value
     }
+    /// `ChatScreen.isDraft`: true while the restored draft has not been edited.
+    pub fn is_draft(&self) -> bool {
+        self.is_draft
+    }
     /// Take the most recently accepted suggestion, at most once. Call after
     /// each key or click to observe every acceptance, including Tab cycling.
     pub fn take_suggestion_completion(&mut self) -> Option<SuggestionCompletion> {
@@ -1985,35 +1995,44 @@ impl ChatScreen {
         shift: bool,
         ctrl: bool,
     ) -> ChatAction {
+        self.key_input(m, c, history, key, shift, ctrl).1
+    }
+    /// The screen's key result, separate from actions the game must apply.
+    pub fn key_input(
+        &mut self,
+        m: &Measure,
+        c: &Commands,
+        history: &[String],
+        key: winit::keyboard::KeyCode,
+        shift: bool,
+        ctrl: bool,
+    ) -> (bool, ChatAction) {
         use winit::keyboard::KeyCode as K;
         if self.suggestions_key(m, c, key, shift) {
-            return ChatAction::None;
+            return (true, ChatAction::None);
         }
-        // ChatScreen.keyPressed: while the box holds an unedited draft, the
-        // first Backspace clears all of it rather than one character.
+        // An unedited draft is cleared all at once.
         if self.is_draft && key == K::Backspace {
             self.input.set_value(m, "");
             self.is_draft = false;
             self.edited(m, c);
-            return ChatAction::None;
+            return (true, ChatAction::None);
         }
         match key {
-            K::Escape => return ChatAction::Close,
+            K::Escape => return (true, ChatAction::Close),
             K::Enter | K::NumpadEnter => {
-                // ChatScreen.keyPressed: without `hasAllowedInput` the input
-                // stays, unsent, and the screen stays open.
-                if !self.abilities.allows(&self.input.value) {
-                    return ChatAction::None;
-                }
-                return ChatAction::Submit(self.normalized());
+                let action = if self.abilities.allows(&self.input.value) {
+                    ChatAction::Submit(self.normalized())
+                } else {
+                    ChatAction::None
+                };
+                return (true, action);
             }
             K::ArrowUp => self.move_in_history(m, c, history, -1),
             K::ArrowDown => self.move_in_history(m, c, history, 1),
-            _ => {
-                self.field_key(m, c, key, shift, ctrl);
-            }
+            _ => return (self.field_key(m, c, key, shift, ctrl), ChatAction::None),
         }
-        ChatAction::None
+        (true, ChatAction::None)
     }
     /// The input box's own keys (`EditBox.keyPressed`), the suggestions
     /// following an edit: whether the box took the key.

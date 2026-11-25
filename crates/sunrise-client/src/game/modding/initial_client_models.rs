@@ -57,7 +57,8 @@ impl Game<'_> {
     ) -> sunrise_client::Result<()> {
         self.join_world_rest()?;
         let InitialModelGeneration { pack, gui } = models;
-        let item_extensions = Self::prepare_client_item_extensions(&gui)?;
+        let item_extensions =
+            Self::prepare_client_item_extensions(&gui, &mut self.client_item_extension_owners);
         let geometry = super::native_block_entity_draw::StandaloneGeometry::new(&pack, &gui);
         // The atlas listener applies before the model manager. Both use the same
         // prepared atlas/model bundle, but each publishes only its own store.

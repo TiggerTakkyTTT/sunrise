@@ -32,9 +32,10 @@ fn holder(game: &mut Game<'_>, x: f64) -> u32 {
     game.options.dedicated = Some(Vec::new());
     game.native_level_opened(game.dim);
     game.native_joins_skip();
-    let id = game
+    let level = game.level(game.dim.id()).unwrap();
+    let entity = level
         .summon(
-            game.dim.id(),
+            game,
             "minecraft:pig",
             [x, PIG_Y, 4.5],
             [
@@ -44,12 +45,10 @@ fn holder(game: &mut Game<'_>, x: f64) -> u32 {
             .into_iter()
             .collect(),
         )
-        .unwrap();
-    game.entity(id)
         .unwrap()
-        .set_collider(game, Some(shape()))
         .unwrap();
-    id
+    entity.set_collider(game, Some(shape())).unwrap();
+    entity.id()
 }
 
 fn shove(game: &mut Game<'_>, holder: u32, x: f64) {
