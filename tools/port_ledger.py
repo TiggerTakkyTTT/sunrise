@@ -34,7 +34,7 @@ method-by-method reading misses:
     python3 tools/port_ledger.py build                         # index into .local/port-ledger/ledger.json
     python3 tools/port_ledger.py where KineticWeapon.damageEntities
     python3 tools/port_ledger.py where ShulkerBulletRenderer   # a whole class
-    python3 tools/port_ledger.py what crates/sunrise-client/src/game/items/spear.rs:150
+    python3 tools/port_ledger.py what crates/sunrise-gameplay-common/src/game/items/spear.rs:150
     python3 tools/port_ledger.py class Shulker                 # every method: ported where, or not
     python3 tools/port_ledger.py issue 3123                    # the classes, code and gaps a report points at
     python3 tools/port_ledger.py blame blaze v                 # what computes a field a parity trace shows differ
@@ -66,10 +66,8 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    import lab
-except ImportError:
-    from . import lab
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools import lab
 
 ROOT = Path(os.environ.get("PORT_LEDGER_ROOT") or Path(__file__).resolve().parents[1])
 OUT = Path(os.environ.get("PORT_LEDGER_OUT") or ROOT / ".local" / "port-ledger")
@@ -590,10 +588,7 @@ def jar_entries(jar):
 
 def parse_class_bytes(item):
     name, data = item
-    try:
-        import class_index
-    except ImportError:
-        from . import class_index
+    from tools import class_index
     try:
         cf = class_index.ClassFile(data)
     except Exception:

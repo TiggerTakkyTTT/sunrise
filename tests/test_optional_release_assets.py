@@ -10,17 +10,13 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from tests.os_support import BASH, POSIX_BASH
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {
     "sunrise-linux-x86_64.tar.gz", "sunrise-windows-x64.zip", "sunrise-macos-arm64.zip",
     "sunrise-server-linux-x86_64.tar.gz", "sunrise-source.tar.gz", "sunrise-release.json",
 }
-# The bash on PATH, as in test_pr_ready: Windows' CreateProcess looks in System32 before PATH, so a bare "bash"
-# there is WSL's, which gets none of the steps' env and none of the host's paths.
-BASH = shutil.which("bash")
-POSIX_BASH = BASH is not None and not (
-    os.name == "nt" and os.path.dirname(os.path.normcase(BASH)).endswith(os.path.normcase(r"\system32")))
 
 
 def run_step(containing):
@@ -174,12 +170,14 @@ python3() { :; }
 gh() { printf '%s\\n' "$@" > gh-args; for arg in "$@"; do case "$arg" in dist/*) test -f "$arg" || return 1; esac; done; }
 """
             published = subprocess.run([BASH, "-e", "-c", stubs + run_step('gh release create "$TAG"')],
-                                       cwd=root, env=env, text=True, capture_output=True)
+                                       cwd=root, env=dict(env, GITHUB_STEP_SUMMARY=str(root / "summary")),
+                                       text=True, capture_output=True)
             self.assertEqual(published.returncode, 0, published.stderr)
             args = (root / "gh-args").read_text().splitlines()
             self.assertEqual(args[:3], ["release", "create", "dev-2026-11-13-0123456"])
             self.assertIn("Dev 2026-11-13 · 0123456", args)
             self.assertIn("--prerelease", args)
+            self.assertIn("--draft", args)
             self.assertNotIn("nightly", args)
             files = {Path(arg).name for arg in args if arg.startswith("dist/")}
             self.assertEqual(files, present | {"SHA256SUMS", "SHA256SUMS.sig", "SHA256SUMS.v2.sig", "smoke-test.json",

@@ -61,7 +61,7 @@ pub use post::{
     post_program_supported, program_enabled_from_sources,
 };
 pub use preprocess::{Diagnostic, Origin, Preprocessed, include_targets, preprocess};
-pub use properties::{Entry, Note, Properties};
+pub use properties::{Entry, Note, Properties, Tonemap};
 pub use screens::{Item as ScreenItem, Screens};
 pub use textures::{
     CustomTexture, Dim as TextureDim, EVERY_STAGE, PngError, Texels, Texture, TextureSource,

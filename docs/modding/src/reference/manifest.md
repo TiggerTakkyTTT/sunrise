@@ -7,9 +7,11 @@ reads its code.
 ## The zip
 
 - A zip archive. Entries are stored or deflate-compressed, the only methods the readers support.
-- A path is relative and `/`-separated: no `\`, no `:`, no empty, `.` or `..` part, and it doesn't start with `/`.
+- A path is relative and `/`-separated: no `\`, no `:`, no empty, `.` or `..` part, no part ending in `.` or a space
+  (a Windows extraction drops it), and it doesn't start with `/`.
   Files must be regular files, not symlinks, devices or executables. Executable payloads are refused even under
-  resource paths.
+  resource paths: by extension, by the executable bit, and by header (prebuilt object code, any `MZ` file, or a
+  `#!` script).
 - Each path appears once. Directory entries carry no payload.
 
 ## Project and archive layout
@@ -30,10 +32,16 @@ my_mod.smod
   against the pinned prebuilt game; mixins compile into a separate function-replacement patch library. The game itself does not compile. Its resources load through the same content reader as a content mod's.
 - **Runtime files:** a native package may carry a `runtime/` folder of data its code opens beside
   itself, listed in a top-level `[runtime]` table (below). A content mod has none.
-- Inconsistent code declarations or executable files in the archive refuse the package.
+- Inconsistent code declarations in a project folder, or an executable file among the assets, data or icon,
+  refuse the package.
 - The full native layout is in [Package contents](../how-to/native-mods/03-data-files.md#package-contents). Packing
-  a project folder takes those files and leaves every other file out; in an archive, a file outside the layout
-  refuses the package.
+  a project folder takes the files `cargo package` would carry, with differences: only the root `.gitignore` is read
+  (no Git index), dot-files and dot-folders are skipped unless `include` is set, symlinks are refused, path
+  dependencies outside the package are refused, and names that differ only by case are refused. In an archive, any
+  file outside the package's own names is source. The packer and the tools that read source refuse prebuilt object
+  code (ELF, Mach-O, PE, WebAssembly, `ar`) among the source by its header, never by its name; that is a check of
+  the header, not a security boundary, since `build.rs` runs code. The game reads only what it uses of an archive (below) and skips every
+  other entry, without a check of the file list.
 
 There is no mod-id directory level inside the archive. `sunrise-mod.toml` is the only manifest and the only
 source of the mod's id and version; Cargo's package name and version are not mod identity. IDs are plain
@@ -231,13 +239,15 @@ every owner of a shared missing file. The game never downloads jars.
 
 ## Source paths
 
-A code package contains root `Cargo.toml`, optional `Cargo.lock` and `build.rs`, `.rs` and `.toml` files under `src/`,
-and root text files named `README*`, `LICENSE*`, `LICENCE*`, `COPYING*` or `NOTICE*`.
+A code package contains root `Cargo.toml` and the rest of the crate as `cargo package` would list it, with C and
+other source files allowed ([Package contents](../how-to/native-mods/03-data-files.md#package-contents)).
 Your root `impl Hooks` uses `#[mod_api::sunrise_mod]`; the attribute generates the factory
 ([Writing hooks](../start/writing-hooks.md)).
 
-Folder packaging selects source and resource files, excluding `.git/` and `target/`. It validates selected
-files before copying them. Whole archives are checked, not treated as source folders with ignored extra entries.
+Folder packaging selects source and resource files by Cargo's rule for a crate, which leaves out `.git/` and
+`target/`. It validates selected files before copying them. The game reads an archive's manifest, `icon.png`,
+`assets/` and `data/` files and listed `runtime/` files, and skips every other entry unread; it still refuses an
+entry whose path is absolute, has a `..` part or repeats another, and one that is a symbolic link.
 
 ## Content paths and icon
 

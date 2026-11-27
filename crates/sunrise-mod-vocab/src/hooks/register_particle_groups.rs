@@ -10,8 +10,9 @@ pub trait Hooks {
 `Hooks::register_particle_groups` is the client registration-phase counterpart of NeoForge
 26.3's `RegisterParticleGroupsEvent`. It receives a `RegistrationContext` once at client
 startup. Call `event.register` with a namespaced ID and a factory. The factory returns a
-`ParticleGroup` with a `ParticleBlend` (`Opaque` or `Translucent`) and the particle types
-that draw in it.
+`ParticleGroup` with a `ParticleBlend` (`Opaque`, `Translucent`, or `Additive`) and the particle types
+that draw in it. `Additive` draws after the translucent layer, depth-tested without depth writes,
+blended additively.
 
 ```rust,ignore
 fn register_particle_groups(
@@ -47,6 +48,7 @@ resulting engine-owned definitions. A spawn, a tick and a draw use the resolved 
 handle, look nothing up by group name and scan no mod. Live provider-driven particles are
 dropped when resources reload, in a group as in the built-in one."#]
     #[hook(
+        target = "sunrise_gameplay_common::game::native_hooks::register_particle_groups::native_register_particle_groups",
         receiver = "associated",
         dispatch = "flat",
         side = "client",

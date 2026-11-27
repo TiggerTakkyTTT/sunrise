@@ -17,7 +17,9 @@ opening the world to LAN. The owner joins the integrated server through memory
 and has an ordinary `PlayerRef`. Sending a payload to that ref reaches the client
 half through the same registration and negotiation as any other player; no
 separate local-player send path is needed.
-Fake players are not included in the connected-player list.
+Fake players are not included in the connected-player list. To look up an
+identity or its permission level without a live handle, use the players
+service's [profile reads](server-commands.md#game-profiles-including-offline-players).
 
 Player and level lookup services accept `&dyn ServerHost` and do not mutate the
 world. These services are unavailable on `Host`, `ClientHost` and restricted
@@ -114,6 +116,24 @@ On the server, `player.statistics(host)` takes `&dyn Host` and returns owned sav
 JSON (`Option<String>`): namespaced statistic types and entries under `stats`,
 with the current `DataVersion`. An online player without counters has an empty
 map; a stale or unavailable player gives `None`, as does a client host.
+
+On the server, `player.advancement_progress(host, &id)` takes `&dyn Host` and
+returns `Option<AdvancementProgress>`, the same owned snapshot carried by
+`player_advancement_progress`: criteria with their stored grant dates (or `None`),
+requirement groups, satisfied group count, and `done`. An untouched loaded
+advancement answers with all criteria remaining and `done == false`; an unknown id,
+stale or offline player, or client host answers `None`.
+
+On the server, `player.award_advancement(host, &id, criterion)` and
+`player.revoke_advancement(host, &id, criterion)` take `&mut dyn ServerHost` and
+`criterion: Option<&str>` (`Some(name)` for one criterion, `None` for all
+remaining or obtained criteria) and return `Result<bool, AdvancementError>`.
+They route through the same engine path as triggers and `/advancement`, granting
+rewards, announcements, toasts, hooks and client updates on completion, and
+reporting `UnknownAdvancement`, `UnknownCriterion`, `PlayerUnavailable`,
+`NotServer`, or `NoBackend` on refusal. Inside a transaction, validation runs
+immediately while the change, its rewards, messages and hooks are deferred to
+the root commit and dropped on abort.
 
 `player.set_statistics(host, snapshot)` takes `&mut dyn ServerHost` and borrowed
 JSON. It upgrades older saves, reports decode errors and keeps recoverable
@@ -337,7 +357,7 @@ fires when a world is opened to LAN.
 
 `host.tick_rate_is_frozen()` is `TickRateManager.isFrozen` (`/tick freeze`): `Some(true)` while the server's
 ticking is frozen, `None` on a client. A frozen server still runs the ticks `/tick step` asks for, so
-`server_tick_start`'s `world_running` can be true while it is frozen; read this to tell a frozen server from a
+`server_tick`'s `ServerTickPhase::ServerTickStart { world_running }` can be true while it is frozen; read this to tell a frozen server from a
 paused level.
 
 ## Weather
@@ -544,6 +564,7 @@ For mods that inspect or edit an online player's state (a player-data sync, `/in
 | `persistent_data(host)` | Borrows the player's `NeoForgeData` compound (NeoForge's `Entity.getPersistentData`) for the lifetime of the shared Host borrow. `None` for an absent compound, an unavailable player or a client; `Some` can hold an empty compound. Clone deliberately if you need an owned snapshot. |
 | `set_persistent_data_key(host, &key, value)` | Edits one literal `JavaString` key. `Some(&tag)` inserts or replaces it, creating the compound if needed; `None` removes just that key. Removing the last key leaves a present empty compound; removing a missing key does nothing. Returns `Result<(), PlayerPersistentDataError>`. |
 | `host.item_from_snbt(snbt)` | Reads one complete SNBT compound as a saved `ItemStack.CODEC` item: `{id:"minecraft:stone",count:3,components:{...}}`. `count` defaults to 1 and must be in 1 to 99. Trailing whitespace is allowed. The SNBT parser's structural rules apply, not the binary NBT byte quota. On bad syntax, an invalid item or component patch, or an unknown item, returns `None` and logs the failure reason. |
+| `host.item_to_json(stack)` / `host.item_from_json(json)` | Encodes and decodes an `Option<ItemStack>` as JSON with `ItemStack.OPTIONAL_CODEC` (`ItemStack.CODEC` wrapped in `ExtraCodecs.optionalEmptyMap`) over `JsonOps`: `None` maps to `{}`, non-empty stacks to `{"id","count","components":{...}}` with `"!id":{}` for removals, and typed JSON values per component codec. Errors return `ItemJsonError` naming the failing field. |
 
 Both scoped reads return `Some` of the callback's result even when the inventory is empty,
 or `None` without calling it when the player or inventory is unavailable. Inside the callback,
@@ -624,6 +645,8 @@ kept body:
 | `is_crouching` | `LocalPlayer.isCrouching` for the local player: its own crouching flag, set before its input each tick, so it can differ from its pose for a tick. A kept entity's crouching pose otherwise. |
 | `LivingRef::no_jump_delay` | `LivingEntity.noJumpDelay` of the local player's prediction: 10 after a ground jump, counting down. `None` for other entities. |
 | `main_arm` | `LivingEntity.getMainArm` for every living entity the client tracks, as the server last sent it: another player's or a mannequin's main hand, a mob's left-handed flag; the local player's own Main Hand option. `None` for an entity that isn't living. |
+| `previous_position`, `previous_rotation` | `Entity.xo`, `yo`, `zo` and `yRotO`, `xRotO`: where the local player's or a ticked copy's tick began, the start of the step a frame eases along (`position_at(host, partial)` is `Entity.getPosition(float)`). `previous_rotation` answers where `rotation` does. |
+| `is_alive` | `Entity.isAlive` of the client's copy: a living entity's synced health above 0. `None` for an entity whose body the client doesn't keep. |
 
 Client reads are views, not server authority. Inventory access here is read-only;
 inventory and movement writes still require a server host.

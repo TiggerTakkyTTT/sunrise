@@ -165,7 +165,7 @@ origin.
 
 The release `mod-tool` holds the newest tool published from the repository's main branch, for the same three
 computers and signed with the same key: `tool-x86_64-unknown-linux-gnu.tar.xz`, `tool-aarch64-apple-darwin.tar.xz`,
-`tool-x86_64-pc-windows-gnu.tar.xz`, `tool.json` (the commit it is built from), `SHA256SUMS` and `SHA256SUMS.sig`.
+`tool-x86_64-pc-windows-gnu.tar.xz`, `tool.json` (the commit it is built from, the native-build contract it speaks and the SDK package format it reads), `SHA256SUMS` and `SHA256SUMS.sig`.
 To install it, run your computer's block above with its `RELEASE` line changed to `RELEASE=mod-tool` (in PowerShell,
 `$Release = "mod-tool"`). The block then checks Sunrise's signature for that release instead of the Nightly's.
 

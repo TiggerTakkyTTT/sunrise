@@ -10,21 +10,23 @@ pub trait EntityIdentityBackend {
     /// The entity's name as plain text (`Entity.getName`): its custom name,
     /// a player's name, else its type's name. On a client (API
     /// @API:client_entity_refs@), from the custom name the server synced
-    /// (`Entity.DATA_CUSTOM_NAME`) and a player's profile name. API
-    /// 386.
+    /// (`Entity.DATA_CUSTOM_NAME`), for a general row as for a mob or an armor stand, and a
+    /// player's profile name. API 386.
     fn entity_name(&self, entity: EntityRef) -> Option<String>;
     /// Side: both.
     /// The entity's custom name with its style (`Entity.getCustomName`), or None when it has
     /// none, as `setCustomName(null)` leaves it; `Entity.hasCustomName` is `is_some`. Unlike
     /// `name` it never falls back to a player's or the type's name, and keeps the click events
     /// `getName` removes. On a client, the name the server synced (`Entity.DATA_CUSTOM_NAME`)
-    /// for a mob, an armor stand, a lightning bolt or a text, item or block display; other kinds read None
-    /// there. None for a player and a stale handle.
+    /// for a mob, an armor stand, a general row, a lightning bolt or a text, item or block
+    /// display; other kinds read None there. None for a player and a stale handle.
     /// Refuses text deeper than 512 component nodes.
     fn entity_custom_name(&self, entity: EntityRef) -> Result<Option<Text>, TextFormError>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity's name shows over it at any distance
-    /// (`Entity.isCustomNameVisible`); false for the kinds that keep no name.
+    /// (`Entity.isCustomNameVisible`); false for the kinds that keep no name. A general row
+    /// keeps it; on a client, it is the value the server synced
+    /// (`Entity.DATA_CUSTOM_NAME_VISIBLE`) for a general row.
     fn entity_custom_name_visible(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
     /// The category of the entity's type (`EntityType.getCategory`): a mob's
@@ -42,14 +44,15 @@ pub trait EntityIdentityBackend {
         entity: EntityRef,
         visit: &mut dyn FnMut(PlayerRef) -> core::ops::ControlFlow<()>,
     ) -> Result<core::ops::ControlFlow<()>, EntityReadError>;
-    /// Side: server.
+    /// Side: both.
     /// The entity's resolved type key (`Entity.getType`). Compare keys directly;
     /// request `key.id(host)` explicitly when its canonical name is needed.
-    /// A general row returns its declared type. This read,
-    /// `entity_uuid` and `entity_level` also answer for a mob a kill credit
+    /// A general row returns its declared type. On a client, answers for the
+    /// local player and tracked entities (including displays). On a server, this
+    /// read, `entity_uuid` and `entity_level` also answer for a mob a kill credit
     /// names in another loaded level. API 373.
     fn entity_kind(&self, entity: EntityRef) -> Option<EntityTypeKey>;
-    /// Side: server.
+    /// Side: both.
     /// The level the entity is in (`Entity.level`): on a client, the
     /// client's level. API 373.
     fn entity_level(&self, entity: EntityRef) -> Option<LevelRef>;
@@ -67,6 +70,15 @@ pub trait EntityIdentityBackend {
     /// mod API's behaviour Parts. A part is not itself multipart. None for a
     /// stale handle.
     fn entity_is_multipart(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
+    /// The stack picking the entity gives (`Entity.getPickResult`), on the side that holds it:
+    /// a mob's spawn egg (none for a mob without one), a boat's or a minecart's own item, an
+    /// item frame's framed item (else the frame), a painting, an armor stand, an end crystal, a
+    /// leash knot's lead. An ender dragon part answers its dragon's egg. None for a player and
+    /// the other kinds vanilla gives nothing for (a projectile, a falling block, primed TNT,
+    /// an item), and for a stale handle. The block counterpart is
+    /// `PlayerRef::clone_item_stack`.
+    fn entity_pick_result(&self, entity: EntityRef) -> Option<ItemStack>;
     /// Side: both.
     /// Visit the entities a multipart entity is made of (NeoForge `IEntityExtension.getParts`).
     /// For the dragon, `EnderDragon.getSubEntities` orders its head, neck, body, three tail
@@ -97,8 +109,8 @@ pub trait EntityIdentityBackend {
 pub trait EntityIdentityBackendMut {
     /// Side: server.
     /// Names the entity (`Entity.setCustomName`), or takes its name away
-    /// with `None`: its name, its saved `CustomName` and, for a mob or an
-    /// armor stand, what the players tracking it are sent. False for a
+    /// with `None`: its name, its saved `CustomName` and, for a mob, an
+    /// armor stand or a general row, what the players tracking it are sent. False for a
     /// player, a kind whose name Sunrise does not retain (projectiles, the
     /// dragon and crystals, primed TNT, falling blocks, experience orbs,
     /// ominous item spawners), a stale handle or on a client.
@@ -111,7 +123,7 @@ pub trait EntityIdentityBackendMut {
     /// Side: server.
     /// Shows the entity's name at any distance, or only when looked at
     /// (`Entity.setCustomNameVisible`): saved, and sent to the players
-    /// tracking a mob or an armor stand. False where `set_custom_name` is.
+    /// tracking a mob, an armor stand or a general row. False where `set_custom_name` is.
     fn entity_set_custom_name_visible(&mut self, entity: EntityRef, visible: bool) -> bool;
     /// Side: server.
     /// The entity's UUID (`Entity.getUUID`), the one it is saved with; an

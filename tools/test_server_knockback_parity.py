@@ -38,15 +38,11 @@ import subprocess
 import sys
 import time
 
-try:
-    from . import lab, test_rust_parity as base
-    from .test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from .test_locator_bar_parity import generate_world, ops_json
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from test_locator_bar_parity import generate_world, ops_json
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
+from tools.test_locator_bar_parity import generate_world, ops_json
 
 NAME = 'server-knockback-parity'
 PLAYERS = ('Alice', 'Bob')

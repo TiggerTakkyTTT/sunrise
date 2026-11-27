@@ -21,7 +21,12 @@ wall shulker's open lid and picks the shulker up (AbstractBoat.tick): the box
 query must reach the lid, one block out from the shulker's position. The level
 is frozen and stepped, so each record is at a known tick.
 """
-from command_exec_corpus import cmd, setup
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.command_exec_corpus import cmd, setup
 
 SHULKER = '00002e65-0000-0001-0000-000000000001'
 

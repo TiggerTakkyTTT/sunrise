@@ -376,7 +376,7 @@ fn check_fit(
         contract: CONTRACT,
         mods: root.to_owned(),
         build: build.clone(),
-        surface: Some(sdk.dir.join(crate::sdk_fetch::SURFACE)),
+        surface: Some(sdk.surface()),
         build_data: build_data.clone(),
     };
     let refused =

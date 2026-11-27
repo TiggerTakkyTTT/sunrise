@@ -635,6 +635,63 @@ impl crate::NoBackend for StackWriteError {
     }
 }
 
+/// Why encoding or decoding an item stack as JSON (`ItemStack.OPTIONAL_CODEC` over `JsonOps`)
+/// failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ItemJsonError {
+    /// The host has no game backend available to resolve item or component registries.
+    Unavailable,
+    /// The input text is not syntactically valid JSON.
+    InvalidJson {
+        /// Parser diagnostic.
+        reason: String,
+    },
+    /// A named top-level field or component key failed codec validation or encoding.
+    InvalidField {
+        /// Failing field or component identifier (such as `"id"`, `"count"`, `"components"`,
+        /// `"minecraft:damage"`, or `"!minecraft:damage"`).
+        field: String,
+        /// Codec diagnostic for that field.
+        reason: String,
+    },
+    /// A top-level value or codec refusal not tied to one named field.
+    InvalidValue {
+        /// Codec diagnostic.
+        reason: String,
+    },
+}
+
+impl ItemJsonError {
+    /// Name of the failing field or component key, when the error belongs to one field.
+    pub fn field(&self) -> Option<&str> {
+        match self {
+            Self::InvalidField { field, .. } => Some(field.as_str()),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ItemJsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("item JSON codec unavailable"),
+            Self::InvalidJson { reason } => write!(f, "invalid JSON: {reason}"),
+            Self::InvalidField { field, reason } => write!(f, "{field}: {reason}"),
+            Self::InvalidValue { reason } => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for ItemJsonError {}
+
+impl crate::NoBackend for ItemJsonError {
+    fn no_backend() -> Self {
+        Self::Unavailable
+    }
+}
+
 /// Why an [`ItemPlace`](crate::ItemPlace) could not run the item's crafted-by processing.
 ///
 /// This is a local refusal returned by [`ItemPlace::on_crafted_by`](crate::ItemPlace::on_crafted_by),

@@ -95,7 +95,9 @@ fn every_root_splits_after_outer_functions_with_one_random_draw() {
         let mut random = LegacyRandom::new(0);
         let drops = query::with_query(query.clone(), || match adapter {
             0 => data.loot_table(id, false, None, &mut random),
-            1 => data.roll_loot_table(id, None, None, &mut random).unwrap(),
+            1 => data
+                .roll_loot_table(id, None, None, None, &mut random)
+                .unwrap(),
             2 => data.inline_loot_table(&root, &mut random),
             3 => data.entity_drops("zombie", false, None, &mut random),
             4 => data.loot_table_from(id, false, None, &mut random),
@@ -640,7 +642,7 @@ fn root_modifiers_chain_before_unsigned_caller_consumption() {
         let drops = match adapter {
             0 => items.loot_table("minecraft:entities/zombie", false, None, &mut random),
             1 => items
-                .roll_loot_table("minecraft:entities/zombie", None, None, &mut random)
+                .roll_loot_table("minecraft:entities/zombie", None, None, None, &mut random)
                 .unwrap(),
             2 => items.inline_loot_table(&root, &mut random),
             3 => items.entity_drops("zombie", false, None, &mut random),
@@ -829,6 +831,7 @@ fn roll_as_caller(
                 "test:caller",
                 held.as_ref(),
                 entity.as_ref().map(|e| (e, matcher)),
+                None,
                 &mut LegacyRandom::new(5),
             )
             .unwrap()
@@ -1229,7 +1232,7 @@ fn interact_loot_exposes_block_origin_block_entity_level_interacting_entity_and_
         }
     }
     let table = json!({"pools":[{"rolls":1,
-        "conditions":[{"type":"neoforge:can_item_perform_ability","ability":"shears_harvest"}],
+        "condition":{"type":"neoforge:can_item_perform_ability","ability":"shears_harvest"},
         "entries":[{"type":"minecraft:item","name":"minecraft:honeycomb"}]}]});
     let mut items = data(vec![("minecraft:harvest/beehive", table)]);
     let seen = Arc::new(Mutex::new(None));

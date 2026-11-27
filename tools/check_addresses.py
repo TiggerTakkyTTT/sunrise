@@ -29,6 +29,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 CONFIG_PATH = "tools/addresses.json"
 DOC = "docs/layers.md#built-in-addresses"
 # A whole string is taken for a host name only with one of these endings: translation keys end in words
@@ -267,10 +269,7 @@ def base_config(base):
 
 
 def _merge_base():
-    if __package__:
-        from . import merge_base
-    else:
-        import merge_base
+    from tools import merge_base
     return merge_base
 
 

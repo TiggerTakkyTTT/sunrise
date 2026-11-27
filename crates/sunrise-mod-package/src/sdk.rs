@@ -20,6 +20,10 @@ pub const INDEX: &str = "sdk.json";
 pub const SCHEMA: u32 = 1;
 /// The prebuilt package's layout number. Its one place is the file `sdk/package-format`, which
 /// the archive name, the package's identity file, `sdk.json` and the scripts all read.
+///
+/// Bump it for any change to the package layout, including making an identity or index field
+/// required that older packages lack. A bump that also changes what a caller may send the tool or
+/// rely on from it bumps `CONTRACT` in `sunrise-native-build` too.
 pub const PACKAGE_FORMAT: u32 = number(include_str!("sdk/package-format"));
 
 /// A decimal number, then any trailing whitespace (a CR included), at compile time: anything else
@@ -541,16 +545,24 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(why) => write!(f, "{INDEX} is not a valid SDK index: {why}"),
+            Self::Schema(schema) if *schema > u64::from(SCHEMA) => write!(
+                f,
+                "{INDEX} has schema {schema}; this program reads schema {SCHEMA}, so this program is older than this SDK. Update it (`cargo sunrise-mod`: run the install block of the book's \"Install the mod tool\" page), or use the tool in this SDK's own release"
+            ),
             Self::Schema(schema) => write!(
                 f,
-                "{INDEX} has schema {schema}; this program reads schema {SCHEMA}, so it is older than this SDK. Update it (`cargo sunrise-mod`: run the install block of the book's \"Install the mod tool\" page), or use the tool in this SDK's own release"
+                "{INDEX} has schema {schema}; this program reads schema {SCHEMA}, so this SDK is older than this program. Use the tool in that SDK's own release, or pin a newer SDK (`cargo sunrise-mod pin`)"
             ),
             Self::Build { expected, found } => {
                 write!(f, "{INDEX} is for build {found}, not {expected}")
             }
+            Self::PackageFormat(format) if *format > u64::from(PACKAGE_FORMAT) => write!(
+                f,
+                "{INDEX} has package format {format}; this program reads format {PACKAGE_FORMAT}, so this program is older than this SDK. Update it (`cargo sunrise-mod`: run the install block of the book's \"Install the mod tool\" page), or use the tool in this SDK's own release"
+            ),
             Self::PackageFormat(format) => write!(
                 f,
-                "{INDEX} has package format {format}; this program reads format {PACKAGE_FORMAT}, so it is older than this SDK. Update it (`cargo sunrise-mod`: run the install block of the book's \"Install the mod tool\" page), or use the tool in this SDK's own release"
+                "{INDEX} has package format {format}; this program reads format {PACKAGE_FORMAT}, so this SDK is older than this program. Use the tool in that SDK's own release, or pin a newer SDK (`cargo sunrise-mod pin`)"
             ),
             Self::MixinsRev(rev) => write!(
                 f,

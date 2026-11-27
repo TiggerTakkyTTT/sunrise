@@ -1,15 +1,12 @@
 """Focused discovery, nesting and link-check regressions for the modding book."""
 import copy
-import importlib.util
 from pathlib import Path
 import re
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-with patch.object(sys, "path", [*sys.path, str(Path(__file__).resolve().parents[1] / "tools")]):
-    import modding_concept_pages as pages
+from tools import modding_concept_pages as pages
 
 
 class ConceptPages(unittest.TestCase):
@@ -32,13 +29,6 @@ class ConceptPages(unittest.TestCase):
 
     def expand(self, book=None):
         return pages.expand(copy.deepcopy(book or self.book), self.src)
-
-    def test_import_does_not_change_discovery_search_paths(self):
-        spec = importlib.util.spec_from_file_location("concept_import_probe", __file__)
-        with patch.object(sys, "path", list(sys.path)):
-            before = list(sys.path)
-            spec.loader.exec_module(importlib.util.module_from_spec(spec))
-            self.assertEqual(sys.path, before)
 
     def test_a_folder_beside_a_page_gives_its_sub_chapters_in_file_name_order(self):
         parts = self.expand()["sections"][1]["Chapter"]

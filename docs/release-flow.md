@@ -121,25 +121,44 @@ commit on main. In order:
    - `sdk` builds its prebuilt SDK on every OS (`prebuilt-game-build.yml`; skipped when `sdk-<sha>` already
      exists). A build it makes runs the SDK's own checks too, as the daily run's does: the native linkage probe on
      the Linux and Windows client legs, and the API-source check and the source stage
-     (`tools/ci/test_stage_catalog.py`) on Linux. `sdk-publish` signs and publishes it as `sdk-<sha>` from this run's
-     artifacts as soon as those legs are done, through `sdk-publish.yml`, the one workflow that publishes an SDK (the
-     daily run and `prebuilt-game.yml` call it too).
+     (`tools/ci/test_stage_catalog.py`) on Linux. `sdk-publish` signs it and releases it as the draft `sdk-<sha>` from
+     this run's artifacts as soon as those legs are done, through `sdk-publish.yml`, the one workflow that publishes an
+     SDK (the daily run and `prebuilt-game.yml` call it too, publishing at once; one of them finding a Dev build's
+     draft of its commit makes that draft public as it is).
    - `build` builds the game alone (no picked pull requests, no build branch, no nightly-state), as
      `SUNRISE_VERSION` `dev-<date>` so the game calls itself "Dev <date> · <short>". The game's legs read nothing of
      the SDK.
-4. `sdk-index` takes the published `sdk-<sha>`'s `sdk.json`; only then does `sign` sign the game for the `dev`
+4. `sdk-index` takes `sdk-<sha>`'s `sdk.json`, its draft's; only then does `sign` sign the game for the `dev`
    channel and for `dev-<date>-<short>` (`SHA256SUMS.sig`, `SHA256SUMS.v2.sig`, the Nightly's key), with that
    `sdk.json` in its signed sums as the Nightly carries its own, so the launcher reads its build id from it and
-   builds native mods against `sdk-<sha>`. `publish` checks the smoke test and that `sdk-<sha>` is out, and
-   publishes the pre-release `dev-<date>-<short>` titled "Dev <date> · <short>": the SDK always first. A commit
-   already published that day is skipped. Dev builds older than 7 days are deleted, never the newest one, and never
-   an `sdk-<sha>` SDK.
+   builds native mods against `sdk-<sha>`. `publish` checks the smoke test and that `sdk-<sha>` is there, and
+   releases the draft pre-release `dev-<date>-<short>` titled "Dev <date> · <short>". A commit already published
+   (or drafted) that day is skipped; an earlier attempt's draft of the same tag is replaced.
+5. Nothing public has changed yet: no tag, no release anyone lists, no modding book. The build is tested from its two
+   drafts, downloaded into one folder with a subfolder per release, as GitHub's download paths have them:
+
+   ```sh
+   gh release download dev-<date>-<short> -R sunrise-org/sunrise -D drafts/dev-<date>-<short>
+   gh release download sdk-<sha> -R sunrise-org/sunrise -D drafts/sdk-<sha>
+   SUNRISE_LAUNCHER_DRAFTS=drafts sunrise-launcher install dev-<date>-<short>   # Sunrise Launcher 1.3.3 and later
+   SUNRISE_SDK_BASE=drafts cargo sunrise-mod …                                  # the mod tools, against the draft SDK
+   ```
+6. `gh workflow run promote-dev.yml -R sunrise-org/sunrise --ref main -f tag=dev-<date>-<short>` makes them public,
+   rebuilding nothing: it checks both drafts as launchers check them and that the game carries its SDK's `sdk.json`,
+   makes `sdk-<sha>` public, then the game, deletes the Dev builds older than 7 days (never the newest one, and
+   never an `sdk-<sha>` SDK), and publishes the SDK's generated modding book (`modding-book-generated.yml`).
 
 A failed Dev build is retried with **Re-run failed jobs** on its `nightly build` run: only the failed jobs and those
-after them run again, every SDK or game leg that built is kept, and a published `sdk-<sha>` is never rebuilt (a new
-dispatch of the same commit reuses it too, and skips a commit already published that day). Only a new commit, a fix,
-builds everything again. `BLACKSMITH_DEV_MACOS=on` (a repository variable the owner sets; unset is off) moves the
-macOS legs of a Dev build, the SDK's and the game's, to Blacksmith while `BLACKSMITH` stays `off` for everything else.
+after them run again, every SDK or game leg that built is kept, and a public `sdk-<sha>` is never rebuilt (a new
+dispatch of the same commit reuses it too; an SDK that is still a draft is built again and its draft replaced). A
+commit already published or drafted that day is skipped. Only a new commit, a fix,
+builds everything again. `BLACKSMITH_DEV=on` (a repository variable the owner sets; unset is off) moves every leg
+of a Dev build, the SDK's and the game's, to Blacksmith while `BLACKSMITH` stays `off` for everything else;
+`BLACKSMITH_DEV_MACOS=on` moves its macOS legs alone. `DEV_ON_DYNA_LINUX`, `DEV_ON_DYNA_WINDOWS` and `DEV_ON_DYNA_MACOS`
+(one per platform, `on` or unset) build that platform's legs of a Dev build, the SDK's and the game's, on Dyna's
+Linux runners instead: Linux against glibc 2.35, Windows and macOS cross-compiled (`tools/ci/cross/`), and the
+programs of a cross-built Windows or macOS leg started on GitHub's runner of that platform before anything publishes.
+Unsetting a switch puts its legs back where the variables above send them.
 
 It never touches the `nightly` tag or channel, its rotation, its `nightly-source/` tags or `daily-green`. A dry run
 (the default for a dispatch, and any run off main) starts a `nightly build` dry run, which builds, indexes and
@@ -157,8 +176,15 @@ sunrise-release-sign verify --tag dev-<date>-<short> --signature SHA256SUMS.v2.s
 `.github/workflows/daily.yml` runs the in-game legs once a day, at 09:00 UTC on main's head, and when root
 dispatches it (`-f commit=<sha>`, `-f dry_run=false` to write). One run runs and at most one waits; a newer waiting
 dispatch replaces an older waiting one. The schedule stops when main's head already has a completed real daily run;
-a hand dispatch never does, so it retries a run whose tag move, issues or nightly failed. Its legs are the workflows that left main pushes:
-the ignored-tests data shards (`ignored-tests.yml`),
+a hand dispatch never does, so it retries a run whose tag move, issues or nightly failed.
+
+Before checking for a scheduled skip or selecting break-glass legs, `resolve` requires a writing daily's tested
+commit to be both reachable from the live dispatch branch and equal to or an ancestor of the immutable dispatch
+SHA (`GITHUB_SHA`). The branch can advance after dispatch, but the run still uses the workflow from that SHA.
+This check applies to full and break-glass writing runs before either can publish an SDK, emit proof or promote
+its tested commit. Dry runs can still resolve a commit outside the dispatch workflow's history without writing.
+
+Its legs are the workflows that left main pushes: the ignored-tests data shards (`ignored-tests.yml`),
 `fn-replace-check.yml`, the game's Windows runtime-lease tests (`windows-runtime-leases.yml`), every
 `cargo-sunrise-mod` binstall archive built from the commit and published nowhere (`cargo-sunrise-mod-build.yml`; a pull
 request's check builds only the Linux x86_64 archive, and only a `cargo-sunrise-mod-v*` tag's push publishes, from
@@ -191,6 +217,8 @@ throwaway key that only a debug-assertions build trusts through `SUNRISE_SDK_TRU
 which builds the tool every SDK and mod-tool release ships, refuses a build that reads that variable), plus `nightly/sdk.json` so a `new`
 with no `--sunrise` resolves to it through `SUNRISE_SDK_BASE`. It is an ordinary leg, outside `sdk_green`. A hand dispatch of
 `book-quickstart.yml` checks the published release instead.
+
+The [parity fuzz report](parity-workflow.md#fuzzing-scenarios) runs separately after parity on writing runs of main's head. Corpus regressions and exploratory divergences can file issues, but the summary, SDK and Nightly never wait for fuzz.
 
 The SDK publishes on its own legs (`sdk`, `machine-sample`, `fn-replace-check`: the summary's `sdk_green`) until a runner with prepared data exists (umceko, 2026-11-16). A red linkage probe fails its `sdk / build linux` or `sdk / build windows` job and blocks publication.
 
@@ -234,8 +262,8 @@ commits) since the commit the published Nightly was built on:
 - One Nightly build at a time: while one runs or waits, the train starts none. At most 12 builds a UTC day (the
   reviewers' `/nightly` builds count): past that the train waits for the next day, except for `release-now` and
   `force=true`.
-- The daily calls the release train only from its green summary. A by-hand Sunrise dispatch selects main's head or
-  an explicit base on main with its dyna-checks main-push gate green.
+- The daily calls the release train only from its green summary. A by-hand Sunrise dispatch still has to select
+  a commit admitted by the [Nightly channel](#nightly-channel).
 
 ### The Nightly and stable releases
 
@@ -447,7 +475,7 @@ Why it exists: the tool shipped only inside each `sdk-<commit>`, so a tool fix r
 ## Release branches
 
 Two long-lived branches carry the game version they target (umceko and ari, 2026-11-20); no branch per release.
-Until an owner creates them, everything above runs as it did: the Nightly follows `daily-green` and runs on main.
+The Nightly runs on `main` until `nightly/26.3` exists (see the [startup fallback](#nightly-channel)).
 
 | Branch | Moves | Publishes |
 | --- | --- | --- |
@@ -477,13 +505,32 @@ repository, the event (a dispatch), the full ref and the dry-run input exactly, 
 case. A run on any other ref, a case variant, a tag or a pull request's ref is a dry run: it signs with a throwaway key
 and publishes nothing.
 
-A daily run's evidence is the run itself, never a tag: its job `green <full sha>` succeeds only on a writing run whose
-resolve and summary succeeded, every leg (parity included) passed and the SDK is published. `release_train.daily_passed`
-looks for that job in a real `daily.yml` dispatch on `main` or `release/26.3` that concluded `success` with `head_sha` equal
-to the commit (a title never stands in for it), reading the jobs of that run id and attempt. The daily promoting its own
-commit to `nightly/26.3` has not completed yet: it passes its own `<run id>/<attempt>` down (`release.yml`, `nightly-build.yml`
-`daily_run`), and that one in-progress run counts through its green job. Every signing and publishing gate reads
-`authorize`'s `publish == 'true'`, so a missing output signs and writes nothing.
+Stable and branch-backed Nightly read daily evidence from the run itself, not a tag. The release reader accepts
+only a `daily.yml` dispatch in `sunrise-org/sunrise` from `refs/heads/main` or `refs/heads/release/26.3`. The run
+record's short branch name is not enough: GitHub's reference to the local `prebuilt-game-build.yml` must confirm
+the full branch ref and immutable workflow SHA, and the source must be reachable from that branch in the trusted
+origin checkout.
+
+`release_train.daily_passed` requires both exact, unsuffixed jobs `summary <full sha>` and `green <full sha>` to
+have completed with `success` in the same run and attempt. Those names identify the tested commit. The reader
+checks that the workflow SHA is that commit or descends from it, even for retained runs that predate the check
+in `resolve`. Neither the run title nor the workflow SHA substitutes for the job markers. Dry runs and break-glass
+runs have suffixed summaries and do not count as full dailies. The green job succeeds only on a writing run after
+resolve, summary and every leg (parity included) pass and the SDK is published.
+
+Ordinary discovery takes only completed successful runs. An explicitly named `<run id>/<attempt>` (`daily_run`)
+may also supply proof while in progress with no conclusion, once both markers have succeeded. The daily normally
+passes its own attempt through `release.yml` to `nightly-build.yml`; the selector chooses evidence, not who is
+authorized to call or publish. Every signing and publishing gate still reads `authorize`'s `publish == 'true'`,
+so a missing output signs and writes nothing.
+
+The release reader runs from the workflow's own ref. Updating it on `main` does not update either release branch:
+
+- **Nightly:** a fully green main daily fast-forwards `nightly/26.3` to its tested commit. The Nightly build gets the
+  updated reader when that commit contains it, not through an untested manual branch bump.
+- **Stable:** backport the daily writer check and release reader in a separately reviewed PR on `release/26.3`
+  before relying on proof where the tested commit differs from the workflow SHA. That backport does not merge
+  `main` or enable break-glass on the old stable branch. Stable pick and tag reservation use the branch's reader.
 
 **A stable release** (`nightly-build.yml` with `kind=stable`, `nightly.py pick --kind stable`):
 
@@ -621,7 +668,8 @@ waives the full daily on the release commit and nothing else:
   the break-glass daily refuses to start and the release refuses to build. The SDK legs sdk-publish waits for always
   run, since a release ships only after its `sdk-<sha>`. A game crate's or Cargo change runs every leg that tests the
   game (the ignored-test shards, the Windows rows and the parity harnesses), and the release build's smoke test boots
-  the game headless on the commit. A break-glass daily's legs count only when the whole run succeeded.
+  the game headless on the commit. The selected leg markers must all come from one successful release-branch
+  run, with the same workflow provenance and tested-commit ancestry checks as for a full daily.
 - **The gate always applies.** dyna-checks runs on pushes to `release/26.3`, and the release needs `lint`, `verify` and
   `verify-static` passed on a push of exactly its commit.
 - **Never for** a minor or major release (only a patch of the parent), a commit that is the parent's or doesn't
@@ -821,9 +869,10 @@ names. Everything that downloads matches the asset's name, which is unchanged.
 
 ## Nightly channel
 
-On Sunrise, a Nightly builds the commit the `daily-green` tag points to (the newest fully green daily run), after
-its dyna-checks main-push gate passes; any other commit is refused. The owner may grant a one-time exception for
-another commit of main: root then runs `gh workflow run release.yml -f kind=nightly -f dry_run=false -f commit=<full sha>
+On Sunrise, a Nightly builds only the head of `nightly/26.3`, with daily run evidence and a green dyna-checks
+main-push gate on that exact commit. Before `nightly/26.3` exists, the startup fallback instead takes the commit
+named by `daily-green` and requires its main-push gate; it does not read daily run evidence. The owner may grant a
+one-time exception for another commit of main: root then runs `gh workflow run release.yml -f kind=nightly -f dry_run=false -f commit=<full sha>
 -f exception="<who, when, why>"` (or `nightly-build.yml` with `base` and `exception`), and the run names the grant in
 a warning. A grant names its commit in full; a blank one is no grant. The commit's SDK, `sdk-<sha>`, is published
 first, as for every Nightly. The gate
@@ -980,4 +1029,4 @@ Releases ship often, so nothing they leave behind may grow without bound.
   pile up (1051 of them, 111 GB, in one desktop checkout on 2026-11-09). git-slim removes the leftovers of cut-short
   fetches, collects a `.git` over 5 GB (`MAX_GIT_MB`) with `git gc --prune=now` and folds more than 40 packs
   (`MAX_PACKS`) into few. Update the copies after changing the scripts (git-slim.sh goes beside runner-gc.sh):
-  `ssh macmini 'cd ~/.actions-runners && for f in runner-gc.sh git-slim.sh; do curl -fsSL https://raw.githubusercontent.com/horizon-rust/horizon/main/tools/ci/$f -o $f; done'`.
+  `ssh macmini 'cd ~/.actions-runners && for f in runner-gc.sh git-slim.sh; do curl -fsSL https://raw.githubusercontent.com/sunrise-org/sunrise/main/tools/ci/$f -o $f; done'`.

@@ -12,11 +12,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-try:
-    from . import first_tick_lava_burn_corpus as corpus, lab
-except ImportError:
-    import first_tick_lava_burn_corpus as corpus
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import first_tick_lava_burn_corpus as corpus, lab
 
 TEST = 'mobs::ai::burn_and_rose_tests::a_mob_loaded_in_lava_burns_on_its_first_tick'
 

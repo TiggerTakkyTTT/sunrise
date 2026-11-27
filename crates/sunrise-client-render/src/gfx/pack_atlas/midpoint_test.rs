@@ -447,10 +447,7 @@ pub(super) fn sample_page(
     expression: &str,
 ) -> Vec<[f32; 4]> {
     let count = drawn.len() as u32;
-    let pp = |code| sunrise_shaders::Preprocessed {
-        code,
-        ..Default::default()
-    };
+    let pp = |code: String| sunrise_shaders::Preprocessed::from_source("", &code);
     let vertex = pp(format!(
         "attribute vec2 mc_midTexCoord;\nattribute vec4 at_tangent;\n\
          attribute vec4 at_midBlock;\nattribute vec4 mc_Entity;\nvarying vec4 probe;\nvoid main() {{\n\

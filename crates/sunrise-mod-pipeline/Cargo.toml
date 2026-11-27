@@ -10,6 +10,7 @@ description = "Mod render pipelines' GLSL core shaders: inputs, sprite helper, g
 # Parses, validates and translates GLSL core shaders as wgpu does for Vulkan, Metal and DirectX 12.
 naga = { version = "30.0.1", features = ["glsl-in", "spv-out", "msl-out", "hlsl-out"] }
 sunrise-glsl = { path = "../sunrise-glsl" }
+sunrise-mod-vocab = { path = "../sunrise-mod-vocab" }
 wgpu-types = "30.0.1"
 
 [lints]

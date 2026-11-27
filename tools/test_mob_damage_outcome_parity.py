@@ -7,16 +7,13 @@ from pathlib import Path
 import struct
 import subprocess
 
-try:
-    from . import lab, oracle_harness, test_rust_parity as base
-    from .integration_env import run_game
-    from .test_command_exec_parity import install_datapack_fixtures
-except ImportError:
-    import lab
-    import oracle_harness
-    import test_rust_parity as base
-    from integration_env import run_game
-    from test_command_exec_parity import install_datapack_fixtures
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness, test_rust_parity as base
+from tools.integration_env import run_game
+from tools.test_command_exec_parity import install_datapack_fixtures
 
 RECORDING = 'mob_damage_outcome'
 

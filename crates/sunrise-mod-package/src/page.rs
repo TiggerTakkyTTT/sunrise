@@ -9,7 +9,7 @@ use std::{collections::HashSet, io::ErrorKind, path::Path};
 use url::Url;
 
 /// The page manifest beside `sunrise-mod.toml`.
-pub const PAGE_FILE: &str = "page.toml";
+pub use mod_source::package::PAGE_FILE;
 /// The release format `cargo sunrise-mod` speaks: `check --release <tag>` and the `<id>.page.tar` bundle `build`
 /// writes. The rolling `mod-tool` release's `tool.json` publishes it as `release_contract`
 /// (`tools/ci/mod_tool.py`), so the registry's release workflow can tell a tool that speaks it from an older
@@ -218,12 +218,6 @@ fn screenshot_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::
     if !path.starts_with("page/") || !plain_path(&path) || path.contains('\0') {
         return Err(D::Error::custom(format!(
             "{path:?}: expected a relative screenshot file under page/ without . or .. components"
-        )));
-    }
-    // Win32 may strip trailing dots or spaces when opening a path component.
-    if path.split('/').any(|part| part.ends_with(['.', ' '])) {
-        return Err(D::Error::custom(format!(
-            "{path:?}: screenshot path components cannot end in a dot or space"
         )));
     }
     // Release check must also refuse paths that cannot be stored in the required bundle format.

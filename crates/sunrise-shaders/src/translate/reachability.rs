@@ -182,13 +182,13 @@ fn prune(code: &str) -> Option<String> {
 /// Stage preparation before compatibility analysis. Extracted from translate so its
 /// already oversized module does not grow when reachability is added.
 pub(super) fn prepare(pp: &Preprocessed) -> Option<Preprocessed> {
-    let pruned = prune(&pp.code).map(|code| Preprocessed { code, ..pp.clone() });
+    let pruned = prune(pp.code()).map(|code| pp.with_code(code));
     let pp = pruned.as_ref().unwrap_or(pp);
-    let named = anonymous_structs::name(&pp.code);
-    let code = named.as_deref().unwrap_or(&pp.code);
+    let named = anonymous_structs::name(pp.code());
+    let code = named.as_deref().unwrap_or(pp.code());
     let flat = interface_blocks::flatten(code)
         .or(named)
-        .map(|code| Preprocessed { code, ..pp.clone() });
+        .map(|code| pp.with_code(code));
     let split = atomic_vectors::rewrite(flat.as_ref().unwrap_or(pp));
     split.or(flat).or(pruned)
 }

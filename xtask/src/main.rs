@@ -1,8 +1,8 @@
 //! Repository tasks, run with `cargo run -p xtask -- TASK`.
 //!
-//! `package BINARY OUTDIR`: a playable Sunrise folder with the game binary, sunrise-ctl, sunrise-perf,
+//! `package BINARY OUTDIR`: a playable Sunrise folder with the game binary, sunrise-ctl,
 //! sunrise-prepare, sunrise-server and sunrise-port-pack (built beside it: cargo build --release -p sunrise-game -p sunrise-client-lib
-//! --bins -p sunrise-perf --bin sunrise-perf -p sunrise-prepare -p sunrise-server -p sunrise-port-pack), the exporters sunrise-prepare compiles, its sources (the launcher compares
+//! --bins -p sunrise-prepare -p sunrise-server -p sunrise-port-pack), the exporters sunrise-prepare compiles, its sources (the launcher compares
 //! them to its own), and PLAY.txt. It holds none of Minecraft's files: players prepare those
 //! from their own copy. .github/workflows/release.yml makes the release folders with it.
 //!
@@ -700,7 +700,6 @@ mod tests {
         for name in [
             "sunrise-client",
             "sunrise-ctl",
-            "sunrise-perf",
             "sunrise-server",
             "sunrise-port-pack",
         ] {

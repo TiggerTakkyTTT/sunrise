@@ -150,18 +150,17 @@ fn a_text_program_reading_no_expression_uniform_has_none() {
     }
 }
 
-/// Each text program is refused on its own, through the atlas's load: a pack whose see-through
-/// stage alone reads a block that isn't one float loads the GUI's and the world's programs and
-/// refuses the see-through one.
+/// A text program whose stage reads a block that isn't one float fails the load, named by its
+/// pipeline, even when it is the see-through text's alone: the pipeline can't give the block.
 #[test]
-fn a_text_program_reading_a_non_float_expression_block_is_refused_alone() {
+fn a_text_program_reading_a_non_float_expression_block_fails_the_load() {
     let fsh = "#version 330\nlayout(location = 0) out vec4 fragColor;\n\
                #ifdef IS_SEE_THROUGH\nlayout(std140) uniform Missing {\n    vec4 value;\n};\n\
                #else\nconst vec4 value = vec4(1.0);\n#endif\n\
                void main() {\n    fragColor = value;\n}\n"
         .to_owned();
     let (root, defaults) = packs(vsh(false), fsh, Some(r#"{"Other": "1"}"#));
-    let [gui, world, see_through] = text_programs(&root, &defaults);
-    assert!(gui.is_some() && world.is_some());
-    assert!(see_through.is_none());
+    let mut atlas = super::super::HudAtlas::boot();
+    let refused = load_shaders(&mut atlas, &root, &defaults).unwrap_err();
+    assert_eq!(refused.pipeline, "minecraft:pipeline/text_see_through");
 }

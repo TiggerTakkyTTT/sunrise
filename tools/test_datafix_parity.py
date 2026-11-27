@@ -35,14 +35,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import anvil_dump  # noqa: E402
-import parity_shard  # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
-from datafix_paths import writable_root
+sys.path.insert(0, str(ROOT))
+from tools import anvil_dump, datafix_paths, datafix_seeds, datafix_worlds, file_lock, parity_shard
 
-LOCAL = writable_root()
+
+LOCAL = datafix_paths.writable_root()
 WORLDS = LOCAL / 'worlds'
 RUN = LOCAL / 'run'
 
@@ -83,9 +81,7 @@ def world_path(name):
 
 
 def java_classpath():
-    import oracle_harness as harness
-    import test_rust_parity as base
-    import test_model_baking_parity as baking
+    from tools import oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
     lock, jars, _ = base.verify_artifacts()
     libraries = baking.client_libraries()
     build = LOCAL / 'build' / parity_shard.label()  # shards compile apart
@@ -260,14 +256,11 @@ def main():
         return
     if os.environ.get('SUNRISE_DATAFIX_SEEDS_OUTCOME') == 'failure':
         sys.exit('seed preparation failed, see datafix-seeds.log')
-    import datafix_worlds
-    import file_lock
     WORLDS.parent.mkdir(parents=True, exist_ok=True)
-    with open(WORLDS.parent / 'generate.lock', 'w') as handle:
+    with open(WORLDS.parent / 'generate.lock', 'a') as handle:
         file_lock.lock(handle)  # another process may be generating them
         seed_keep = os.environ.get('SUNRISE_DATAFIX_SEED_KEEP')
         if seed_keep:
-            import datafix_seeds
             if not datafix_seeds.snapshot_complete(LOCAL):
                 datafix_seeds.prepare(LOCAL, seed_keep)
         else:

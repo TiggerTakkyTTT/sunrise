@@ -1018,20 +1018,34 @@ fn predicate(t: &Tag, source: Source<'_>) -> Result<Value> {
 pub fn from_component_tag(id: &str, t: &Tag) -> Result<Value> {
     from_component_tag_with(id, t, |_| false)
 }
-/// `ComponentSerialization.CODEC` over NBT, with the owning registry's item names.
-pub fn text_from_tag(t: &Tag, has_item: &dyn Fn(&str) -> bool) -> Result<Value> {
+/// `ComponentSerialization.CODEC` over NBT, with the owning registry's item names and its
+/// component types: a `show_item` hover's components resolve through the built-in types and
+/// `is_native` (the registered mod data components), as `DataComponentPatch.CODEC` resolves
+/// them through `BuiltInRegistries.DATA_COMPONENT_TYPE`, mod types included.
+pub fn text_from_tag(
+    t: &Tag,
+    is_native: &dyn Fn(&str) -> bool,
+    has_item: &dyn Fn(&str) -> bool,
+) -> Result<Value> {
     text(
         t,
         Source {
+            is_native,
             has_item: Some(has_item),
             ..Source::SAVED
         },
     )
 }
 
-/// `Style.Serializer.CODEC` over NBT. Shares the field decoders used by `text_from_tag`.
-pub fn validate_text_style(t: &Tag, has_item: &dyn Fn(&str) -> bool) -> Result<()> {
+/// `Style.Serializer.CODEC` over NBT. Shares the field decoders used by `text_from_tag`,
+/// including its component types.
+pub fn validate_text_style(
+    t: &Tag,
+    is_native: &dyn Fn(&str) -> bool,
+    has_item: &dyn Fn(&str) -> bool,
+) -> Result<()> {
     let source = Source {
+        is_native,
         has_item: Some(has_item),
         ..Source::SAVED
     };
@@ -2504,11 +2518,14 @@ mod tests {
             decoded.to_component_tag("custom_name").unwrap(),
             no_separator
         );
-        assert_eq!(text_from_tag(&nbt, &|_| false).unwrap(), decoded);
+        assert_eq!(
+            text_from_tag(&nbt, &|_| false, &|_| false).unwrap(),
+            decoded
+        );
 
         let selector = parse(r#"{selector:"@s",separator:{text:1}}"#);
         assert!(from_component_tag("custom_name", &selector).is_err());
-        assert!(text_from_tag(&selector, &|_| false).is_err());
+        assert!(text_from_tag(&selector, &|_| false, &|_| false).is_err());
     }
 
     #[test]
@@ -2528,7 +2545,7 @@ mod tests {
                 r#"{player:{name:"Steve"}}"#,
             ),
         ] {
-            let value = text_from_tag(&parse(input), &|_| false).unwrap();
+            let value = text_from_tag(&parse(input), &|_| false, &|_| false).unwrap();
             assert_eq!(
                 value.to_component_tag("custom_name").unwrap(),
                 parse(expected)

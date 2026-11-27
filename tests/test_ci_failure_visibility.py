@@ -8,9 +8,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tests.test_ci_concurrency import yaml, ROOT
+from tests.git_fixture import isolated_git_env
+from tests.os_support import needs_runner_shell, needs_symlinks
+from tests.test_ci_concurrency import ROOT
 from tests.test_ignored_test_completion import IgnoredTests, target, summary
 from tools.ci import ignored_tests
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 
 class Visibility(unittest.TestCase):
@@ -82,18 +87,21 @@ class Visibility(unittest.TestCase):
             self.assertNotIn('len=3', log)
             self.assertNotIn('index=4', log)
 
+    @needs_symlinks
     def test_source_comes_from_head_not_private_worktree(self):
         with tempfile.TemporaryDirectory() as folder:
             old = os.getcwd()
             try:
                 os.chdir(folder)
-                subprocess.run(["git", "init", "-q"], check=True)
+                env = isolated_git_env()
+                subprocess.run(["git", "init", "-q"], env=env, check=True)
                 path = Path("crates/example/src/lib.rs")
                 path.parent.mkdir(parents=True)
                 path.write_text('panic!("checked-in reason");\n')
                 Path("crates/link.rs").symlink_to("/tmp/private.rs")
-                subprocess.run(["git", "add", str(path), "crates/link.rs"], check=True)
-                subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"], check=True)
+                subprocess.run(["git", "add", str(path), "crates/link.rs"], env=env, check=True)
+                subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                                "commit", "-qm", "fixture"], env=env, check=True)
                 path.write_text("PRIVATE_WORKTREE")
                 Path("crates/private.rs").write_text("PRIVATE_UNTRACKED")
                 ignored_tests.source_lines.cache_clear()
@@ -156,6 +164,7 @@ class Visibility(unittest.TestCase):
         self.assertLess(len(log.getvalue()), 7500)
         self.assertNotIn("private unexpected payload", log.getvalue())
 
+    @needs_runner_shell
     def test_data_end_memory_telemetry_is_bounded_best_effort(self):
         steps = yaml.safe_load((ROOT / '.github/workflows/ignored-tests.yml').read_text())["jobs"]["ignored-tests-shards"]["steps"]
         step = next(s for s in steps if s.get("name") == "Record data-leg end and compiler cache")
@@ -198,6 +207,7 @@ class Visibility(unittest.TestCase):
         self.assertIn("!cancelled()", native["if"])
         self.assertNotIn("success()", native["if"])
 
+    @needs_runner_shell
     def test_server_lint_failure_fails_the_step(self):
         # A failing server lint must propagate non-zero exit and print its output unfolded.
         steps = yaml.safe_load((ROOT / '.github/workflows/dyna-ci.yml').read_text())["jobs"]["lint"]["steps"]

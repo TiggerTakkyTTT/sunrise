@@ -27,17 +27,11 @@ import subprocess
 import sys
 import zipfile
 
-try:
-    from . import lab, test_rust_parity as base
-    from .integration_env import run_game
-    from . import command_exec_corpus as corpus_module
-    from . import seed_agent
-except ImportError:
-    import lab
-    import seed_agent
-    from integration_env import run_game
-    import test_rust_parity as base
-    import command_exec_corpus as corpus_module
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.integration_env import run_game
+from tools import command_exec_corpus as corpus_module, seed_agent
 
 SEED = 1
 
@@ -262,10 +256,7 @@ def main():
         groups = [g for g in groups if g[0] not in corpus_module.ISOLATED_SHULKER_LOCK]
         groups = [g for g in groups if g[0] not in corpus_module.ISOLATED_POT_HOPPER]
     if args.vehicle_container_diagnostic:
-        try:
-            from .vehicle_container_corpus import vehicle_containers
-        except ImportError:
-            from vehicle_container_corpus import vehicle_containers
+        from tools.vehicle_container_corpus import vehicle_containers
         groups = [(name, vehicle_containers(corpus_module.cmd, diagnostic=True)
                    if name == 'vehicle container saved fields' else ops) for name, ops in groups]
     if args.macro_source_type_fixture or args.only == "macro source type error":
@@ -289,10 +280,7 @@ def main():
     if not args.only and not args.wolf_anger_clock_diagnostic:
         groups = [(name, ops) for name, ops in groups if name not in corpus_module.ISOLATED_WOLF_ANGER]
     if args.wolf_anger_clock_diagnostic:
-        try:
-            from .wolf_anger_corpus import groups as anger_groups
-        except ImportError:
-            from wolf_anger_corpus import groups as anger_groups
+        from tools.wolf_anger_corpus import groups as anger_groups
         groups = [('setup', corpus_module.group_setup()),
                   *anger_groups(corpus_module.cmd, corpus_module.setup, clock_diagnostic=True)]
     isolated_reinforcements = corpus_module.ISOLATED_REINFORCEMENTS
@@ -350,104 +338,62 @@ def main():
         groups = [('setup', corpus_module.group_setup()),
                   ('sulfur powered-load diagnostic', corpus_module.sulfur_cube_fuse_ticks(True))]
     if args.hurt_cooldown_incoming_fixture:
-        try:
-            from .hurt_cooldown_incoming_corpus import hurt_cooldown_incoming
-        except ImportError:
-            from hurt_cooldown_incoming_corpus import hurt_cooldown_incoming
+        from tools.hurt_cooldown_incoming_corpus import hurt_cooldown_incoming
         groups = [('setup', corpus_module.group_setup()), ('hurt cooldown incoming', hurt_cooldown_incoming())]
     if args.level_world_border_fixture:
-        try:
-            from .level_world_border_corpus import level_world_border
-        except ImportError:
-            from level_world_border_corpus import level_world_border
+        from tools.level_world_border_corpus import level_world_border
         groups = [('setup', corpus_module.group_setup()), ('level world border', level_world_border())]
     if args.trader_llama_discard_fixture:
-        try:
-            from .trader_llama_discard_corpus import trader_llama_discard
-        except ImportError:
-            from trader_llama_discard_corpus import trader_llama_discard
+        from tools.trader_llama_discard_corpus import trader_llama_discard
         groups = [('setup', corpus_module.group_setup()), ('trader llama discard', trader_llama_discard())]
     if args.map_decoration_namespace_fixture:
-        try:
-            from .map_decoration_namespace_corpus import map_decoration_namespaces
-        except ImportError:
-            from map_decoration_namespace_corpus import map_decoration_namespaces
+        from tools.map_decoration_namespace_corpus import map_decoration_namespaces
         groups = [("setup", corpus_module.group_setup()), ("map decoration namespaces", map_decoration_namespaces(args.map_decoration_empty_diagnostic))]
     if args.armor_stand_honey_fixture:
-        try:
-            from .armor_stand_honey_corpus import armor_stand_honey
-        except ImportError:
-            from armor_stand_honey_corpus import armor_stand_honey
+        from tools.armor_stand_honey_corpus import armor_stand_honey
         groups = [("setup", corpus_module.group_setup()), ("armor stand honey slide", armor_stand_honey())]
     if args.mob_quad_fixture:
-        try:
-            from .mob_quad_leash_corpus import mob_quad_leash
-        except ImportError:
-            from mob_quad_leash_corpus import mob_quad_leash
+        from tools.mob_quad_leash_corpus import mob_quad_leash
         groups = [('setup', corpus_module.group_setup()), ('mob quad leash dispatch', mob_quad_leash(args.mob_quad_raw_diagnostic))]
     if args.item_merge_diagnostic:
-        try:
-            from .item_merge_corpus import stack_limit_merges
-        except ImportError:
-            from item_merge_corpus import stack_limit_merges
+        from tools.item_merge_corpus import stack_limit_merges
         groups = [('setup', corpus_module.group_setup()),
                   ('item stack-size override merges',
                    stack_limit_merges(corpus_module.cmd, corpus_module.setup, diagnostic=True))]
     if args.orb_water_fixture:
-        try:
-            from .orb_water_corpus import orb_water, arithmetic_inputs
-        except ImportError:
-            from orb_water_corpus import orb_water, arithmetic_inputs
+        from tools.orb_water_corpus import orb_water, arithmetic_inputs
         groups = [('setup', corpus_module.group_setup()), ('orb underwater arithmetic', orb_water(args.orb_water_raw_diagnostic))]
     if args.orb_lava_fixture:
-        try:
-            from .orb_lava_corpus import orb_lava
-        except ImportError:
-            from orb_lava_corpus import orb_lava
+        from tools.orb_lava_corpus import orb_lava
         groups = [('setup', corpus_module.group_setup()),
                   ('orb lava contact', orb_lava(args.orb_lava_raw_diagnostic))]
     if args.falling_first_tick_fixture:
-        try:
-            from .falling_first_tick_corpus import falling_first_tick
-        except ImportError:
-            from falling_first_tick_corpus import falling_first_tick
+        from tools.falling_first_tick_corpus import falling_first_tick
         groups = [('setup', corpus_module.group_setup()), ('falling first tick', falling_first_tick())]
     if args.orb_fire_fixture:
-        try:
-            from .orb_fire_corpus import orb_fire
-        except ImportError:
-            from orb_fire_corpus import orb_fire
+        from tools.orb_fire_corpus import orb_fire
         groups = [('setup', corpus_module.group_setup()), ('orb fire', orb_fire())]
     if args.lava_fire_fixture:
-        try:
-            from .lava_fire_corpus import lava_fire
-        except ImportError:
-            from lava_fire_corpus import lava_fire
+        from tools.lava_fire_corpus import lava_fire
         groups = [('setup', corpus_module.group_setup()), ('lava fire', lava_fire())]
     if args.mob_home_fixture:
-        try:
-            from .mob_home_corpus import mob_home
-        except ImportError:
-            from mob_home_corpus import mob_home
+        from tools.mob_home_corpus import mob_home
         groups = [('setup', corpus_module.group_setup()), ('mob home NBT', mob_home(args.mob_home_holder_removal_diagnostic, args.mob_home_late_detach_control))]
     if args.item_contents_fixture:
-        try:
-            from .item_contents_corpus import item_contents
-        except ImportError:
-            from item_contents_corpus import item_contents
+        from tools.item_contents_corpus import item_contents
         groups = [('setup', corpus_module.group_setup()), ('item component contents', item_contents(args.item_contents_provider_empty_control))]
     if args.boat_item_hit_fixture:
-        from boat_item_hit_corpus import boat_item_hits
+        from tools.boat_item_hit_corpus import boat_item_hits
         groups = [('boat item hit', boat_item_hits(args.boat_motion_diagnostic))]
     if args.stand_entity_collision_fixture:
-        from stand_entity_collision_corpus import stand_entity_collisions
+        from tools.stand_entity_collision_corpus import stand_entity_collisions
         groups = [('stand entity collisions', stand_entity_collisions())]
     if args.pufferfish_mob_fixture:
-        from pufferfish_mob_contact_corpus import mob_contacts, overlapping_cod_control
+        from tools.pufferfish_mob_contact_corpus import mob_contacts, overlapping_cod_control
         groups = [("pufferfish mob contact", overlapping_cod_control() if args.pufferfish_mob_overlap_control
                    else mob_contacts(args.pufferfish_mob_duration_diagnostic))]
     if args.pufferfish_contact_fixture:
-        from pufferfish_contact_corpus import contact_fixture
+        from tools.pufferfish_contact_corpus import contact_fixture
         groups = [("pufferfish player contact", contact_fixture(args.pufferfish_body_diagnostic))]
     if args.only in ('hopper pot saved slot', 'shulker external lock drop'):
         groups = [g for g in groups if g[0] == args.only]
@@ -466,7 +412,7 @@ def main():
     if args.only in corpus_module.ISOLATED_JUKEBOX_CLOCK:
         groups = [g for g in groups if g[0] == args.only]
     if args.vehicle_kill_diagnostic:
-        from vehicle_kill_corpus import vehicle_kill_contents
+        from tools.vehicle_kill_corpus import vehicle_kill_contents
         groups = [('setup', corpus_module.group_setup()), ('vehicle kill contents', vehicle_kill_contents(corpus_module.cmd, True))]
     if args.only in corpus_module.ISOLATED_ITEM_COUNT:
         groups = [g for g in groups if g[0] == args.only]
@@ -486,69 +432,69 @@ def main():
     if any(name in isolated_recipes for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
         parser.error('crafting recipe fixtures require --only with one exact group')
     if args.piglin_anger_memory_fixture:
-        from piglin_anger_memory_corpus import piglin_anger_memory
+        from tools.piglin_anger_memory_corpus import piglin_anger_memory
         groups = [('setup', corpus_module.group_setup()), ('piglin live anger memory', piglin_anger_memory(args.piglin_anger_raw_diagnostic, args.piglin_anger_memory_diagnostic))]
     if args.map_decoration_patch_fixture:
-        from map_decoration_patch_corpus import map_decoration_patches
+        from tools.map_decoration_patch_corpus import map_decoration_patches
         groups = [('setup', corpus_module.group_setup()), ('map decoration saved patch', map_decoration_patches(args.map_decoration_removal_diagnostic))]
     if args.selector_bounds_fixture:
-        from selector_bounds_corpus import selector_bounds
+        from tools.selector_bounds_corpus import selector_bounds
         groups = [("setup", corpus_module.group_setup()), ("selector entity bounds", selector_bounds())]
     if args.baby_modifier_fixture:
-        from baby_modifier_corpus import baby_modifier
+        from tools.baby_modifier_corpus import baby_modifier
         groups = [('setup', corpus_module.group_setup()), ('baby modifier mutation', baby_modifier(args.baby_modifier_raw_diagnostic))]
     if args.mob_attribute_save_fixture or args.record_oxygen_bonus_witness:
-        from mob_attribute_save_corpus import mob_attribute_save
+        from tools.mob_attribute_save_corpus import mob_attribute_save
         groups = [('setup', corpus_module.group_setup()),
                   ('mob attribute save', mob_attribute_save(
                       args.mob_attribute_save_raw_diagnostic or bool(args.record_oxygen_bonus_witness)))]
     if args.mob_inventory_merge_fixture:
-        from mob_inventory_merge_corpus import mob_inventory_merge
+        from tools.mob_inventory_merge_corpus import mob_inventory_merge
         groups = [('setup', corpus_module.group_setup()), ('mob inventory merge', mob_inventory_merge(args.mob_inventory_merge_raw_diagnostic))]
     if args.summon_passengers_fixture:
-        from summon_passengers_corpus import summon_passengers
+        from tools.summon_passengers_corpus import summon_passengers
         groups = [('setup', corpus_module.group_setup()), ('summon invalid passengers', summon_passengers(args.summon_passengers_raw_diagnostic))]
     if args.summon_uuid_fixture:
-        from summon_uuid_corpus import summon_uuid
+        from tools.summon_uuid_corpus import summon_uuid
         groups = [('setup', corpus_module.group_setup()), ('summon UUID conflicts', summon_uuid(args.summon_uuid_raw_diagnostic, True))]
     if args.mob_absorption_max_fixture:
-        from mob_absorption_max_corpus import mob_absorption_max
+        from tools.mob_absorption_max_corpus import mob_absorption_max
         groups = [('setup', corpus_module.group_setup()), ('mob absorption maximum', mob_absorption_max(args.mob_absorption_max_raw_diagnostic))]
     if args.mob_absorption_max_ops_fixture:
-        from mob_absorption_max_corpus import mob_absorption_max_ops
+        from tools.mob_absorption_max_corpus import mob_absorption_max_ops
         groups = [('setup', corpus_module.group_setup()), ('mob absorption maximum operations', mob_absorption_max_ops())]
     if args.mob_health_boost_fixture:
-        from mob_health_boost_corpus import mob_health_boost
+        from tools.mob_health_boost_corpus import mob_health_boost
         groups = [('setup', corpus_module.group_setup()), ('mob health boost', mob_health_boost(args.mob_health_boost_raw_diagnostic))]
     if args.sulfur_body_attributes_fixture:
-        from sulfur_body_attributes_corpus import sulfur_body_attributes
+        from tools.sulfur_body_attributes_corpus import sulfur_body_attributes
         groups = [('setup', corpus_module.group_setup()), ('sulfur body attributes', sulfur_body_attributes(args.sulfur_body_attributes_raw_diagnostic))]
     if args.sulfur_body_replace_fixture:
-        from sulfur_body_attributes_corpus import sulfur_body_replace
+        from tools.sulfur_body_attributes_corpus import sulfur_body_replace
         groups = [('setup', corpus_module.group_setup()), ('sulfur body replace', sulfur_body_replace())]
     if args.sulfur_body_item_fixture:
-        from sulfur_body_attributes_corpus import sulfur_body_item_replace
+        from tools.sulfur_body_attributes_corpus import sulfur_body_item_replace
         groups = [('setup', corpus_module.group_setup()), ('sulfur body item replace', sulfur_body_item_replace())]
     if args.mob_absorption_fixture:
-        from mob_absorption_corpus import mob_absorption
+        from tools.mob_absorption_corpus import mob_absorption
         groups = [('setup', corpus_module.group_setup()), ('mob depleted absorption', mob_absorption(args.mob_absorption_raw_diagnostic))]
     if args.mob_absorption_infinite_fixture:
-        from mob_absorption_corpus import mob_absorption_infinite
+        from tools.mob_absorption_corpus import mob_absorption_infinite
         groups = [('setup', corpus_module.group_setup()), ('mob infinite absorption', mob_absorption_infinite())]
     if args.boat_leash_view_fixture:
-        from boat_leash_view_corpus import cases as boat_leash_views
+        from tools.boat_leash_view_corpus import cases as boat_leash_views
         groups = [('setup', corpus_module.group_setup()),
                   ('boat live leash view', boat_leash_views(corpus_module.cmd, corpus_module.setup))]
     if args.merchant_crafted_fixture:
-        from merchant_crafted_corpus import cases
+        from tools.merchant_crafted_corpus import cases
         groups = [('merchant crafted statistics', cases())]
     if args.mob_name_presentation_diagnostic:
-        from mob_name_predicate_corpus import cases as mob_name_predicates
+        from tools.mob_name_predicate_corpus import cases as mob_name_predicates
         groups = [('setup', corpus_module.group_setup()),
                   ('mob custom name components', mob_name_predicates(
                       corpus_module.cmd, corpus_module.setup, presentation_diagnostic=True))]
     if args.merchant_gate_fixture:
-        from merchant_gate_corpus import cases
+        from tools.merchant_gate_corpus import cases
         groups = [('setup', [corpus_module.cmd('/tick freeze', False), *corpus_module.group_setup()]), ('merchant reputation AI gate', cases())]
     if args.groups_file:
         # Generated scripts (tools/parity_fuzz.py): the common setup, then the file's [name, ops] groups only.
@@ -573,10 +519,7 @@ def main():
     functions = corpus_module.function_return_fixtures([name for name, _ in groups])
     recipes = corpus_module.crafting_priority_recipes([name for name, _ in groups])
     if any(name == 'transmute result patches' for name, _ in groups):
-        try:
-            from .transmute_patch_corpus import fixture_recipes
-        except ImportError:
-            from transmute_patch_corpus import fixture_recipes
+        from tools.transmute_patch_corpus import fixture_recipes
         recipes.update(fixture_recipes())
     advancements = corpus_module.advancement_reward_fixtures([name for name, _ in groups])
     loot_advancements, loot_tables = corpus_module.advancement_loot_fixtures([name for name, _ in groups])
@@ -590,7 +533,7 @@ def main():
             ]}]}
 
     if args.pufferfish_contact_fixture:
-        from pufferfish_contact_corpus import advancements as contact_advancements
+        from tools.pufferfish_contact_corpus import advancements as contact_advancements
         advancements.update(contact_advancements())
 
     run(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-cp', str(jars['server']) + os.pathsep + dependency_path, '-d', classes, oracle], 'compile-java')
@@ -656,7 +599,7 @@ def main():
         return
 
     if any(op['op'] == 'raid_state' for op in script):
-        from raid_village_corpus import validate_java_inputs
+        from tools.raid_village_corpus import validate_java_inputs
         validate_java_inputs(build, script)
 
     if args.orb_water_fixture:
@@ -692,7 +635,7 @@ def main():
             print(f'Recorded {lock["minecraft"]["version"]} shulker motion witness: {args.record_shulker_motion}')
             return
         if args.record_oxygen_bonus_witness:
-            from mob_attribute_save_corpus import record_oxygen_bonus_witness
+            from tools.mob_attribute_save_corpus import record_oxygen_bonus_witness
             record_oxygen_bonus_witness(reference, lock['minecraft']['version'], args.record_oxygen_bonus_witness)
             print(f'Recorded oxygen_bonus witness: {args.record_oxygen_bonus_witness}')
         if args.record_stand_living_witness:
@@ -820,7 +763,7 @@ def main():
     run([binary, '--resources', lab.RESOURCES, '--world', 'harness', '--seed', SEED, '--radius', 2 if args.loaded_fixture else 4], 'rust', game=True, cwd=rust_dir, env=env)
 
     if any(op['op'] == 'raid_state' for op in script):
-        from raid_village_corpus import validate_native_inputs
+        from tools.raid_village_corpus import validate_native_inputs
         if args.raid_release_command_diagnostic:
             print('REJECTED admission prerequisite diagnostic: native release tree vs Java development tree; not H162 loss evidence')
         else:

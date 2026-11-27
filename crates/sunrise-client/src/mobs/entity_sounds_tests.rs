@@ -263,7 +263,8 @@ fn entity_sounds_malformed_row_reports_entity_id() {
                 "entities": {},
             }))
             .unwrap();
-        let Err(error) = MobTypes::load_for_server(dir.path(), &attributes) else {
+        let Err(error) = MobTypes::load_for_server(dir.path(), &std::sync::Arc::new(attributes))
+        else {
             panic!("malformed sounds were admitted by the entity loader");
         };
         assert!(error.to_string().contains("bird:vulture"), "{error}");
@@ -426,7 +427,7 @@ fn entity_sounds_declared_interval_replaces_the_templates_at_load() {
         "entities": {},
     }))
     .unwrap();
-    let types = MobTypes::load_for_server(dir.path(), &attributes).unwrap();
+    let types = MobTypes::load_for_server(dir.path(), &std::sync::Arc::new(attributes)).unwrap();
     let vulture = &types.types["bird:vulture"];
     assert_eq!(
         declared_step(&vulture.sound_overrides),

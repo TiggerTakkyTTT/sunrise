@@ -25,6 +25,41 @@ pub mod block_changed {
     }
 }
 
+pub mod break_progress {
+    use mod_api::{ClientBreakProgressEvent, ClientHost, Hooks};
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    /// The crack stage last shown on the block the player mines, -1 for none.
+    #[derive(Default)]
+    struct MiningHelper {
+        stage: AtomicI32,
+    }
+
+    #[mod_api::sunrise_mod]
+    impl Hooks for MiningHelper {
+        // ANCHOR: client_break_progress
+        fn client_break_progress(
+            &self,
+            host: &dyn ClientHost,
+            event: &mut ClientBreakProgressEvent<'_>,
+        ) {
+            let own = host
+                .local_player()
+                .is_some_and(|player| u32::try_from(event.breaker) == Ok(player.entity().id()));
+            if own {
+                // 0 to 9 is a crack stage; any other value means the crack went.
+                let stage = if (0..10).contains(&event.progress) {
+                    event.progress
+                } else {
+                    -1
+                };
+                self.stage.store(stage, Ordering::Relaxed);
+            }
+        }
+        // ANCHOR_END: client_break_progress
+    }
+}
+
 pub mod connected {
     use mod_api::{LevelRef, LevelWriteError, ServerHost};
 

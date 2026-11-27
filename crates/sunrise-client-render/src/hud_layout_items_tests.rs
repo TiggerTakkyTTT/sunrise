@@ -156,7 +156,7 @@ fn every_blit_blend_draws_with_its_blend() {
 }
 
 #[test]
-fn paints_gui_packed_live_and_registered_atlas_sprites_from_separate_lookups() {
+fn paints_gui_packed_and_registered_atlas_sprites_from_separate_lookups() {
     let root = std::env::temp_dir().join(format!("sunrise-layout-atlases-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let sheet = root.join("assets/demo/textures/item");
@@ -192,7 +192,7 @@ fn paints_gui_packed_live_and_registered_atlas_sprites_from_separate_lookups() {
             {"type":"minecraft:filter","pattern":{"namespace":"demo","path":"item/modeled"}}]}"#,
     )
     .unwrap();
-    let mut atlas = HudAtlas::build(&crate::resource_source::ResourceSource::directory(
+    let atlas = HudAtlas::build(&crate::resource_source::ResourceSource::directory(
         root.clone(),
     ))
     .unwrap();
@@ -220,20 +220,6 @@ fn paints_gui_packed_live_and_registered_atlas_sprites_from_separate_lookups() {
         [model.u0, model.v0],
         "the block atlas's sprite"
     );
-    // A live texture at the model's name: a `Blit` takes the live one; an `AtlasSprite`
-    // still uses the packed model.
-    let live = atlas.sprites["sunrise/white"];
-    atlas.live.insert("demo:item/modeled".into(), live);
-    let live_blit = blit("demo:item/modeled", Blend::Textured, [8, 8]);
-    let mut batch = HudBatch::scratch([64, 64]);
-    paint(&mut batch, &atlas, &[live_blit, block]);
-    assert_eq!(batch.vertices[0].uv, [live.u0, live.v0], "the live texture");
-    assert_eq!(
-        batch.vertices[6].uv,
-        [model.u0, model.v0],
-        "the packed sprite"
-    );
-    assert_ne!([live.u0, live.v0], [model.u0, model.v0]);
     // A registered atlas's sprite no packed sprite shares its name with draws as a `Blit`.
     let name = "demo:gui/atlases/icons/demo/heart";
     let registered = atlas.registered[name];

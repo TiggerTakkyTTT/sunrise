@@ -69,14 +69,10 @@ import time
 import urllib.request
 import zipfile
 
-try:
-    from . import lab, runtime, test_rust_parity as base
-except ImportError:
-    import lab
-    import runtime
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, runtime, test_rust_parity as base
 
-ROOT = lab.ROOT
 EXE = '.exe' if os.name == 'nt' else ''
 # Where sunrise-server and sunrise-bots are (the engine is found beside sunrise-server or on the PATH).
 BIN = Path(os.environ.get('SUNRISE_BENCH_BIN', ROOT / 'target/release'))

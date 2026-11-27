@@ -78,10 +78,10 @@ mod tests {
     use super::*;
     struct Context;
     impl crate::LoopContext for Context {
-        fn is_in_tag(&self, _: crate::ItemKey, _: crate::TagKey) -> Option<bool> {
+        fn is_in_tag(&self, _: crate::ItemKey, _: crate::TagKey<crate::ItemKey>) -> Option<bool> {
             None
         }
-        fn items_in_tag(&self, _: crate::TagKey) -> Option<&[crate::ItemKey]> {
+        fn items_in_tag(&self, _: crate::TagKey<crate::ItemKey>) -> Option<&[crate::ItemKey]> {
             None
         }
         fn side(&self) -> crate::LoopSide {

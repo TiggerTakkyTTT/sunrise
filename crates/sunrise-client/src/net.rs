@@ -8,6 +8,69 @@
 //! encrypts the connection (ClientHandshakePacketListenerImpl.handleHello).
 use crate::auth::AuthSession;
 mod client_inbox;
+
+#[cfg(test)]
+mod client_payload_test_support {
+    use crate::raw_payloads::connection::record_overhead;
+    use crate::raw_payloads::{Side, Transport};
+    use mod_api::{
+        Hooks, IPayloadContext, IPayloadHandler, ModEntry, PayloadBytes, PayloadId, Registrar,
+    };
+    use std::sync::Arc;
+    pub(super) const CHANNEL: &str = "raw_hub_probe:message";
+    struct Probe;
+    impl IPayloadHandler for Probe {
+        fn handle(
+            &self,
+            _: PayloadBytes,
+            _: &mut dyn IPayloadContext,
+        ) -> Result<(), mod_api::PayloadHandleError> {
+            Ok(())
+        }
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn register(&self, registrar: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+            registrar
+                .payload_handlers()
+                .registrar("1")
+                .play_to_server(PayloadId(CHANNEL.into()), Arc::new(Probe));
+        }
+    }
+    pub(super) fn with_peer<R>(run: impl FnOnce(Arc<Transport>) -> R) -> R {
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new("raw_hub_probe", Box::new(Probe))].into(),
+            || {
+                mod_platform::__private::part_tests::install_parts_fixture(
+                    mod_api::__private::mods(),
+                )
+                .unwrap();
+                let transport = Transport::capture(Side::Server, record_overhead(&[])).unwrap();
+                assert!(
+                    transport.local.owns(CHANNEL),
+                    "fixture declaration was not installed"
+                );
+                transport
+                    .accept(transport.local.manifest.entries())
+                    .unwrap();
+                transport.finish_configuration().unwrap();
+                run(transport)
+            },
+        )
+    }
+    pub(super) fn with_client<R>(run: impl FnOnce(Arc<Transport>) -> R) -> R {
+        mod_platform::testing::with_mods(
+            vec![ModEntry::new("raw_hub_probe", Box::new(Probe))].into(),
+            || {
+                mod_platform::__private::part_tests::install_parts_fixture(
+                    mod_api::__private::mods(),
+                )
+                .unwrap();
+                run(Transport::capture(Side::Client, record_overhead(&[])).unwrap())
+            },
+        )
+    }
+}
 pub use client_inbox::{ClientTask, ClientTasks};
 #[cfg(test)]
 #[path = "net/bundle_tests.rs"]
@@ -16,7 +79,7 @@ mod configuration;
 pub use configuration::ConfigurationTask;
 use configuration::{Action as ConfigurationAction, Configuration};
 mod held_packets;
-pub mod ingress;
+pub use crate::raw_payloads::ingress;
 mod known_packs;
 mod play_bundle;
 use known_packs::{fill_known_entries, select_known_packs};
@@ -24,9 +87,8 @@ pub use play_bundle::{BundleMember, BundleStep, CompletedBundle};
 #[cfg(test)]
 #[path = "net/mod_packet_tests.rs"]
 mod mod_packet_tests;
-pub(crate) mod queued_writer;
-use queued_writer::{PrepareRefusal, QueuedWriter, SendFailure};
-pub use queued_writer::{PreparedPacket, PreparedPayload};
+use crate::raw_payloads::queued_writer::{PrepareRefusal, QueuedWriter, SendFailure};
+pub use crate::raw_payloads::queued_writer::{PreparedPacket, PreparedPayload};
 #[cfg(test)]
 use std::sync::mpsc::channel;
 use std::{
@@ -48,7 +110,7 @@ use sunrise_protocol::{
     registry::Dynamic,
     rsa::RsaPublicKey,
     servers::parse_address,
-    text::{Language, plain, translatable},
+    text::{Language, plain, plain_with, translatable},
 };
 use {
     sunrise_core::nbt::{JavaString, Tag},
@@ -294,6 +356,110 @@ impl Event {
     }
 }
 
+/// Staging margin for the client's ordered event union and its delivery record.
+pub(crate) const PAYLOAD_RECORD_OVERHEAD: usize =
+    crate::raw_payloads::connection::record_overhead(&[std::mem::size_of::<Event>()]);
+
+/// A client session's payload output: the queued writer and its ordered event
+/// stream, in the raw-payload rules' terms.
+pub(crate) struct PayloadOutput {
+    writer: Arc<Mutex<Option<QueuedWriter>>>,
+    configuring: Arc<AtomicBool>,
+    transport: Arc<crate::raw_payloads::Transport>,
+    events: ingress::Producer<Event>,
+}
+impl crate::raw_payloads::Output for PayloadOutput {
+    fn transport(&self) -> &Arc<crate::raw_payloads::Transport> {
+        &self.transport
+    }
+    fn side(&self) -> crate::raw_payloads::Side {
+        crate::raw_payloads::Side::Client
+    }
+    fn admit(
+        &self,
+        phase: sunrise_protocol::payload_negotiation::Phase,
+        id: &mod_api::PayloadId,
+    ) -> Result<Box<dyn crate::raw_payloads::Admission>, mod_api::PayloadSendError> {
+        if self.configuring.load(Ordering::Acquire)
+            != (phase == sunrise_protocol::payload_negotiation::Phase::Configuration)
+        {
+            return Err(mod_api::PayloadSendError::WrongProtocol(id.clone()));
+        }
+        let writer = self.writer.lock().unwrap().as_ref().cloned();
+        Ok(Box::new(WriterAdmission(
+            writer.ok_or(mod_api::PayloadSendError::Disconnected)?,
+        )))
+    }
+    fn disconnect(&self, reason: &crate::text::Text) {
+        let writer = self.writer.lock().unwrap();
+        let _ = self.events.send_terminal(Event::Disconnected {
+            reason: reason.plain(),
+            key: None,
+            from_server: false,
+            after_login: true,
+        });
+        if let Some(writer) = writer.as_ref() {
+            if self.configuring.load(Ordering::Acquire) {
+                writer.shutdown();
+            } else {
+                writer.close_after_pending();
+            }
+        }
+    }
+    #[cfg(any(test, feature = "test-payload-probe"))]
+    fn diagnostics(&self) -> Box<dyn Fn() -> String + Send + Sync> {
+        let writer = Arc::downgrade(&self.writer);
+        Box::new(move || {
+            let Some(writer) = writer.upgrade() else {
+                return "writer handle owner dropped".into();
+            };
+            match writer.try_lock() {
+                Ok(w) => {
+                    let current = w.clone();
+                    drop(w);
+                    current
+                        .map(|w| w.diagnostics())
+                        .unwrap_or_else(|| "writer absent".into())
+                }
+                Err(_) => "writer handle busy/poisoned".into(),
+            }
+        })
+    }
+}
+/// One captured client writer: preflight and the reservation use the same one.
+struct WriterAdmission(QueuedWriter);
+impl crate::raw_payloads::Admission for WriterAdmission {
+    fn framing(&self) -> sunrise_protocol::connection::Framing {
+        self.0.framing()
+    }
+    fn capacity(&self) -> usize {
+        self.0.payload_capacity()
+    }
+    fn accepts_packets(&self) -> bool {
+        self.0.accepts_packets()
+    }
+    fn prepare(
+        self: Box<Self>,
+        body: Vec<u8>,
+        id: &mod_api::PayloadId,
+    ) -> Result<Box<dyn crate::raw_payloads::PreparedSend>, mod_api::PayloadSendError> {
+        self.0
+            .prepare_payload(body, id)
+            .map(|prepared| Box::new(prepared) as Box<dyn crate::raw_payloads::PreparedSend>)
+    }
+}
+impl crate::raw_payloads::ClientEvent for Event {
+    fn raw_payload(incoming: crate::raw_payloads::Incoming) -> Self {
+        Self::RawPayload(Box::new(incoming))
+    }
+    fn into_raw_payload(self) -> crate::raw_payloads::Incoming {
+        let Self::RawPayload(incoming) = self else {
+            unreachable!("only a raw payload event is taken back")
+        };
+        *incoming
+    }
+}
+
 pub struct Session {
     events: ingress::Consumer<Event>,
     payload_events: ingress::Producer<Event>,
@@ -317,6 +483,8 @@ pub struct Session {
     pings: PingSamples,
     /// This connection's number, new for each one ([`Session::serial`]).
     serial: u64,
+    /// The one payload output this session shares with every endpoint it hands out.
+    payload_output: std::sync::OnceLock<Arc<dyn crate::raw_payloads::Output>>,
 }
 /// The next [`Session::serial`].
 static NEXT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -431,6 +599,7 @@ impl Session {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         }
     }
     fn start(
@@ -447,8 +616,10 @@ impl Session {
     ) -> Self {
         let (send, events) = event_channel();
         let payload_events = send.clone();
-        let captured_payloads =
-            crate::raw_payloads::Transport::capture(crate::raw_payloads::Side::Client);
+        let captured_payloads = crate::raw_payloads::Transport::capture(
+            crate::raw_payloads::Side::Client,
+            crate::net::PAYLOAD_RECORD_OVERHEAD,
+        );
         let payloads = captured_payloads
             .as_ref()
             .cloned()
@@ -532,6 +703,7 @@ impl Session {
             recorder,
             pings,
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         }
     }
     /// Validate an untrusted mod packet once, reserve its physical writer credit,
@@ -688,12 +860,15 @@ impl Session {
     }
     /// Physical reply target, preserving this session's ordered event stream.
     pub fn payload_endpoint(&self) -> crate::raw_payloads::Endpoint {
-        crate::raw_payloads::Endpoint::client(
-            self.writer.clone(),
-            self.configuring.clone(),
-            self.payloads.clone(),
-            self.payload_events.clone(),
-        )
+        let output = self.payload_output.get_or_init(|| {
+            Arc::new(PayloadOutput {
+                writer: self.writer.clone(),
+                configuring: self.configuring.clone(),
+                transport: self.payloads.clone(),
+                events: self.payload_events.clone(),
+            })
+        });
+        crate::raw_payloads::Endpoint::shared(output.clone())
     }
     /// This physical session's frozen declarations and current epoch.
     pub fn payload_transport(&self) -> &Arc<crate::raw_payloads::Transport> {
@@ -956,7 +1131,17 @@ impl Reason {
     fn component(reason_json: &str, lang: &Language) -> Self {
         match serde_json::from_str::<serde_json::Value>(reason_json) {
             Ok(v) => Self {
-                text: json_text(&v, lang),
+                text: if crate::lang::has_mod_entries() {
+                    let current = crate::lang::current();
+                    json_text_with(&v, |key| {
+                        current
+                            .as_deref()
+                            .and_then(|published| published.mod_entry(key))
+                            .or_else(|| lang.get(key).map(String::as_str))
+                    })
+                } else {
+                    json_text(&v, lang)
+                },
                 key: v["translate"].as_str().map(str::to_owned),
                 from_server: true,
             },
@@ -990,7 +1175,17 @@ impl Reason {
             _ => None,
         };
         Self {
-            text: plain(tag, lang),
+            text: if crate::lang::has_mod_entries() {
+                let current = crate::lang::current();
+                plain_with(tag, |key| {
+                    current
+                        .as_deref()
+                        .and_then(|published| published.mod_entry(key))
+                        .or_else(|| lang.get(key).map(String::as_str))
+                })
+            } else {
+                plain(tag, lang)
+            },
             key,
             from_server: true,
         }
@@ -1852,6 +2047,14 @@ fn receive_play(
     let mut io = new_listener();
     let mut bundle = PlayBundle::default();
     loop {
+        #[cfg(feature = "test-support")]
+        if !bundle.assembling() {
+            // Report only packets whose ingress work (including a complete bundle) has been published.
+            let counters = &reader.counters;
+            counters
+                .play_ingress_received
+                .store(counters.received.load(Ordering::Relaxed), Ordering::Release);
+        }
         let (id, payload) = reader.recv().map_err(|e| connection_lost(e, lang))?;
         let decode_names = ClientboundDecodeNames {
             registries: registries.as_ref(),
@@ -2026,17 +2229,19 @@ fn receive_play(
                 io.handle(PlayIoAction::FarTile(p.data));
             }
             play::Clientbound::CustomPayload(payload) => {
-                let endpoint = crate::raw_payloads::Endpoint::client(
-                    shared_writer.clone(),
-                    configuring.clone(),
-                    payloads.clone(),
-                    send.clone(),
-                );
                 if let Some(payload) = receive_application(
-                    &endpoint,
+                    payloads,
                     sunrise_protocol::payload_negotiation::Phase::Play,
                     payload,
                     send,
+                    || {
+                        crate::raw_payloads::Endpoint::new(PayloadOutput {
+                            writer: shared_writer.clone(),
+                            configuring: configuring.clone(),
+                            transport: payloads.clone(),
+                            events: send.clone(),
+                        })
+                    },
                 )? {
                     send.send_wait(Event::Packet(Box::new(play::Clientbound::CustomPayload(
                         payload,
@@ -2053,21 +2258,23 @@ fn receive_play(
     }
 }
 
+/// Classify before building the output: a passthrough payload never allocates one.
 fn receive_application(
-    endpoint: &crate::raw_payloads::Endpoint,
+    payloads: &Arc<crate::raw_payloads::Transport>,
     phase: sunrise_protocol::payload_negotiation::Phase,
     payload: cfg::CustomPayload,
     send: &ingress::Producer<Event>,
+    endpoint: impl FnOnce() -> crate::raw_payloads::Endpoint,
 ) -> Result<Option<cfg::CustomPayload>, Reason> {
-    match crate::raw_payloads::Incoming::classify(endpoint.transport(), phase, payload)
+    match crate::raw_payloads::Incoming::classify(payloads, phase, payload)
         .map_err(|error| Reason::plain(error.to_string()))?
     {
         crate::raw_payloads::Classified::Other(payload) => Ok(Some(payload)),
         crate::raw_payloads::Classified::Application(incoming) => {
-            crate::raw_payloads::dispatch(
+            crate::raw_payloads::dispatch_client(
                 incoming,
-                endpoint.clone(),
-                crate::raw_payloads::MainQueue::Client(send.clone()),
+                endpoint(),
+                crate::raw_payloads::ClientQueue::new(send.clone()),
             );
             Ok(None)
         }
@@ -2190,17 +2397,19 @@ fn configure(
                 datapacks.accept_chunk(&p.data).map_err(Reason::plain)?;
             }
             cfg::Clientbound::CustomPayload(p) => {
-                let endpoint = crate::raw_payloads::Endpoint::client(
-                    writer.clone(),
-                    configuring.clone(),
-                    payloads.clone(),
-                    send.clone(),
-                );
                 let Some(p) = receive_application(
-                    &endpoint,
+                    payloads,
                     sunrise_protocol::payload_negotiation::Phase::Configuration,
                     p,
                     send,
+                    || {
+                        crate::raw_payloads::Endpoint::new(PayloadOutput {
+                            writer: writer.clone(),
+                            configuring: configuring.clone(),
+                            transport: payloads.clone(),
+                            events: send.clone(),
+                        })
+                    },
                 )?
                 else {
                     continue;
@@ -2455,76 +2664,68 @@ fn send_identity(
 /// At most `sunrise_protocol::text::MAX_TEXT` bytes, as `plain`: a login-phase reason from a
 /// server is any JSON it likes.
 pub fn json_text(v: &serde_json::Value, lang: &Language) -> String {
-    use sunrise_protocol::text::{MAX_TEXT, push_capped};
-    match v {
-        serde_json::Value::String(s) => {
-            let mut out = String::new();
-            push_capped(&mut out, s);
-            out
-        }
-        serde_json::Value::Array(a) => {
-            let mut out = String::new();
-            for e in a {
-                if out.len() >= MAX_TEXT {
-                    break;
-                }
-                push_capped(&mut out, &json_text(e, lang));
-            }
-            out
-        }
-        serde_json::Value::Object(o) => {
-            let mut out = if let Some(t) = o.get("text").and_then(|t| t.as_str()) {
+    json_text_with(v, |key| lang.get(key).map(String::as_str))
+}
+
+fn json_text_with<'a>(v: &serde_json::Value, lookup: impl Fn(&str) -> Option<&'a str>) -> String {
+    fn walk<'a, F: Fn(&str) -> Option<&'a str>>(v: &serde_json::Value, lookup: &F) -> String {
+        use sunrise_protocol::text::{MAX_TEXT, push_capped};
+        match v {
+            serde_json::Value::String(s) => {
                 let mut out = String::new();
-                push_capped(&mut out, t);
+                push_capped(&mut out, s);
                 out
-            } else if let Some(key) = o.get("translate").and_then(|t| t.as_str()) {
-                let args: Vec<String> = o
-                    .get("with")
-                    .and_then(|w| w.as_array())
-                    .map(|a| a.iter().map(|e| json_text(e, lang)).collect())
-                    .unwrap_or_default();
-                let pattern = lang
-                    .get(key)
-                    .cloned()
-                    .or_else(|| {
-                        o.get("fallback")
-                            .and_then(|f| f.as_str())
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| key.to_owned());
-                sunrise_protocol::text::format_java(&pattern, &args)
-            } else {
-                String::new()
-            };
-            if let Some(extra) = o.get("extra").and_then(|e| e.as_array()) {
-                for e in extra {
+            }
+            serde_json::Value::Array(a) => {
+                let mut out = String::new();
+                for e in a {
                     if out.len() >= MAX_TEXT {
                         break;
                     }
-                    push_capped(&mut out, &json_text(e, lang));
+                    push_capped(&mut out, &walk(e, lookup));
                 }
+                out
             }
-            out
+            serde_json::Value::Object(o) => {
+                let mut out = if let Some(t) = o.get("text").and_then(|t| t.as_str()) {
+                    let mut out = String::new();
+                    push_capped(&mut out, t);
+                    out
+                } else if let Some(key) = o.get("translate").and_then(|t| t.as_str()) {
+                    let args: Vec<String> = o
+                        .get("with")
+                        .and_then(|w| w.as_array())
+                        .map(|a| a.iter().map(|e| walk(e, lookup)).collect())
+                        .unwrap_or_default();
+                    let pattern = lookup(key)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            o.get("fallback")
+                                .and_then(|f| f.as_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| key.to_owned());
+                    sunrise_protocol::text::format_java(&pattern, &args)
+                } else {
+                    String::new()
+                };
+                if let Some(extra) = o.get("extra").and_then(|e| e.as_array()) {
+                    for e in extra {
+                        if out.len() >= MAX_TEXT {
+                            break;
+                        }
+                        push_capped(&mut out, &walk(e, lookup));
+                    }
+                }
+                out
+            }
+            other => other.to_string(),
         }
-        other => other.to_string(),
     }
+    walk(v, &lookup)
 }
 
-/// The language a session resolves server-sent components with: the selected
-/// one as `lang` loaded it (`en_us` under it, packs included), so a menu title
-/// the server sends as a key follows the language screen. A process with no
-/// language set (a dedicated server's log) reads en_us.json.
-pub fn load_language(resources: &std::path::Path) -> Language {
-    if let Some(lang) = crate::lang::current() {
-        return lang.map().clone();
-    }
-    // No language screen ran (a dedicated server's log): en_us, with
-    // Sunrise's own strings included — the net thread resolves keys with
-    // this map (`Reason::keyed`).
-    sunrise_client_core::lang::Language::load(&[&resources.to_path_buf()], "en_us")
-        .map()
-        .clone()
-}
+pub use sunrise_sim::lang_load::load_language;
 
 /// Ask a server for its status (ServerStatusPinger): MOTD, players and the
 /// round trip time in milliseconds.
@@ -2768,7 +2969,7 @@ mod tests {
         use sunrise_protocol::payload_negotiation::{CHANNEL, Control};
         for server_asks in [false, true] {
             let (root, data) = empty_item_data(&format!("mod-client-{server_asks}"));
-            let sent = crate::raw_payloads::test_support::with_client(|transport| {
+            let sent = client_payload_test_support::with_client(|transport| {
                 assert!(transport.local.has_mod_declarations());
                 let (client, server) = sunrise_protocol::connection::Pipe::pair();
                 let (mut reader, writer) = Connection::local(client).split();
@@ -2848,7 +3049,7 @@ mod tests {
                     manifest
                         .entries()
                         .iter()
-                        .any(|e| e.id() == crate::raw_payloads::test_support::CHANNEL),
+                        .any(|e| e.id() == client_payload_test_support::CHANNEL),
                     "the Offer lists the mod's channel"
                 );
             } else {
@@ -3300,6 +3501,109 @@ mod tests {
         let v = serde_json::json!({ "text": "", "extra": [v.clone(), v] });
         let text = json_text(&v, &Language::default());
         assert!(text.len() <= sunrise_protocol::text::MAX_TEXT);
+    }
+
+    #[test]
+    fn disconnect_reasons_layer_runtime_overrides_over_pack_only_session_maps() {
+        use crate::lang::{self, Language as ClientLanguage};
+        use std::path::Path;
+
+        // Unmodded mid-session locale change keeps resolving from the session's captured map.
+        {
+            let _isolated = lang::isolate_publication(ClientLanguage::of(
+                "en_us",
+                [("disconnect.test".into(), "English pack".into())],
+            ));
+            let session_lang = load_language(Path::new(""));
+            lang::set(ClientLanguage::of(
+                "de_de",
+                [("disconnect.test".into(), "German pack".into())],
+            ));
+            assert_eq!(
+                Reason::component(r#"{"translate":"disconnect.test"}"#, &session_lang).text,
+                "English pack"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.test", &[]), &session_lang).text,
+                "English pack"
+            );
+        }
+
+        // A session opened during an override still captures the pack-only fallback.
+        {
+            let _isolated = lang::isolate_publication(ClientLanguage::of(
+                "en_us",
+                [
+                    ("disconnect.test".into(), "Pack reason".into()),
+                    ("disconnect.wrap".into(), "Wrap: %s".into()),
+                ],
+            ));
+            lang::set_mod_entries(
+                "disconnect_mod",
+                "en_us",
+                HashMap::from([
+                    ("disconnect.test".into(), "Mod reason".into()),
+                    ("disconnect.mod_only".into(), "Mod only".into()),
+                ]),
+            );
+            let session_lang = load_language(Path::new(""));
+            assert_eq!(
+                Reason::component(r#"{"translate":"disconnect.test"}"#, &session_lang).text,
+                "Mod reason"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.test", &[]), &session_lang).text,
+                "Mod reason"
+            );
+            assert_eq!(
+                Reason::component(
+                    r#"{"translate":"disconnect.wrap","with":[{"translate":"disconnect.mod_only"}]}"#,
+                    &session_lang,
+                )
+                .text,
+                "Wrap: Mod only"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.mod_only", &[]), &session_lang).text,
+                "Mod only"
+            );
+
+            lang::clear_mod_entries("disconnect_mod");
+            assert_eq!(
+                Reason::component(r#"{"translate":"disconnect.test"}"#, &session_lang).text,
+                "Pack reason"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.test", &[]), &session_lang).text,
+                "Pack reason"
+            );
+            assert_eq!(
+                Reason::component(
+                    r#"{"translate":"disconnect.mod_only","fallback":"Fallback"}"#,
+                    &session_lang,
+                )
+                .text,
+                "Fallback"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.mod_only", &[]), &session_lang).text,
+                "disconnect.mod_only"
+            );
+
+            lang::set_mod_entries(
+                "disconnect_mod",
+                "en_us",
+                HashMap::from([("disconnect.test".into(), "Late override".into())]),
+            );
+            assert_eq!(
+                Reason::component(r#"{"translate":"disconnect.test"}"#, &session_lang).text,
+                "Late override"
+            );
+            assert_eq!(
+                Reason::tag(&translatable("disconnect.test", &[]), &session_lang).text,
+                "Late override"
+            );
+        }
     }
 
     fn pack(namespace: &str, id: &str, version: &str) -> cfg::KnownPack {
@@ -4030,7 +4334,7 @@ mod tests {
                     );
                 }
                 let encode = |item| {
-                    crate::lan::guest::stack_to_network(
+                    crate::item_sync::net_stack::stack_to_network(
                         |_| 1,
                         |registry, name| {
                             if registry == consume_effects::REGISTRY {
@@ -4322,6 +4626,7 @@ mod tests {
                 recorder: Arc::new(Mutex::new(None)),
                 pings: Arc::default(),
                 serial: next_serial(),
+                payload_output: std::sync::OnceLock::new(),
             };
             let started = std::time::Instant::now();
             if explicit_disconnect {
@@ -4454,6 +4759,7 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         };
         let (configuring, cookies) = (session.configuring.clone(), session.cookies.clone());
         let recorder = session.recorder.clone();
@@ -5013,6 +5319,7 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         };
         let mut server = Connection::local(server);
         let payload = |size| {
@@ -5074,6 +5381,7 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         };
         let (thread_writer, thread_configuring, thread_recorder) = (
             session.writer.clone(),
@@ -5230,6 +5538,7 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         };
         let (thread_writer, thread_configuring, thread_recorder, thread_cookies) = (
             session.writer.clone(),
@@ -5567,6 +5876,7 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
             pings: Arc::default(),
             serial: next_serial(),
+            payload_output: std::sync::OnceLock::new(),
         };
         let recorder = TestRecorder::default();
         session.start_recording(recorder.clone(), |_| {});

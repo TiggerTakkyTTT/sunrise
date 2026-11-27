@@ -15,12 +15,11 @@ import os
 from pathlib import Path
 import subprocess
 
-try:
-    from . import lab, test_rust_parity as base, test_server_knockback_parity as net
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_server_knockback_parity as net
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_server_knockback_parity as net
 
 NAME = 'item-use-order-parity'
 

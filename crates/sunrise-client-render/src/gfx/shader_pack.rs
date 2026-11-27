@@ -62,12 +62,24 @@ impl Renderer {
             };
             let mod_runtime = crate::mod_pipelines::pack_runtime_specs();
             let mod_vertex_buffers = [Some(mod_pipelines::PipelineVertex::buffer_layout())];
+            let mod_set1_layouts: Vec<Option<&wgpu::BindGroupLayout>> = self
+                .world_primitives
+                .as_ref()
+                .map(|wp| wp.pipelines.set1_bind_group_layouts())
+                .unwrap_or_default();
+            let mod_vertex_stages = self
+                .world_primitives
+                .as_ref()
+                .map(|wp| wp.pipelines.pack_vertex_stages())
+                .unwrap_or_default();
             pack_post::PackPost::new_with_mods(
                 (&self.device, &self.queue, &self.adapter),
                 post,
                 self.output.frame.format,
                 world,
-                mod_runtime.as_runtime(&mod_vertex_buffers),
+                mod_runtime
+                    .as_runtime_with_layouts(&mod_vertex_buffers, &mod_set1_layouts)
+                    .with_vertex_stages(&mod_vertex_stages),
                 &std::sync::atomic::AtomicBool::new(false),
             )
         });
@@ -83,6 +95,7 @@ impl Renderer {
         post: std::result::Result<Option<pack_post::PackPost>, pack_post::Refused>,
         block_ids: Vec<i32>,
     ) -> std::result::Result<Option<(Vec<String>, Vec<String>)>, pack_post::Refused> {
+        self.pack_changed();
         let runs = post.as_ref().is_ok_and(Option::is_some);
         let block_ids = if runs { block_ids } else { Vec::new() };
         let old = self.pack_block_ids.as_deref().map_or(&[][..], |ids| &ids.0);
@@ -117,16 +130,13 @@ impl Renderer {
             (programs, p.notes.clone())
         });
         self.pack_post = Some((dimension, post));
-        if self.pack_post.as_ref().is_some_and(|p| p.1.is_some()) {
-            self.native = None;
-        }
         Ok(report)
     }
     /// Sets the external shader pipeline world frames call (`external`), or none.
     pub fn set_external_pipeline(&mut self, pipeline: Option<Box<dyn external::ExternalPipeline>>) {
         self.external = pipeline;
     }
-    /// Makes the running shader pack, of either kind, forget what it kept from earlier frames:
+    /// Makes the running shader pack forget what it kept from earlier frames:
     /// the next frame draws as a freshly loaded pack's first. Nothing to do without a pack.
     pub fn reset_shader_pack_history(&mut self) {
         // A frame still on the submit thread uses the targets and readbacks replaced
@@ -138,19 +148,43 @@ impl Renderer {
         if let Some((_, Some(post))) = &mut self.pack_post {
             post.reset_history(&self.device);
         }
-        if let Some(native) = &mut self.native {
-            native.frame.reset_history();
-            if let Some(post) = &mut native.post {
-                post.reset_history();
-            }
+    }
+    /// Counts a shader pack loaded, switched or turned off (`ShaderPackState::generation`).
+    fn pack_changed(&mut self) {
+        self.pack_generation = self.pack_generation.wrapping_add(1);
+    }
+    /// The running pack as a mod reads it this frame, or `None` while the panorama shows or no
+    /// pack runs. `frame` gives the camera, so the shadow matrices are this frame's.
+    pub fn shader_pack_state(&self, frame: &Frame<'_>) -> Option<mod_api::ShaderPackState> {
+        if frame.title {
+            return None;
+        }
+        match &self.pack_post {
+            Some((_, Some(post))) => Some(mod_api::ShaderPackState::new(
+                post.has_clouds(),
+                post.mod_shadow_state(frame).map(
+                    |(resolution, distance, model_view, projection)| {
+                        mod_api::ShaderPackShadowView::new(
+                            resolution, distance, model_view, projection,
+                        )
+                    },
+                ),
+                self.pack_generation,
+            )),
+            _ => None,
         }
     }
-    /// The running shader pack's kind: `iris` (a `shaders/` pack) or `native` (one of
-    /// Sunrise's own).
+    /// The mod pipeline slots the running `shaders/` pack bound to its programs.
+    pub fn pack_bound_mod_slots(&self) -> &[usize] {
+        match &self.pack_post {
+            Some((_, Some(post))) => post.bound_mod_slots(),
+            _ => &[],
+        }
+    }
+    /// The running shader pack's kind: `iris` (a `shaders/` pack).
     pub fn shader_pack_kind(&self) -> Option<&'static str> {
-        match (&self.pack_post, &self.native) {
-            (Some((_, Some(_))), _) => Some("iris"),
-            (_, Some(_)) => Some("native"),
+        match &self.pack_post {
+            Some((_, Some(_))) => Some("iris"),
             _ => None,
         }
     }
@@ -218,12 +252,30 @@ impl Renderer {
         let draws_sections = PackLoading::draws_of(&pack, terrain);
         let clouds = self.cloud_bindings.clone();
         let mod_runtime = crate::mod_pipelines::pack_runtime_specs();
+        let mod_set1_owned: Vec<Option<wgpu::BindGroupLayout>> = self
+            .world_primitives
+            .as_ref()
+            .map(|wp| {
+                wp.pipelines
+                    .set1_bind_group_layouts()
+                    .into_iter()
+                    .map(|l| l.cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mod_vertex_stages = self
+            .world_primitives
+            .as_ref()
+            .map(|wp| wp.pipelines.pack_vertex_stages())
+            .unwrap_or_default();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancelled = cancel.clone();
         let build = move || {
             let buffers = pack_terrain_buffers();
             let buffers = &buffers[..terrain_buffer_count(draws)];
             let mod_vertex_buffers = [Some(mod_pipelines::PipelineVertex::buffer_layout())];
+            let mod_set1_refs: Vec<Option<&wgpu::BindGroupLayout>> =
+                mod_set1_owned.iter().map(Option::as_ref).collect();
             let world = pack_post::World {
                 atlas,
                 sprite_rects: &sprite_rects,
@@ -252,7 +304,9 @@ impl Renderer {
                 pack,
                 format,
                 world,
-                mod_runtime.as_runtime(&mod_vertex_buffers),
+                mod_runtime
+                    .as_runtime_with_layouts(&mod_vertex_buffers, &mod_set1_refs)
+                    .with_vertex_stages(&mod_vertex_stages),
                 &cancelled,
             );
             // The ids come back with it, for `install_shader_pack`.
@@ -265,6 +319,7 @@ impl Renderer {
         match thread {
             Ok(thread) => {
                 // The last pack doesn't draw this dimension meanwhile.
+                self.pack_changed();
                 self.pack_post = None;
                 self.pack_loading = Some(PackLoading {
                     dimension,
@@ -279,6 +334,7 @@ impl Renderer {
                 log::error!("shader pack {label}: no thread to build it on: {e}");
                 // Off for this dimension, as a pack that fails, not tried again every frame.
                 self.pack_loading = None;
+                self.pack_changed();
                 self.pack_post = Some((dimension, None));
             }
         }
@@ -320,11 +376,11 @@ impl Renderer {
         let report = self.install_shader_pack(loading.dimension, built.map(Some), block_ids);
         Some((loading.dimension, loading.label, loading.started, report))
     }
-    /// Drops the running shader pack, of either kind.
+    /// Drops the running shader pack.
     pub fn drop_shader_packs(&mut self) {
         self.pack_loading = None;
+        self.pack_changed();
         self.pack_post = None;
-        self.native = None;
         self.pack_atlas = None;
         self.separate_ao = false;
         self.pack_block_ids = None;
@@ -341,63 +397,6 @@ impl Renderer {
     /// Lava's sprite layers (still and flowing), whose faces a pack's solid terrain draws.
     pub fn set_pack_lava_layers(&mut self, layers: Vec<u16>) {
         self.pack_lava_layers = layers;
-    }
-    /// Runs the sky, material and post stages of one of Sunrise's own shader packs from now
-    /// on (`None`: no pack), with its options' values; replaces a `shaders/` pack. Returns the
-    /// stages' labels; on an error the pack that ran keeps running.
-    pub fn set_native_shader_pack(
-        &mut self,
-        pack: Option<(
-            sunrise_shader_api::Report,
-            Vec<(String, f64)>,
-            Vec<(u32, u32)>,
-            Vec<(u32, u32)>,
-            block_light::LightTable,
-        )>,
-    ) -> std::result::Result<Vec<String>, String> {
-        let linear = pack
-            .as_ref()
-            .is_some_and(|p| p.0.manifest.api == sunrise_shader_api::Api::V0_2);
-        if (linear || self.output.frame.format == LINEAR_FRAME)
-            && linear != (self.output.frame.format == LINEAR_FRAME)
-            && !std::mem::replace(&mut self.frame_kept_logged, true)
-        {
-            log::info!(
-                "Sunrise renderer: the {:?} frame stays until the renderer is made again; a shader pack picked or dropped since runs on it",
-                self.output.frame.format
-            );
-        }
-        let Some((report, constants, sprite_tags, sprite_materials, lights)) = pack else {
-            self.native = None;
-            return Ok(Vec::new());
-        };
-        let terrain = native_material::TerrainShape {
-            globals: &self.terrain_layout,
-            flat: self.flat.as_ref().map(|f| &f.draw_layout),
-            sprites: self.terrain_sprites,
-            format: self.output.frame.format,
-            linear: self.output.frame.linear_light,
-            sprite_tags: &sprite_tags,
-            sprite_materials: &sprite_materials,
-            entities: &self.entity_bindings,
-            weather_groups: [&self.weather.entity_layout, &self.weather.time_layout],
-            pbr: self.pbr_maps.as_ref().and_then(|arrays| arrays.first()),
-        };
-        let (pack, labels) = native_pack::NativePack::new(
-            &self.device,
-            &self.queue,
-            &terrain,
-            report,
-            &constants,
-            lights,
-        )?;
-        self.native = pack.draws().then_some(pack);
-        if self.native.is_some() {
-            self.pack_post = None;
-            self.pack_atlas = None;
-            self.pack_material_atlases = None;
-        }
-        Ok(labels)
     }
     /// What a shader pack's gbuffers programs read from Sunrise's geometry: the sky's, and
     /// terrain's in the pack's block atlas (made here when missing; none when it does not fit).

@@ -1,8 +1,8 @@
 //! Item stacks in NBT (`ItemStack.CODEC`): id, count and components, alone or in
 //! slot lists.
 use std::sync::Arc;
-use sunrise_client_core::nbt_value::{number, string, text};
 use sunrise_core::nbt::{Tag, parse_snbt, snbt_whitespace};
+use sunrise_game_data::nbt_value::{number, string, text};
 
 /// The two measured saved forms of `BlockPredicate.CODEC`, and the `Identifier`s
 /// of `attribute_modifiers` written whole. Operate only on
@@ -84,6 +84,87 @@ pub fn encode_item(
 /// ItemStack.CODEC saved against the actual loaded item prototype.
 pub fn item_to_nbt(stack: &crate::items::ItemStack, items: &crate::items::Items) -> Tag {
     Tag::compound(encode_item(stack, items))
+}
+/// Encode an optional item stack as `ItemStack.OPTIONAL_CODEC` over `JsonOps`:
+/// `None` encodes as `{}`, and `Some(stack)` encodes as `{"id", "count", "components": ...}`
+/// against the loaded item prototypes.
+pub fn item_to_json(
+    stack: Option<&crate::items::ItemStack>,
+    items: &crate::items::Items,
+) -> Result<serde_json::Value, sunrise_world::component_value::json::JsonError> {
+    item_to_json_with(stack, items, |_| false, |_| true)
+}
+/// Encode an optional item stack as `ItemStack.OPTIONAL_CODEC` over `JsonOps`,
+/// resolving registered native component types via `is_native` and items via `has_item`.
+pub fn item_to_json_with(
+    stack: Option<&crate::items::ItemStack>,
+    items: &crate::items::Items,
+    is_native: impl Fn(&str) -> bool,
+    has_item: impl Fn(&str) -> bool,
+) -> Result<serde_json::Value, sunrise_world::component_value::json::JsonError> {
+    use sunrise_world::component_value::json::JsonError;
+
+    let Some(stack) = stack else {
+        return Ok(serde_json::Value::Object(Default::default()));
+    };
+    if stack.item.as_ref() == "minecraft:air" {
+        return Err(JsonError::field("id", "air is not a valid item"));
+    }
+    if !has_item(&stack.item) {
+        return Err(JsonError::field(
+            "id",
+            format!("unknown item {}", stack.item),
+        ));
+    }
+    if !(1..=99).contains(&stack.count) {
+        return Err(JsonError::field("count", "count outside 1..99"));
+    }
+    let nbt = item_to_nbt(stack, items);
+    let template = sunrise_world::component_value::source::item_stack_from_tag_with(
+        &nbt, is_native, &has_item,
+    )
+    .map_err(JsonError::from_codec_error);
+    sunrise_core::nbt::discard_tag(nbt);
+    template?.to_item_stack_json()
+}
+/// Decode one complete JSON value as `ItemStack.OPTIONAL_CODEC` over `JsonOps`:
+/// `{}` decodes as `Ok(None)`, and a stack object decodes via `ItemStack.CODEC`.
+pub fn item_from_json(
+    json: &str,
+) -> Result<Option<crate::items::ItemStack>, sunrise_world::component_value::json::JsonError> {
+    item_from_json_with(json, |_| false, |_| true)
+}
+/// Decode one complete JSON value as `ItemStack.OPTIONAL_CODEC` over `JsonOps`,
+/// resolving registered native component types via `is_native` and every item, nested ones
+/// included, via `has_item`.
+pub fn item_from_json_with(
+    json: &str,
+    is_native: impl Fn(&str) -> bool,
+    has_item: impl Fn(&str) -> bool,
+) -> Result<Option<crate::items::ItemStack>, sunrise_world::component_value::json::JsonError> {
+    use sunrise_world::component_value::json::{JsonError, optional_item_stack_from_json_with};
+
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| JsonError::Syntax(error.to_string()))?;
+    let Some(template) = optional_item_stack_from_json_with(&value, is_native, &has_item)? else {
+        return Ok(None);
+    };
+    let components = template
+        .patch_to_tag()
+        .map_err(JsonError::from_codec_error)?;
+    let stack = decode_item_fields(
+        &template.item,
+        template.count as u32,
+        components.as_ref(),
+        None,
+    );
+    if stack.has_refused_consume_effects() {
+        return Err(JsonError::field(
+            "components",
+            "invalid registered consume effect payload",
+        ));
+    }
+    Ok(Some(stack))
 }
 /// Read one `TagParser.parseCompoundFully` compound as an `ItemStack.CODEC` item.
 /// The SNBT grammar and saved-item decoder report their own errors; binary NBT quotas
@@ -789,5 +870,85 @@ mod h285_saved_adventure_tests {
                 entry("minecraft:armor", "mod:x"),
             ]))
         );
+    }
+}
+
+#[cfg(test)]
+mod item_json_tests {
+    use super::*;
+    use crate::items::ItemStack;
+    use serde_json::json;
+    use sunrise_world::component_value::json::JsonError;
+
+    #[test]
+    fn item_json_roundtrips_plain_empty_multi_component_and_removal_against_prototypes() {
+        let mut items = crate::items::Items::for_tests(Default::default());
+        let mut sword_defaults = sunrise_core::nbt::Compound::new();
+        sword_defaults.insert("minecraft:damage".into(), Tag::Int(0));
+        sword_defaults.insert("minecraft:max_damage".into(), Tag::Int(1561));
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert("minecraft:diamond_sword".to_owned(), sword_defaults);
+        items.component_defaults = Arc::new(defaults);
+
+        // Empty stack <-> {}
+        assert_eq!(item_to_json(None, &items).unwrap(), json!({}));
+        assert_eq!(item_from_json("{}").unwrap(), None);
+
+        // Plain stack <-> {"id", "count"}
+        let stone = ItemStack::new("minecraft:stone", 64);
+        let stone_json = json!({"id": "minecraft:stone", "count": 64});
+        assert_eq!(item_to_json(Some(&stone), &items).unwrap(), stone_json);
+        assert_eq!(
+            item_from_json(&stone_json.to_string()).unwrap(),
+            Some(stone)
+        );
+
+        // Multi-component stack: styled text component (real JSON bool), enchantments,
+        // int damage, and float attack charge.
+        let sword_json = json!({
+            "id": "minecraft:diamond_sword",
+            "count": 1,
+            "components": {
+                "minecraft:custom_name": {"text": "Blade", "color": "gold", "bold": true},
+                "minecraft:enchantments": {"minecraft:sharpness": 3},
+                "minecraft:damage": 5,
+                "minecraft:minimum_attack_charge": 0.5
+            }
+        });
+        let sword = item_from_json(&sword_json.to_string()).unwrap().unwrap();
+        assert_eq!(sword.damage, 5);
+        assert_eq!(item_to_json(Some(&sword), &items).unwrap(), sword_json);
+
+        // Explicit removal against a prototype that defines minecraft:damage.
+        let removed_json = json!({
+            "id": "minecraft:diamond_sword",
+            "count": 1,
+            "components": {
+                "!minecraft:damage": {}
+            }
+        });
+        let removed = item_from_json(&removed_json.to_string()).unwrap().unwrap();
+        assert_eq!(item_to_json(Some(&removed), &items).unwrap(), removed_json);
+
+        // Prototype-equal damage (0) is elided on encode.
+        let fresh_sword = ItemStack::new("minecraft:diamond_sword", 1);
+        assert_eq!(
+            item_to_json(Some(&fresh_sword), &items).unwrap(),
+            json!({"id": "minecraft:diamond_sword", "count": 1})
+        );
+
+        // Decode errors name the failing field.
+        assert!(matches!(
+            item_from_json(r#"{"id":"minecraft:diamond_sword","components":{"minecraft:damage":-1}}"#),
+            Err(JsonError::Field { field, .. }) if field == "minecraft:damage"
+        ));
+        assert!(matches!(
+            item_from_json(r#"{"id":"minecraft:stone","count":100}"#),
+            Err(JsonError::Field { field, .. }) if field == "count"
+        ));
+        assert!(matches!(
+            item_from_json("{not valid json"),
+            Err(JsonError::Syntax(_))
+        ));
     }
 }

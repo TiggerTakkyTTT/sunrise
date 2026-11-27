@@ -382,12 +382,12 @@ import zlib
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_control_e2e import Cli, Failed, game_env  # noqa: E402
-import lab  # noqa: E402
-from integration_env import game_environment, require_server_reports  # noqa: E402
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.agent_control_e2e import Cli, Failed, game_env
+from tools import lab
+from tools.integration_env import game_environment, require_server_reports  # noqa: E402
+
 GUEST_NAME = 'Guest'
 CHECKS = ['tab', 'self', 'armour', 'nametags', 'walls', 'placement', 'chest', 'menu-transfer', 'crafting', 'spawned', 'sign', 'damage', 'mobs', 'hazards', 'pvp', 'deaths',
           'flow-push', 'bubble-column', 'arrows', 'projectile-vehicles', 'flame-arrows', 'kills', 'looting', 'leave', 'hurt', 'looks', 'leads', 'entity-tags', 'respawn', 'containers', 'names', 'feedback', 'titles', 'chat', 'styles',
@@ -3021,7 +3021,7 @@ def wheel_fast(game, slot, steps):
 
 
 def set_mouse_tweaks(game, on):
-    """The Extras page's switch, as a player flips it."""
+    """The switch on Sunrise Settings' Gameplay page, as a player flips it."""
     game('options', page='extras')
     switch = next(w for w in game.raw('ui')['widgets'] if w.get('label', '').startswith('Mouse Tweaks controls'))
     if switch['label'].endswith('On') != on:
@@ -6663,7 +6663,9 @@ def ride(player, other, label, spot, kind, nbt, ready, stick, test):
     finally:
         player('command', command=f'kill @e[type=minecraft:{kind},x={x},y={y},z={z},distance=..48]')
         player('command', command=f'tp @s {x + 0.5} {y} {z + 0.5} 0 0')
-        player.wait(5)
+        # Wait out the 20-tick death animation so a stationary mount's dying body
+        # (e.g. llama before happy_ghast) does not intercept the next mount's click.
+        player.wait(25)
 
 
 def check_riding(host, guest, out):
@@ -9135,6 +9137,8 @@ def check_fixture_input(host, guest, out, kind, role):
     """Complement seeded rules with real client input and authoritative observations."""
     player = host if role == 'host' else guest
     hx, y, hz = (int(v // 1) for v in pos_of(host))
+    if kind == 'sculk':
+        y += 32  # Keep the listener out of range of drops and mobs in the shared arena.
     x, z = hx + 6, hz + (-8 if role == 'host' else 8)
     sensor, dispenser, button = (x + 3, y, z + 1), (x, y, z + 3), (x, y, z + 2)
     player('command', command='gamemode survival')
@@ -9856,8 +9860,8 @@ def check_villagers(host, guest, out):
     gx, gy, gz = (int(v // 1) for v in pos_of(guest))
     x, y, z = gx, gy, gz + 5
     tag = 'vs_villager'
-    summoned = [('villager', -2, 'desert', 'librarian', 3), ('villager', 0, 'snow', 'weaponsmith', 5),
-                ('zombie_villager', 2, 'taiga', 'cleric', 2), ('villager', 4, 'plains', 'none', 1)]
+    summoned = [('zombie_villager', -3, 'taiga', 'cleric', 2), ('villager', -1, 'desert', 'librarian', 3),
+                ('villager', 1, 'snow', 'weaponsmith', 5), ('villager', 6, 'plains', 'none', 1)]
 
     def villagers(game):
         return {e['id']: e['villager'] for e in game.raw('entities', 16)['entities'] if 'villager' in e}
@@ -9865,8 +9869,13 @@ def check_villagers(host, guest, out):
     seen = {}
     try:
         host('command', command='time set 2000')
-        host('command', command=f'fill {x - 4} {y - 1} {z - 3} {x + 6} {y - 1} {z + 4} minecraft:stone')
-        host('command', command=f'fill {x - 4} {y} {z - 3} {x + 6} {y + 3} {z + 4} minecraft:air')
+        host('command', command=f'fill {x - 5} {y - 1} {z - 4} {x + 8} {y - 1} {z + 4} minecraft:stone')
+        host('command', command=f'fill {x - 5} {y} {z - 4} {x + 8} {y + 3} {z + 4} minecraft:air')
+        # Fence the platform perimeter so the AI-enabled unemployed villager cannot walk off
+        # when spawn sits over lower terrain; keep it >8 blocks from the zombie villager so
+        # VillagerHostilesSensor does not lock it in Panic inside the pen.
+        host('command', command=f'fill {x - 5} {y} {z - 4} {x + 8} {y} {z + 4} minecraft:oak_fence')
+        host('command', command=f'fill {x - 4} {y} {z - 3} {x + 7} {y} {z + 3} minecraft:air')
         for kind, dx, t, p, level in summoned:
             # The unemployed one keeps its AI to take the job.
             ai = '' if p == 'none' else 'NoAI:1b,Invulnerable:1b,'
@@ -9875,7 +9884,7 @@ def check_villagers(host, guest, out):
                                     f'VillagerData:{{type:"minecraft:{t}",profession:"minecraft:{p}",level:{level}}}}}')
         guest.wait(20)
         seen['summoned'] = {'host': villagers(host), 'guest': villagers(guest)}
-        host('command', command=f'setblock {x + 5} {y} {z + 2} minecraft:composter')
+        host('command', command=f'setblock {x + 7} {y} {z + 2} minecraft:composter')
         for waited in range(10, 1210, 10):
             guest.wait(10)
             farmers = [i for i, v in villagers(host).items() if v['profession'] == 'farmer']
@@ -9889,7 +9898,7 @@ def check_villagers(host, guest, out):
         guest.shot(out, 'villagers')
     finally:
         host('command', command=f'kill @e[tag={tag}]')
-        host('command', command=f'fill {x - 4} {y} {z - 3} {x + 6} {y + 3} {z + 4} minecraft:air')
+        host('command', command=f'fill {x - 5} {y} {z - 4} {x + 8} {y + 3} {z + 4} minecraft:air')
         host('command', command='time set day')
     host_view, guest_view = seen['summoned']['host'], seen['summoned']['guest']
     for _, _, t, p, level in summoned:

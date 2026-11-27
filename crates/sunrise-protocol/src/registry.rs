@@ -455,13 +455,26 @@ impl Dynamic {
         self.registries.is_empty()
     }
     /// The synchronized dimension type `id` as the JSON a data pack writes it, with its name:
-    /// what `DimensionFacts::patched` reads. None without data. A byte is a flag (every one the
-    /// type has is), and a number with no fraction is an integer, as Sunrise's server sends a
-    /// pack's JSON numbers as doubles.
+    /// what `DimensionFacts::patched` reads. None without data. The four codec flags accept any
+    /// numeric tag (matching `Dynamic::dimension`), other bytes are flags, and a number with no
+    /// fraction is an integer, as Sunrise's server sends a pack's JSON numbers as doubles.
     pub fn dimension_json(&self, id: i32) -> Option<(String, serde_json::Value)> {
         let name = self.name("minecraft:dimension_type", id)?.to_owned();
         let tag = self.data("minecraft:dimension_type", id)?;
-        Some((name, tag_json(tag)))
+        let mut json = tag_json(tag);
+        if let (Tag::Compound(map), serde_json::Value::Object(obj)) = (tag, &mut json) {
+            for key in [
+                "has_skylight",
+                "has_ceiling",
+                "has_fixed_time",
+                "has_ender_dragon_fight",
+            ] {
+                if let Some(flag) = map.get(&JavaString::from(key)).and_then(flag_value) {
+                    obj.insert(key.to_owned(), serde_json::Value::Bool(flag));
+                }
+            }
+        }
+        Some((name, json))
     }
     /// The dimension type's vertical range and sky light, from its
     /// synchronized data or the vanilla defaults for known names.
@@ -471,10 +484,7 @@ impl Dynamic {
             .unwrap_or("minecraft:overworld");
         let mut d = DimensionType::vanilla(name);
         if let Some(Tag::Compound(map)) = self.data("minecraft:dimension_type", id) {
-            let int = |k: &str| match map.get(&JavaString::from(k)) {
-                Some(Tag::Int(v)) => Some(*v),
-                _ => None,
-            };
+            let int = |k: &str| map.get(&JavaString::from(k)).and_then(int_value);
             if let Some(v) = int("min_y") {
                 d.min_y = v;
             }
@@ -491,21 +501,21 @@ impl Dynamic {
                 d.min_y = vanilla.min_y;
                 d.height = vanilla.height;
             }
-            if let Some(Tag::Byte(v)) = map.get(&JavaString::from("has_skylight")) {
-                d.has_skylight = *v != 0;
+            let flag = |k: &str| map.get(&JavaString::from(k)).and_then(flag_value);
+            if let Some(v) = flag("has_skylight") {
+                d.has_skylight = v;
             }
-            if let Some(Tag::Byte(v)) = map.get(&JavaString::from("has_ceiling")) {
-                d.has_ceiling = *v != 0;
+            if let Some(v) = flag("has_ceiling") {
+                d.has_ceiling = v;
             }
             // Any number, as vanilla's codec reads it (Sunrise's own server sends a
             // world pack's JSON numbers as doubles).
-            d.ambient_light = match map.get(&JavaString::from("ambient_light")) {
-                Some(Tag::Float(v)) => f32::from_bits(*v),
-                Some(Tag::Double(v)) => f64::from_bits(*v) as f32,
-                Some(Tag::Int(v)) => *v as f32,
-                Some(Tag::Byte(v)) => f32::from(*v),
-                _ => d.ambient_light,
-            };
+            if let Some(v) = map
+                .get(&JavaString::from("ambient_light"))
+                .and_then(float_value)
+            {
+                d.ambient_light = v;
+            }
             // DimensionType.defaultClock: the world clock this level's day
             // time follows (absent in the Nether).
             d.default_clock = match map.get(&JavaString::from("default_clock")) {
@@ -518,6 +528,37 @@ impl Dynamic {
             };
         }
         d
+    }
+}
+/// `NbtOps.getNumberValue(tag).intValue()`: every numeric tag is a number.
+fn int_value(tag: &Tag) -> Option<i32> {
+    Some(match *tag {
+        Tag::Byte(v) => i32::from(v),
+        Tag::Short(v) => i32::from(v),
+        Tag::Int(v) => v,
+        Tag::Long(v) => v as i32,
+        Tag::Float(v) => f32::from_bits(v) as i32,
+        Tag::Double(v) => f64::from_bits(v) as i32,
+        _ => return None,
+    })
+}
+/// `NbtOps.getNumberValue(tag).floatValue()`.
+fn float_value(tag: &Tag) -> Option<f32> {
+    Some(match *tag {
+        Tag::Byte(v) => f32::from(v),
+        Tag::Short(v) => f32::from(v),
+        Tag::Int(v) => v as f32,
+        Tag::Long(v) => v as f32,
+        Tag::Float(v) => f32::from_bits(v),
+        Tag::Double(v) => f64::from_bits(v) as f32,
+        _ => return None,
+    })
+}
+/// `NbtOps.getBooleanValue`: a number's `doubleValue() != 0`.
+fn flag_value(tag: &Tag) -> Option<bool> {
+    match *tag {
+        Tag::Double(v) => Some(f64::from_bits(v) != 0.0),
+        _ => float_value(tag).map(|v| v != 0.0),
     }
 }
 /// A dimension type's tag as JSON (see `Dynamic::dimension_json`).
@@ -842,6 +883,29 @@ mod tests {
         assert_eq!(shape(1024, 1024), (-64, 384));
     }
 
+    /// `NbtOps` reads any numeric tag as a number or a flag: a world pack's JSON numbers as
+    /// doubles (Sunrise's server sends them so) or a proxy's shorts keep the server's shape.
+    #[test]
+    fn a_dimension_shape_in_any_numeric_tag_is_the_servers() {
+        let mut d = Dynamic::default();
+        d.add(RegistryData {
+            registry: "minecraft:dimension_type".into(),
+            entries: vec![RegistryEntry {
+                id: "minecraft:overworld".into(),
+                data: Some(Tag::compound([
+                    ("min_y", Tag::Double(0f64.to_bits())),
+                    ("height", Tag::Short(256)),
+                    ("logical_height", Tag::Long(256)),
+                    ("has_skylight", Tag::Int(0)),
+                    ("has_ceiling", Tag::Double(0.5f64.to_bits())),
+                ])),
+            }],
+        });
+        let t = d.dimension(0);
+        assert_eq!((t.min_y, t.height, t.logical_height), (0, 256, 256));
+        assert!(!t.has_skylight && t.has_ceiling);
+    }
+
     #[test]
     fn dimension_reads_default_clock() {
         let mut d = Dynamic::default();
@@ -903,6 +967,24 @@ mod tests {
         assert_eq!(facts.sky_light_level, 4.0);
         assert_eq!(facts.height.height, 128);
         assert!(Dynamic::default().dimension_json(0).is_none());
+        // Non-byte numeric flags (e.g. Double) normalize to JSON booleans, matching `dimension`.
+        d.add(RegistryData {
+            registry: "minecraft:dimension_type".into(),
+            entries: vec![RegistryEntry {
+                id: "mymod:double_flags".into(),
+                data: Some(Tag::compound([
+                    ("has_skylight", Tag::Double(1.0f64.to_bits())),
+                    ("has_ceiling", Tag::Int(0)),
+                    ("has_fixed_time", Tag::Double(1e-50f64.to_bits())),
+                    ("has_ender_dragon_fight", Tag::Short(1)),
+                ])),
+            }],
+        });
+        let (_, json) = d.dimension_json(0).unwrap();
+        assert_eq!(json["has_skylight"], true);
+        assert_eq!(json["has_ceiling"], false);
+        assert_eq!(json["has_fixed_time"], true);
+        assert_eq!(json["has_ender_dragon_fight"], true);
     }
 
     #[test]

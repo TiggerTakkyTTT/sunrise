@@ -230,22 +230,47 @@ impl Metadata {
     }
 
     /// What compiling the mods' registry graph adds, judged against `plan`'s game lock: a package
-    /// the game locks at the same version is the game's own native library provider.
+    /// the game locks at the same version is the game's own native library provider. The build
+    /// scripts it lists include the mods' own, in the packages under their staged folders `mods`.
     pub fn inventory(
         &self,
         plan: &super::registry_plan::Plan,
         links: &[NativeLink],
+        mods: &std::collections::BTreeMap<String, std::path::PathBuf>,
     ) -> Result<Inventory, String> {
+        let canonical = |path: &std::path::Path| {
+            path.canonicalize()
+                .map_err(|e| format!("{}: {e}", path.display()))
+        };
+        let folders = mods
+            .values()
+            .map(|folder| canonical(folder))
+            .collect::<Result<Vec<_>, _>>()?;
         let reachable = self.reachable(false)?;
         let runtime = self.reachable(true)?;
         let mut scripts = BTreeSet::new();
         let mut macros = BTreeSet::new();
         let mut added = BTreeSet::new();
         for package in &self.packages {
-            if package.source.is_none() || !reachable.contains(package.id.as_str()) {
+            if !reachable.contains(package.id.as_str()) {
                 continue;
             }
             let label = format!("{} {}", package.name, package.version);
+            let script = package
+                .targets
+                .iter()
+                .any(|target| target.kind.iter().any(|kind| kind == "custom-build"));
+            if package.source.is_none() {
+                // A mod's own package, or a crate in its folder: its build script runs too. The
+                // game's patched crates and the build's own packages are not the mod's.
+                if script {
+                    let manifest = canonical(&package.manifest_path)?;
+                    if folders.iter().any(|folder| manifest.starts_with(folder)) {
+                        scripts.insert(label);
+                    }
+                }
+                continue;
+            }
             // The package the game locks at this version links the same library the game does,
             // so it is no second provider. It is still compiled here, build script included.
             let games_own = plan
@@ -265,11 +290,7 @@ impl Metadata {
                 ));
             }
             added.insert(label.clone());
-            if package
-                .targets
-                .iter()
-                .any(|target| target.kind.iter().any(|kind| kind == "custom-build"))
-            {
+            if script {
                 scripts.insert(label.clone());
             }
             if package
@@ -558,10 +579,35 @@ mod tests {
     }
     #[test]
     fn consent_counts_only_reachable_build_packages_and_names_executable_code() {
-        let inventory = metadata().inventory(&no_game(), &[]).unwrap();
+        let inventory = metadata()
+            .inventory(&no_game(), &[], &Default::default())
+            .unwrap();
         assert_eq!(inventory.added_crates, 2);
         assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
         assert_eq!(inventory.proc_macros, ["derive-example 1.0.0"]);
+    }
+    #[test]
+    fn a_mods_own_build_script_is_listed_with_its_dependencies() {
+        let stage = tempfile::tempdir().unwrap();
+        let folder = stage.path().join("native-api/scripted");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("Cargo.toml"), "").unwrap();
+        let mut metadata = metadata();
+        let root = &mut metadata.packages[0];
+        root.targets.push(Target {
+            kind: vec!["custom-build".into()],
+        });
+        root.manifest_path = folder.join("Cargo.toml");
+        let mods = std::collections::BTreeMap::from([("scripted".to_owned(), folder.clone())]);
+        let inventory = metadata.inventory(&no_game(), &[], &mods).unwrap();
+        assert_eq!(inventory.build_scripts, ["mod 1.0.0", "native-sys 2.0.0"]);
+        // A script of a package outside every mod's folder is not the mod's own.
+        let inventory = metadata
+            .inventory(&no_game(), &[], &Default::default())
+            .unwrap();
+        assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
+        // Its crates.io dependencies still count alone for the crates added.
+        assert_eq!(inventory.added_crates, 2);
     }
     #[test]
     fn host_build_dependencies_do_not_claim_a_game_runtime_native_library() {
@@ -575,6 +621,7 @@ mod tests {
                     version: "1.0.0".into(),
                     library: "example".into(),
                 }],
+                &Default::default(),
             )
             .unwrap();
         assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
@@ -591,6 +638,7 @@ mod tests {
                     version: "1.0.0".into(),
                     library: "example".into(),
                 }],
+                &Default::default(),
             )
             .unwrap_err();
         for detail in ["native-sys", "2.0.0", "sdk-sys", "1.0.0", "example"] {
@@ -633,7 +681,9 @@ mod tests {
     #[test]
     fn the_sdks_own_native_provider_at_the_same_version_is_no_second_provider() {
         let (plan, links) = sdk_plan("2.0.0");
-        let inventory = metadata().inventory(&plan, &links).unwrap();
+        let inventory = metadata()
+            .inventory(&plan, &links, &Default::default())
+            .unwrap();
         // It is still compiled for the mod, so it still asks for consent.
         assert_eq!(inventory.added_crates, 2);
         assert_eq!(inventory.build_scripts, ["native-sys 2.0.0"]);
@@ -642,7 +692,9 @@ mod tests {
     #[test]
     fn the_sdks_native_provider_at_another_version_is_refused() {
         let (plan, links) = sdk_plan("1.0.0");
-        let error = metadata().inventory(&plan, &links).unwrap_err();
+        let error = metadata()
+            .inventory(&plan, &links, &Default::default())
+            .unwrap_err();
         for detail in ["native-sys 2.0.0", "native-sys 1.0.0", "example"] {
             assert!(error.contains(detail), "{error}");
         }

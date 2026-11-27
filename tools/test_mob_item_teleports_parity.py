@@ -11,12 +11,11 @@ import re
 import subprocess
 import tempfile
 
-try:
-    from . import integration_env, lab, test_rust_parity as base
-except ImportError:
-    import integration_env
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import integration_env, lab, test_rust_parity as base
 
 
 CASES = (

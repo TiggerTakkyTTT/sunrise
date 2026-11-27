@@ -23,6 +23,8 @@ pub(super) struct Cache {
     entries: HashMap<String, Option<Weak<Picture>>>,
     /// By namespace, then path: looked up by `&str` every frame without building a key.
     textures: HashMap<String, HashMap<String, Arc<Picture>>>,
+    /// By namespace, then path, whether [`Cache::has`] found the resource in a root.
+    present: HashMap<String, HashMap<String, bool>>,
     missing: Option<Arc<Picture>>,
 }
 
@@ -40,6 +42,24 @@ impl Cache {
             roots: vec![root.clone(), defaults.clone()],
             ..Self::default()
         }
+    }
+    /// Whether the resource `assets/<namespace>/<path>` of `id` is in a root: an image that is
+    /// there but cannot be decoded still is, and draws vanilla's missing texture.
+    /// Answered once per resource generation, as the cache dies with its atlas on a reload; a
+    /// hit builds no name.
+    fn has(&mut self, id: &Identifier) -> bool {
+        let (namespace, path) = (id.namespace(), id.path());
+        if let Some(&known) = self.present.get(namespace).and_then(|t| t.get(path)) {
+            return known;
+        }
+        let name = format!("assets/{namespace}/{path}");
+        let found = crate::resource_source::stays_inside(&name)
+            && self.roots.iter().any(|root| root.contains(&name));
+        self.present
+            .entry(namespace.to_owned())
+            .or_default()
+            .insert(path.to_owned(), found);
+        found
     }
     /// The standalone texture `id`, the exact resource `assets/<namespace>/<path>`, from the
     /// first root that has it (`ResourceManager.getResource`), sampled as its `.mcmeta` says:
@@ -132,6 +152,13 @@ impl Cache {
     }
 }
 
+impl HudAtlas {
+    /// Whether the standalone texture `id` is in the resource stack ([`HudBatch::texture`]).
+    pub fn has_texture(&self, id: &Identifier) -> bool {
+        self.pictures.lock().unwrap().has(id)
+    }
+}
+
 impl HudBatch {
     /// Draw a full GUI picture at its exact place in the HUD's ordered runs.
     pub fn picture(
@@ -173,6 +200,31 @@ impl HudBatch {
         self.picture_quad(picture, at, uvs, tint);
     }
 
+    /// `GuiGraphicsExtractor.blit` of the dynamic texture `handle`, `size` pixels, as
+    /// [`Self::texture`] draws a standalone one.
+    pub fn dynamic_texture(
+        &mut self,
+        handle: u64,
+        size: [u32; 2],
+        [x, y, w, h]: [f32; 4],
+        uv: [f32; 2],
+        [src, tex]: [[i32; 2]; 2],
+        tint: u32,
+    ) {
+        let (tw, th) = (tex[0] as f32, tex[1] as f32);
+        let rect = Rect {
+            u0: uv[0] / tw,
+            v0: uv[1] / th,
+            u1: (uv[0] + src[0] as f32) / tw,
+            v1: (uv[1] + src[1] as f32) / th,
+            w: size[0],
+            h: size[1],
+        };
+        let start = self.vertices.len();
+        self.rect_uv(x, y, w, h, rect, tint);
+        self.blend_since(start, Blend::Dynamic(handle));
+    }
+
     fn picture_quad(
         &mut self,
         picture: Arc<Picture>,
@@ -198,7 +250,8 @@ impl HudBatch {
 }
 
 /// `ReloadableTexture.setSampler`: `blur` filters linearly, else nearest; `clamp` clamps to the
-/// edge, else repeats. One level: no mipmaps.
+/// edge, else repeats. Always level 0, even of a mipmapped dynamic texture: `lod_max_clamp`
+/// is 0 (no mip filter either), as the book page says.
 fn sampler(flags: TextureFlags) -> wgpu::SamplerDescriptor<'static> {
     let filter = match flags.blur {
         true => wgpu::FilterMode::Linear,
@@ -213,6 +266,7 @@ fn sampler(flags: TextureFlags) -> wgpu::SamplerDescriptor<'static> {
         min_filter: filter,
         address_mode_u: address,
         address_mode_v: address,
+        lod_max_clamp: 0.0,
         ..Default::default()
     }
 }
@@ -231,6 +285,136 @@ impl HudRenderer {
             pass.draw(range, 0..1);
             pass.set_bind_group(0, &self.group, &[]);
         }
+    }
+
+    /// The bind group `picture_pipeline` draws a standalone texture `view` with, sampled by
+    /// `sampler`.
+    fn picture_group(
+        &self,
+        device: &wgpu::Device,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("GUI picture"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&self.atlas_view),
+                },
+            ],
+        })
+    }
+
+    pub(super) fn draw_dynamic(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        handle: u64,
+        range: std::ops::Range<u32>,
+        coverage: bool,
+    ) {
+        if let Some(group) = self
+            .dynamic_groups
+            .get(&handle)
+            .map(|(_, group)| group)
+            .or(self.dynamic_missing.as_ref())
+        {
+            pass.set_bind_group(0, group, &[]);
+            pass.set_pipeline(self.picture_pipeline.get(coverage));
+            pass.draw(range, 0..1);
+            pass.set_bind_group(0, &self.group, &[]);
+        }
+    }
+
+    /// Bind groups for the dynamic textures `batch` draws, made again for a texture that was
+    /// made again; those no run of this frame draws are dropped (the textures stay in the
+    /// store). Sampled nearest with repeat, at level 0 only, however many levels the texture has:
+    /// `DynamicTexture`'s constructor.
+    pub(super) fn prepare_dynamic(
+        &mut self,
+        device: &wgpu::Device,
+        uploads: &mut crate::gfx::upload::Uploads,
+        encoder: &mut wgpu::CommandEncoder,
+        batch: &HudBatch,
+    ) {
+        let mut drawn = std::mem::take(&mut self.dynamic_drawn);
+        drawn.clear();
+        drawn.extend(batch.blends.iter().filter_map(|(_, blend)| match blend {
+            Blend::Dynamic(handle) => Some(*handle),
+            _ => None,
+        }));
+        drawn.sort_unstable();
+        drawn.dedup();
+        self.dynamic_groups
+            .retain(|handle, _| drawn.binary_search(handle).is_ok());
+        let mut changed = std::mem::take(&mut self.dynamic_changed);
+        changed.clear();
+        self.dynamic
+            .changed(&drawn, &self.dynamic_groups, &mut changed);
+        let mut shared = None;
+        for (handle, found) in changed.drain(..) {
+            let Some((view, revision)) = found else {
+                // Released since the draw was submitted: vanilla's missing texture.
+                self.dynamic_groups.remove(&handle);
+                if self.dynamic_missing.is_none() {
+                    let (width, height, pixels) = missing_image();
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Missing dynamic texture"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    uploads.texture(encoder, texture.as_image_copy(), width, height, &pixels);
+                    let view = texture.create_view(&Default::default());
+                    let sampler = device.create_sampler(&sampler(TextureFlags::default()));
+                    self.dynamic_missing = Some(self.picture_group(device, &view, &sampler));
+                }
+                continue;
+            };
+            let shared = shared
+                .get_or_insert_with(|| device.create_sampler(&sampler(TextureFlags::default())));
+            let group = self.picture_group(device, &view, shared);
+            self.dynamic_groups.insert(handle, (revision, group));
+        }
+        self.dynamic_drawn = drawn;
+        self.dynamic_changed = changed;
     }
 
     pub(super) fn prepare_pictures(
@@ -253,7 +437,10 @@ impl HudRenderer {
             {
                 continue;
             }
-            self.pictures.entry(picture.id).or_insert_with(|| {
+            if self.pictures.contains_key(&picture.id) {
+                continue;
+            }
+            let entry = {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("GUI picture"),
                     size: wgpu::Extent3d {
@@ -277,42 +464,10 @@ impl HudRenderer {
                 );
                 let view = texture.create_view(&Default::default());
                 let sampler = device.create_sampler(&sampler(picture.flags));
-                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("GUI picture"),
-                    layout: &self.layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.uniform.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&self.atlas_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: wgpu::BindingResource::Sampler(&sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 6,
-                            resource: wgpu::BindingResource::TextureView(&self.atlas_view),
-                        },
-                    ],
-                });
+                let group = self.picture_group(device, &view, &sampler);
                 (picture.clone(), group)
-            });
+            };
+            self.pictures.insert(picture.id, entry);
         }
     }
 }

@@ -1,7 +1,5 @@
 """Unit tests for the keyed datafix input-seed cache (tools/datafix_seeds.py)."""
-import ast
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -12,6 +10,7 @@ import time
 import unittest
 from unittest import mock
 
+from tests.fresh_import import fresh_tools
 from tools import datafix_paths, datafix_seeds
 
 
@@ -31,14 +30,14 @@ class DatafixSeedKeyTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        for rel in datafix_seeds.SOURCE_FILES:
+        for rel in datafix_seeds.source_files():
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f'# {rel}\n', encoding='utf-8')
         self.lab = self.root / datafix_seeds.LAB
         self.lab.write_text(
             'def unrelated():\n    return 0\n\n\n'
-            + ''.join(f'def {name}(value):\n    return value\n\n\n' for name in datafix_seeds.LAB_FUNCTIONS),
+            + ''.join(f'def {name}(value):\n    return value\n\n\n' for name in datafix_seeds.lab_functions()),
             encoding='utf-8',
         )
         self.expected = [('worlds-pre-1.17', '1.12.2'), ('worlds', '1.19')]
@@ -61,6 +60,11 @@ class DatafixSeedKeyTests(unittest.TestCase):
         params.update(overrides)
         return datafix_seeds.seed_key(**params)
 
+    def test_a_platform_the_lock_does_not_pin_is_refused_by_name(self):
+        for plat in ('windows-x64', 'mac-os'):
+            with self.subTest(plat), self.assertRaisesRegex(ValueError, f'platform {plat};'):
+                self.key(platform_name=plat, runtime_pins=None)
+
     def test_key_is_stable_across_input_ordering(self):
         base = self.key()
         reordered = self.key(
@@ -76,14 +80,14 @@ class DatafixSeedKeyTests(unittest.TestCase):
 
     def test_key_changes_for_every_defining_input(self):
         base = self.key()
-        for rel in datafix_seeds.SOURCE_FILES:
+        for rel in datafix_seeds.source_files():
             with self.subTest(source=rel):
                 path = self.root / rel
                 original = path.read_bytes()
                 path.write_bytes(original + b'# changed\n')
                 self.assertNotEqual(self.key(), base)
                 path.write_bytes(original)
-        for name in datafix_seeds.LAB_FUNCTIONS:
+        for name in datafix_seeds.lab_functions():
             with self.subTest(lab=name):
                 original = self.lab.read_text(encoding='utf-8')
                 self.lab.write_text(original.replace(f'def {name}(value):\n    return value\n',
@@ -114,17 +118,40 @@ class DatafixSeedKeyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'free_port'):
             self.key()
 
-    def test_lab_functions_are_the_ones_the_seed_tools_call(self):
-        called = set()
-        for rel in datafix_seeds.SOURCE_FILES:
-            tree = ast.parse((datafix_seeds.ROOT / rel).read_text(encoding='utf-8'))
-            called.update(node.attr for node in ast.walk(tree)
-                          if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == 'lab')
-        self.assertEqual(called, set(datafix_seeds.LAB_FUNCTIONS))
+    def test_source_files_are_this_tool_and_the_generator_with_what_it_imports(self):
+        self.assertEqual(datafix_seeds.source_files(), [
+            'tools/anvil_dump.py', 'tools/datafix_paths.py', 'tools/datafix_scene.py', 'tools/datafix_scene_12.py',
+            'tools/datafix_scene_old.py', 'tools/datafix_seeds.py', 'tools/datafix_worlds.py'])
+
+    def test_a_tools_module_the_generator_gains_is_a_source_file(self):
+        from tools import datafix_worlds as worlds, file_lock
+        with mock.patch.object(worlds, 'file_lock', file_lock, create=True):
+            self.assertIn('tools/file_lock.py', datafix_seeds.source_files())
+
+    def test_lab_functions_are_the_ones_the_seed_tools_import(self):
+        self.assertEqual(datafix_seeds.lab_functions(), ['free_port', 'offline_uuid', 'parse_varint', 'varint'])
+
+    def test_a_lab_function_a_seed_tool_gains_changes_the_key(self):
+        from tools import datafix_worlds as worlds, lab
+        base = self.key()
+        self.lab.write_text(self.lab.read_text(encoding='utf-8') + 'def cargo_target():\n    return 1\n', encoding='utf-8')
+        self.assertEqual(self.key(), base)  # lab has it, no seed tool imports it yet
+        with mock.patch.object(worlds, 'cargo_target', lab.cargo_target, create=True):
+            gained = self.key()
+            self.lab.write_text(self.lab.read_text(encoding='utf-8').replace('return 1', 'return 2'), encoding='utf-8')
+            self.assertNotEqual(gained, base)
+            self.assertNotEqual(self.key(), gained)
+
+    def test_a_seed_tool_holding_the_lab_module_is_refused(self):
+        from tools import datafix_worlds as worlds, lab
+        with mock.patch.object(worlds, 'lab', lab, create=True):
+            with self.assertRaisesRegex(ValueError, 'datafix_worlds.py imports the lab module'):
+                datafix_seeds.lab_functions()
 
     def test_default_java_identity_hashes_jdk_content_via_parity_shim(self):
         jdk = self.root / 'jdk'
-        launcher = jdk / 'bin' / 'java'
+        program = 'java.exe' if os.name == 'nt' else 'java'
+        launcher = jdk / 'bin' / program
         launcher.parent.mkdir(parents=True)
         launcher.write_bytes(b'#!/bin/sh\necho "openjdk version 25.0.5"\n')
         launcher.chmod(0o755)
@@ -148,7 +175,7 @@ class DatafixSeedKeyTests(unittest.TestCase):
         # A wrapper outside JAVA_HOME is refused rather than keyed only by its script text.
         wrapper_dir = self.root / 'wrappers'
         wrapper_dir.mkdir()
-        wrapper = wrapper_dir / 'java'
+        wrapper = wrapper_dir / program
         wrapper.write_bytes(b'#!/bin/sh\nexec "$JAVA_HOME/bin/java" "$@"\n')
         wrapper.chmod(0o755)
         with mock.patch.dict(os.environ, {'JAVA_HOME': str(jdk), 'PATH': str(wrapper_dir)}, clear=True):
@@ -218,15 +245,22 @@ class DatafixSeedSnapshotTests(unittest.TestCase):
         self.assertFalse(datafix_seeds.snapshot_complete(snap, self.expected, strict_top=True))
         level.write_bytes(b'modern-119')
 
-        # Truncated metadata JSON is rejected.
+        # Metadata whose content is not the expected shape is rejected.
         meta = snap / 'worlds' / '1.19' / 'datafix-source.json'
-        meta.write_text('{bad', encoding='utf-8')
+        meta.write_text('[]', encoding='utf-8')
         self.assertFalse(datafix_seeds.snapshot_complete(snap, self.expected, strict_top=True))
         meta.write_text(json.dumps({'version': '1.19', 'data_version': 3105, 'problems': []}), encoding='utf-8')
 
         # Missing world is rejected.
         (snap / 'worlds-pre-1.17' / '1.12.2-flat' / 'level.dat').unlink()
         self.assertFalse(datafix_seeds.snapshot_complete(snap, self.expected, strict_top=True))
+
+    def test_unreadable_metadata_is_an_error_not_an_incomplete_snapshot(self):
+        snap = self.base / 'snap'
+        self.populate(snap)
+        (snap / 'worlds' / '1.19' / 'datafix-source.json').write_text('{bad', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            datafix_seeds.snapshot_complete(snap, self.expected, strict_top=True)
 
     def test_recorded_required_case_failure_blocks_publication(self):
         keep = self.base / 'keep'
@@ -318,6 +352,14 @@ class DatafixSeedSnapshotTests(unittest.TestCase):
         self.assertGreater((keep / key).stat().st_mtime, old_time + 3600)
         self.assertEqual((dest2 / 'worlds' / '1.19' / 'level.dat').read_bytes(), b'modern-119')
 
+    def test_prepare_keeps_the_content_of_the_lock_file(self):
+        keep = self.base / 'keep'
+        keep.mkdir()
+        (keep / datafix_seeds.LOCK_NAME).write_text('held', encoding='utf-8')
+        datafix_seeds.prepare(self.base / 'job' / 'datafix', keep, key='6' * 64, expected=self.expected,
+                              generate=lambda scratch, _m: self.populate(scratch))
+        self.assertEqual((keep / datafix_seeds.LOCK_NAME).read_text(encoding='utf-8'), 'held')
+
     def test_incomplete_generation_publishes_nothing(self):
         keep = self.base / 'keep'
         dest = self.base / 'job' / 'datafix'
@@ -388,12 +430,8 @@ class DatafixSeedSnapshotTests(unittest.TestCase):
     def test_run_vanilla_forces_fresh_oracle_only_with_seed_keep(self):
         checkout = self.base / 'checkout'
         checkout.mkdir()
-        with_path = mock.patch.object(sys, 'path', [str(Path(__file__).resolve().parents[1] / 'tools'), *sys.path])
-        with (with_path,
-              mock.patch.object(datafix_paths, 'ROOT', checkout),
-              mock.patch.dict(sys.modules, {'datafix_paths': datafix_paths})):
-            sys.modules.pop('test_datafix_parity', None)
-            parity_mod = importlib.import_module('test_datafix_parity')
+        with mock.patch.object(datafix_paths, 'ROOT', checkout):
+            parity_mod, = fresh_tools(self, 'test_datafix_parity')
             out = self.base / 'run' / '1.19-vanilla'
             out.parent.mkdir(parents=True)
             world = self.base / 'worlds' / '1.19'
@@ -424,12 +462,8 @@ class DatafixSeedSnapshotTests(unittest.TestCase):
             fetched.append(url)
             return io.BytesIO(metadata)
 
-        with_path = mock.patch.object(sys, 'path', [str(Path(__file__).resolve().parents[1] / 'tools'), *sys.path])
-        with (with_path,
-              mock.patch.object(datafix_paths, 'ROOT', checkout),
-              mock.patch.dict(sys.modules, {'datafix_paths': datafix_paths})):
-            sys.modules.pop('datafix_worlds', None)
-            worlds = importlib.import_module('datafix_worlds')
+        with mock.patch.object(datafix_paths, 'ROOT', checkout):
+            worlds, = fresh_tools(self, 'datafix_worlds')
             with (mock.patch.dict(os.environ, {'SUNRISE_DATAFIX_MANIFEST': str(manifest_file)}, clear=True),
                   mock.patch.object(worlds.urllib.request, 'urlopen', fake_urlopen)):
                 got = worlds.version_meta('1.19')
@@ -447,13 +481,9 @@ class DatafixSeedSnapshotTests(unittest.TestCase):
             datafix_seeds.KEEP_VARIABLE: str(self.base / 'keep'),
             datafix_seeds.OUTCOME_VARIABLE: 'failure',
         }
-        with_path = mock.patch.object(sys, 'path', [str(Path(__file__).resolve().parents[1] / 'tools'), *sys.path])
-        with (with_path,
-              mock.patch.dict(os.environ, env, clear=True),
-              mock.patch.object(datafix_paths, 'ROOT', checkout),
-              mock.patch.dict(sys.modules, {'datafix_paths': datafix_paths, 'datafix_seeds': datafix_seeds})):
-            sys.modules.pop('test_datafix_parity', None)
-            parity_mod = importlib.import_module('test_datafix_parity')
+        with (mock.patch.dict(os.environ, env, clear=True),
+              mock.patch.object(datafix_paths, 'ROOT', checkout)):
+            parity_mod, = fresh_tools(self, 'test_datafix_parity')
             with (mock.patch.object(sys, 'argv', ['test_datafix_parity.py']),
                   mock.patch.object(datafix_seeds, 'expected_worlds', return_value=self.expected),
                   mock.patch.object(datafix_seeds, 'prepare', side_effect=AssertionError('must not retry prepare')),

@@ -78,6 +78,8 @@ pub trait BlockEntitiesBackend {
     fn block_entity_data_slots(&self, entity: BlockEntityRef) -> Option<Vec<i32>>;
     /// Side: both.
     /// Read a configured mod holder's declared internal item slot, without automation policy.
+    /// A read cannot roll a loot table still waiting in the container: on the server, call
+    /// `unpack_loot_table` first, as vanilla's `getItem` unpacks before it reads.
     /// Removed, replaced or reloaded holders return BlockEntityItemError::Stale.
     fn block_entity_item_slot(
         &self,
@@ -124,6 +126,69 @@ pub trait BlockEntitiesBackendMut {
     /// Uses the same transactional load and client update path as `merge_data`.
     /// Ok(false) for unsupported data or no change; Stale for an invalidated handle.
     fn block_entity_replace_data(
+        &mut self,
+        entity: BlockEntityRef,
+        data: Compound,
+    ) -> Result<bool, BlockEntityError>;
+    /// Side: server.
+    /// `RandomizableContainer.setLootTable(table, seed)` (NeoForge mods call the same vanilla
+    /// method) on a mod block entity whose block declares container slots: the table and seed
+    /// are kept with it and saved as its `LootTable` and `LootTableSeed`, which `/data` and
+    /// `data` show, and nothing is rolled yet. The first time a player is admitted to its
+    /// menu (a spectator is refused while a table waits, as
+    /// `RandomizableContainerBlockEntity.canOpen` refuses one), a hopper or other container
+    /// access reads it, [`Self::block_entity_unpack_loot_table`] runs, or the block is broken
+    /// (`RandomizableContainer.unpackLootTable`), the table rolls once into its empty slots
+    /// with `LootTable.fill`'s slot shuffle, from `RandomSource.create(seed)`, the table's
+    /// random sequence for a seed of 0, else the level random, with the container's centre
+    /// as `ORIGIN` and the opening player as `THIS_ENTITY` and for its luck; then the table
+    /// is gone. Stacks already in the container keep their slots: the fill shuffles and
+    /// fills only the empty ones, as vanilla's does. Two worlds rolling the same table and
+    /// seed into the same contents fill the same slots. A saved container with a table loads
+    /// the table, not its `Items` (`tryLoadLootTable`). Ok(false) for a block entity with no
+    /// declared slots, a table that is not an identifier, or the table and seed it already
+    /// waits with (`chests/x` is `minecraft:chests/x`); Stale for an invalidated or
+    /// unwritable handle. Inside a transaction an abort puts the previous table back.
+    fn block_entity_set_loot_table(
+        &mut self,
+        entity: BlockEntityRef,
+        table: &str,
+        seed: i64,
+    ) -> Result<bool, BlockEntityError>;
+    /// Side: server.
+    /// `RandomizableContainer.unpackLootTable(null)`, what vanilla's `getItem`, `setItem`,
+    /// `removeItem` and `isEmpty` run before they touch a container's slots: a table still
+    /// waiting (from [`Self::block_entity_set_loot_table`], a save or a structure) rolls into
+    /// the container's empty slots now, with no player, as
+    /// `block_entity_set_loot_table` describes. Reads through `&dyn Host`
+    /// (`item_slot`) and `set_item_slot` don't roll it: call this first when the mod reads or
+    /// writes the slots of a container that may still hold a table. Ok(true) when a table
+    /// rolled, Ok(false) when none waited; Stale for an invalidated or unwritable handle.
+    /// Inside a transaction an abort puts the table and the slots back.
+    fn block_entity_unpack_loot_table(
+        &mut self,
+        entity: BlockEntityRef,
+    ) -> Result<bool, BlockEntityError>;
+    /// Side: server.
+    /// [`Self::block_entity_merge_data`] without the send: the data is merged and loaded,
+    /// then `BlockEntity.setChanged` marks the chunk unsaved and notifies comparators, and no
+    /// `Level.sendBlockUpdated` follows. Clients keep what they last got until
+    /// `block_entity_sync`, so a machine whose state changes every tick sends when it
+    /// chooses, as a vanilla or NeoForge block entity calling `setChanged()` and
+    /// `Level.sendBlockUpdated` itself does. A block entity whose own `setChanged` sends is
+    /// still sent: a vanilla shelf's (`ShelfBlockEntity.setChanged`) calls
+    /// `sendBlockUpdated` itself. Same results, errors and transaction rules as
+    /// `merge_data`.
+    fn block_entity_merge_data_quiet(
+        &mut self,
+        entity: BlockEntityRef,
+        data: Compound,
+    ) -> Result<bool, BlockEntityError>;
+    /// Side: server.
+    /// [`Self::block_entity_replace_data`] without the send, as
+    /// [`Self::block_entity_merge_data_quiet`] is to `merge_data`: `setChanged` only, the
+    /// client update left to `block_entity_sync`.
+    fn block_entity_replace_data_quiet(
         &mut self,
         entity: BlockEntityRef,
         data: Compound,

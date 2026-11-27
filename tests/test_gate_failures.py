@@ -8,8 +8,11 @@ import sys
 import tempfile
 import unittest
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
 from tools.ci.gate_summary import summary
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 
 class GateFailuresTests(unittest.TestCase):

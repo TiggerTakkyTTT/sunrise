@@ -32,12 +32,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / 'tools'))
 
-import lab  # noqa: E402
-import oracle_harness  # noqa: E402
-import test_model_baking_parity as baking  # noqa: E402
-import test_rust_parity as base  # noqa: E402
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness, test_model_baking_parity as baking, test_rust_parity as base  # noqa: E402
 
 
 def bits(value):
@@ -108,8 +105,11 @@ def main():
                ROOT / 'Cargo.toml', ROOT / 'Cargo.lock',
                ROOT / 'crates/sunrise-client/examples/probe/trident_probe.rs',
                ROOT / 'crates/sunrise-client/examples/probe/main.rs',
-               ROOT / 'crates/sunrise-client/src/arrows.rs',
-               ROOT / 'crates/sunrise-client/src/game/items/trident.rs']
+               ROOT / 'crates/sunrise-sim/src/entities/arrows.rs',
+               ROOT / 'crates/sunrise-sim/src/entities/arrows/flight.rs',
+               ROOT / 'crates/sunrise-sim/src/entities/arrows/contact.rs',
+               ROOT / 'crates/sunrise-sim/src/entities/arrows/state.rs',
+               ROOT / 'crates/sunrise-gameplay/src/game/items/trident.rs']
     tested = base.source_hashes(sources)
     cases = fixtures()
     (build / 'inputs.txt').write_text(''.join(json.dumps(row, separators=(',', ':')) + '\n'

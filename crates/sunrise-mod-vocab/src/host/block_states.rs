@@ -77,6 +77,15 @@ pub trait BlockStatesBackend {
         name: &str,
     ) -> Result<Option<&str>, BlockStateError>;
     /// Side: both.
+    /// Visit each property of this `BlockState` with its serialized value, in name order, from
+    /// immutable block metadata.
+    #[forward_api_inputs]
+    fn block_metadata_visit_properties(
+        &self,
+        state: BlockState,
+        visit: &mut dyn FnMut(&str, &str),
+    ) -> Result<(), BlockStateError>;
+    /// Side: both.
     /// Return a `BlockState` with one property changed, without a world write.
     #[forward_api_inputs]
     #[forward_api_output]
@@ -94,6 +103,18 @@ pub trait BlockStatesBackend {
         block: BlockKey,
         properties: &[StateConstraint],
     ) -> Result<BlockState, BlockStateError>;
+    /// Side: both.
+    /// The key of the block registered as `id`, read by `BlockMetadata::key`.
+    fn block_metadata_key(&self, id: &str) -> Option<BlockKey>;
+    /// Side: both.
+    /// The properties of `block`, read by `BlockMetadata::state_definition`.
+    fn block_metadata_state_definition(
+        &self,
+        block: BlockKey,
+    ) -> Result<StateProperties<'_>, BlockStateError>;
+    /// Side: both.
+    /// The owned metadata read by `BlockStates::metadata`.
+    fn block_metadata_snapshot(&self) -> Option<std::sync::Arc<dyn BlockMetadata + Send + Sync>>;
     /// Side: both.
     /// `BlockState.canBeReplaced()`: whether placing a block where this state stands
     /// replaces it (air, grass, water, snow layers). None for an unknown state.
@@ -163,10 +184,42 @@ pub trait BlockStatesBackend {
     /// declared value, not what the block's parts answer in a level. None for an unknown state.
     fn block_state_jump_factor(&self, state: BlockState) -> Option<f32>;
     /// Side: both.
+    /// The state's collision boxes with an empty collision context, in block-local
+    /// coordinates (`[min_x, min_y, min_z, max_x, max_y, max_z]`; a box may leave the cell, as a
+    /// fence's reaches y 1.5), and whether they hold at every position ([`StateCollision`]).
+    /// None for an unknown state.
+    fn block_state_collision(&self, state: BlockState) -> Option<StateCollision>;
+    /// Side: both.
+    /// The bounce restitution and fall-distance reduction the state's block declares
+    /// (`BlockBehaviour.Properties.bounceRestitution`, `fallDistanceReduction`): 0.75 and 0.5 for
+    /// beds and the shelf mushroom, a bounce of 1.0 for slime, 0 for most blocks. The static
+    /// properties only: neither a block part's `bounce_restitution` nor a custom `fallOn` (hay's
+    /// 0.2 fall damage multiplier). None for an unknown state.
+    fn block_state_landing(&self, state: BlockState) -> Option<BlockLanding>;
+    /// Side: both.
+    /// The state's walking path type (`WalkNodeEvaluator.getPathTypeFromState`) after the block
+    /// parts' `isPathfindable` answers: `Blocked`, `Open`, `Fire`, `Damaging`, `Lava`, `Water`,
+    /// `StickyHoney`, `PowderSnow`, `Fence`, doors, trapdoors, leaves. The state alone: neither the
+    /// per-position `block_path_type` hook nor the neighbour rules (`checkNeighbourBlocks`:
+    /// `FireInNeighbor`, `DamagingInNeighbor`) apply. None for an unknown state.
+    fn block_state_path_type(&self, state: BlockState) -> Option<PathType>;
+    /// Side: both.
     /// `BlockState.isSolidRender()`: whether the state is a full, occluding cube for rendering
     /// and light (stone yes; glass, leaves and slabs no). Not `isSolid` and not full collision.
     /// None for an unknown state.
     fn block_state_is_solid_render(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `BlockState.isSolid()`, the cached `legacySolid`, read by `BlockStates::is_solid`.
+    fn block_state_is_solid(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// The cached `isCollisionShapeFullBlock`, read by `BlockStates::collision_is_full_block`.
+    fn block_state_collision_is_full_block(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `PoiTypes.forState`: the point of interest type the state belongs to (`minecraft:home`
+    /// for a bed's head, `minecraft:librarian` for a lectern, `minecraft:meeting` for a bell),
+    /// the states mods add with `extend_poi_types` included. None for a state that is in no
+    /// POI type and for an unknown state.
+    fn block_state_poi_type(&self, state: BlockState) -> Option<Identifier>;
     /// Side: both.
     /// `BlockState.propagatesSkylightDown()`: whether sky light passes down through the state
     /// unchanged, the block's own answer included (glass, barriers and vegetation override the
@@ -187,6 +240,12 @@ pub trait BlockStatesBackend {
         state: BlockState,
         class: BlockClass,
     ) -> Result<Option<bool>, LevelReadError>;
+    /// Side: both.
+    /// The read of `BlockStates::is_liquid_block_container`.
+    fn block_state_is_liquid_block_container(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// The read of `BlockStates::is_simple_waterlogged`.
+    fn block_state_is_simple_waterlogged(&self, state: BlockState) -> Option<bool>;
     /// Side: both.
     /// The resolved reaction read by `BlockStates::piston_push_reaction`.
     #[forward_api_inputs]

@@ -33,6 +33,8 @@ pub(crate) use super::external::ShadowView;
 pub trait PackPostExt: Sized {
     /// The shadow pass this frame wants, when the pack draws one.
     fn shadow_view(&self, frame: &Frame) -> Option<ShadowView>;
+    /// The shadow pass's size, distance and matrices as `frame` reads them, for mods.
+    fn mod_shadow_state(&self, frame: &Frame) -> Option<(u32, f32, [f32; 16], [f32; 16])>;
     /// The entities and block entities the pack draws this frame, into its own buffers.
     fn prepare_entities(
         &mut self,
@@ -46,6 +48,9 @@ pub trait PackPostExt: Sized {
         skin: Option<&SkinFrame>,
         motion: (&[(u32, u64)], &[u32]),
     );
+    /// After `prepare_entities`: the view and revision of each dynamic texture the pack's entity
+    /// draws bind as their texture.
+    fn resolve_entity_textures(&mut self, resolve: impl FnMut(u64) -> (wgpu::TextureView, u64));
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws
     /// the result onto `screen`. Notifies after the sky if the frame assigned the stage to this
     /// pack, and after the last pack world pass, before composition. Fails once the device is lost (`lost`).
@@ -139,6 +144,10 @@ impl PackPostExt for PackPost {
         )
     }
 
+    fn mod_shadow_state(&self, frame: &Frame) -> Option<(u32, f32, [f32; 16], [f32; 16])> {
+        self.shadow_state(&frame_view(frame))
+    }
+
     /// Splits `entities` (`Frame::entities`) between the pack and Sunrise by its runs
     /// (`spans`): the pack's part is uploaded for this frame's draw, Sunrise's goes to `rest`.
     fn prepare_entities(
@@ -174,6 +183,12 @@ impl PackPostExt for PackPost {
             skin,
             motion,
         );
+    }
+
+    fn resolve_entity_textures(&mut self, resolve: impl FnMut(u64) -> (wgpu::TextureView, u64)) {
+        if let Some(e) = &mut self.entities {
+            e.geometry.resolve_textures(resolve);
+        }
     }
 
     /// Runs the pack over the world drawn into `world` (colour) and `world_depth`, then draws

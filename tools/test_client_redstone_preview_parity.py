@@ -6,11 +6,12 @@ window. The Rust tests run placement and neighbor updates through DryLevel,
 with server-side controls. This does not replay a flying machine.
 """
 import os
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 
 def main():

@@ -28,6 +28,12 @@ pub enum ModelError {
     StaleModel,
 }
 
+impl crate::NoBackend for ModelError {
+    fn no_backend() -> Self {
+        Self::UnknownModel
+    }
+}
+
 /// An item requested at registration; its load-owned slot identifies the canonical name.
 // no wire: decoding validates the u32 slot with ItemKey::from_slot on the host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,7 +52,7 @@ impl ItemKey {
     /// Whether this item is in `tag` (`ItemStack.is(TagKey)`), over `tags`'s current
     /// authoritative snapshot. An unknown tag is `Some(false)`; unavailable tags or mappings
     /// return `None`.
-    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey) -> Option<bool> {
+    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey<ItemKey>) -> Option<bool> {
         tags.is_in_tag(self, tag)
     }
     /// The fluid a filled bucket the game registers holds (`BucketItem.content`), the inverse of
@@ -77,7 +83,7 @@ pub struct MenuKey(pub(crate) u32);
 pub struct EnchantmentKey(pub(crate) u32);
 
 /// The registry facts a mod reads for an enchantment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub struct EnchantmentInfo {
@@ -91,17 +97,30 @@ pub struct EnchantmentInfo {
     pub anvil_cost: u32,
     /// Whether the enchantment is in the curse tag (`#minecraft:curse`).
     pub curse: bool,
+    /// The enchantment's name as its definition writes it (`Enchantment.description`, which
+    /// `Enchantment.getFullname` renders): a translatable key with its fallback and arguments
+    /// (`enchantment.minecraft.sharpness` for vanilla's), or a data pack's literal, with its
+    /// style. Render it in the player's language with the host's text reads.
+    pub description: Text,
 }
 
 impl EnchantmentInfo {
     /// Construct registry facts for an enchantment.
-    pub fn new(id: String, max_level: u32, weight: u32, anvil_cost: u32, curse: bool) -> Self {
+    pub fn new(
+        id: String,
+        max_level: u32,
+        weight: u32,
+        anvil_cost: u32,
+        curse: bool,
+        description: Text,
+    ) -> Self {
         Self {
             id,
             max_level,
             weight,
             anvil_cost,
             curse,
+            description,
         }
     }
 }

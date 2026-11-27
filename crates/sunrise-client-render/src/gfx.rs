@@ -64,6 +64,7 @@ use gpu_checks::GpuChecks;
 use outline::{debug_line_opaque, debug_lines_opaque_first, outline_vertices_into};
 pub use outline::{outline_params, outline_vertices, outline_width};
 use overlay::Overlay;
+mod dynamic_entity;
 mod entity_batch;
 mod entity_outline;
 #[cfg(any(test, feature = "test-support"))]
@@ -100,23 +101,28 @@ mod sprite_arrays_tests;
 mod terrain_model;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_gpu;
+#[cfg(feature = "test-support")]
+pub use test_gpu::lock as lock_test_gpu;
 mod weather;
 mod world_text;
 use cull::occlusion_culling_requested;
 use entity_batch::EntityBatch;
 pub use entity_batch::{
-    ADDITIVE_PARTICLE_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY, DRAGON_RAYS_OVERLAY,
-    ENERGY_SWIRL_OVERLAY, EntityQuadCapacity, EntityQuadScope, FLUID_OVERLAY, GLINT_ONLY_OVERLAY,
-    OIT_ENTITY, SHADOW_OVERLAY, TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY,
-    TERRAIN_MODEL_SOLID_OVERLAY, TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY,
-    TEXT_POLYGON_OFFSET_OVERLAY, TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP,
-    TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY,
-    WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY, WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain,
-    mark_oit,
+    ADDITIVE_PARTICLE_OVERLAY, ARMOR_GLINT_ONLY_OVERLAY, BANNER_PATTERN_OVERLAY, DISSOLVE_OVERLAY,
+    DRAGON_RAYS_OVERLAY, DYNAMIC_TEXTURE_CUTOUT_OVERLAY, DYNAMIC_TEXTURE_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY, ENERGY_SWIRL_OVERLAY, EntityQuadCapacity, EntityQuadScope,
+    FLUID_OVERLAY, GLINT_ONLY_OVERLAY, OIT_ENTITY, SHADOW_OVERLAY,
+    TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY,
+    TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, TRANSLUCENT_DRAW_FLIP, TRANSLUCENT_GLINT_ITEM_OVERLAY,
+    TRANSLUCENT_ITEM_OVERLAY, TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY, dynamic_texture_bits, is_native_terrain, mark_oit,
 };
+pub use entity_batch::{NAME_TAG_OVERLAY, NAME_TAG_SOLID_OVERLAY};
 use external::{shadow_box, shadow_runs};
-pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
+pub use frustum::{Cull, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
+pub use mod_gpu::ModGpuResources;
 pub use section_fade::{CHUNK_VISIBILITY_THRESHOLD, chunk_visibility, fade_millis};
 use section_fade::{FadeInputs, compiled_and_visible, section_instance, section_visibility};
 #[doc(hidden)]
@@ -230,9 +236,7 @@ use display_watch::{macos_hdr, os_reported};
 pub use hdr::{Calibration as HdrCalibration, Output as HdrOutput};
 pub use output::{DisplayReading, EffectiveOutput, FrameConfiguration, FrameRequest};
 
-pub mod block_light;
 mod custom_sky;
-mod displace;
 mod frame_policy;
 pub mod lightning;
 mod linear_blend;
@@ -240,13 +244,16 @@ mod linear_blend;
 use frame_policy::frame_format;
 use frame_policy::{frame_configuration, overlay_format, sunrise_tone_curve};
 mod lod;
+pub mod mod_compute;
+pub mod mod_frame_graph;
+pub mod mod_gpu;
+pub mod mod_meshes;
 pub mod mod_pipelines;
-mod native_material;
-mod native_pack;
-mod native_post;
+pub mod mod_readback;
+pub mod mod_render_targets;
+pub mod mod_storage;
+pub mod mod_uniforms;
 use crate::render_slots as native_render;
-mod native_shadow;
-mod native_sky;
 mod occlusion;
 mod oit;
 mod oit_features;
@@ -291,7 +298,6 @@ pub(crate) mod upload;
 mod view;
 mod view_sections;
 mod visbuffer;
-mod wgsl_prefix;
 mod world_handover;
 mod world_post;
 pub mod world_primitives;
@@ -677,7 +683,6 @@ impl Renderer {
                 self.frame_gen.on,
                 (self.pack_post.as_ref())
                     .map(|(_, p)| p.as_ref().is_some_and(|p| p.skins_entities())),
-                self.native.is_some(),
                 || native_render::needs().entity_spans,
             )
     }
@@ -868,7 +873,11 @@ impl Renderer {
     }
     /// Device `max_buffer_size`, for instance-room checks while `Renderer` is borrowed by `render`.
     pub fn max_buffer_size(&self) -> u64 {
-        self.device.limits().max_buffer_size
+        self.mod_gpu.max_buffer_size()
+    }
+    /// See [`ModGpuResources::mod_binding_limits`].
+    pub fn mod_binding_limits(&self) -> (u64, u64) {
+        self.mod_gpu.mod_binding_limits()
     }
     /// Render `frame`, optionally driving mod world-render hooks (`FrameHooks`) at the renderer's
     /// real visibility, sky, prepare, pass-stage, and post-world boundaries.
@@ -899,7 +908,7 @@ impl Renderer {
         if self.device_lost() {
             return Err("the graphics device was lost".into());
         }
-        let patched = !frame.hud.patches.is_empty() || !frame.hud.image_patches.is_empty();
+        let patched = !frame.hud.patches.is_empty() || !frame.hud.dynamic_commands.is_empty();
         if !matches!(rendered, Ok(true)) && patched {
             let section_copies = self.section_copies.take();
             let has_section_copies = section_copies.is_some();
@@ -910,7 +919,7 @@ impl Renderer {
                     })
             });
             self.hud
-                .upload_patches(&mut self.uploads, &mut encoder, frame.hud);
+                .upload_patches(&self.device, &mut self.uploads, &mut encoder, frame.hud);
             self.uploads.finish(&encoder);
             if has_section_copies {
                 self.section_copy_bytes = 0;
@@ -922,6 +931,11 @@ impl Renderer {
         }
         // A scaled screenshot's frame never reached the window.
         rendered.map(|drawn| drawn && scaled.is_none())
+    }
+    /// The device's largest 2D texture side (`max_texture_dimension_2d`), the limit of a dynamic
+    /// texture.
+    pub fn max_texture_side(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
     }
     /// Whether the device's loss callback has fired. A surface reconfigure
     /// alone cannot restore resources belonging to a lost device.
@@ -1021,14 +1035,12 @@ pub(crate) fn world_projection(fov_degrees: f32, aspect: f32, far: f32) -> Mat4 
 /// face `eye` (`view::projection_center`), the mesh at the camera-relative
 /// `origin`; all of them when there is no eye.
 fn facing_runs(sides: &Sides, eye: Option<Vec3>, origin: [f32; 3], draw: impl FnMut(u32, u32)) {
-    facing_runs_from(sides, eye, None, origin, Quads::All, draw)
+    facing_runs_from(sides, eye, origin, Quads::All, draw)
 }
-/// `facing_runs` for the eye and, with `low`, every eye straight below it down to that
-/// camera-relative height (the water mirror's eye).
+/// `facing_runs` for one `part` of a mesh's solid quads.
 fn facing_runs_from(
     sides: &Sides,
     eye: Option<Vec3>,
-    low: Option<f32>,
     origin: [f32; 3],
     part: Quads,
     draw: impl FnMut(u32, u32),
@@ -1036,8 +1048,7 @@ fn facing_runs_from(
     match eye {
         Some(eye) => {
             let eye = eye - Vec3::from(origin);
-            let low = low.map_or(eye.y, |y| (y - origin[1]).min(eye.y));
-            sides.visible_from(eye.to_array(), low, part, draw)
+            sides.visible_from(eye.to_array(), eye.y, part, draw)
         }
         None => sides.every(part, draw),
     }

@@ -13,7 +13,7 @@ use crate::item::item_stack::{component_edits::edit_item_components, read_stack_
 use crate::{
     BundleItems, Capability, Direction, ENTITY_ITEMS, EquipmentSlot, Hand, ITEMS,
     ItemComponentEditor, ItemKey, ItemResource, ItemStack, ItemStackView, LevelRef, MenuRef,
-    MenuSlotBacking, Overanswered, ResourceHandler, ServerHost, StackWriteError,
+    MenuSlotBacking, Overanswered, ResourceHandler, ServerHost, StackWriteError, StorageSlot,
     TransactionContext, TransactionError, backend_mut_of, backend_of,
 };
 use std::{
@@ -566,6 +566,37 @@ pub(crate) fn warn_broken(owner: Option<&'static str>, at: &dyn Debug) {
 }
 
 impl ItemPlace {
+    /// The block container slot this place is, if it is one: [`StorageSlot`], the same value
+    /// whichever side, half of a double chest or block of a multiblock reached it. A
+    /// [`BlockEntity`](Self::BlockEntity) place asks its [`ITEMS`] handler
+    /// ([`ResourceHandler::backing`]); a [`MenuSlot`](Self::MenuSlot) place is the slot its menu
+    /// shows when that is a block entity's ([`MenuSlotBacking::BlockEntity`]). [`Strict`](Self::Strict)
+    /// and [`OneByOne`](Self::OneByOne) are the place inside. Every other place, and a handler
+    /// that gives no backing, is `None`.
+    pub fn backing(&self, host: &mut dyn ServerHost) -> Option<StorageSlot> {
+        let mut place = self;
+        while let Self::Strict(inner) | Self::OneByOne(inner) = place {
+            place = inner;
+        }
+        match place {
+            Self::BlockEntity {
+                level,
+                pos,
+                side,
+                slot,
+            } => level
+                .capability(host, &ITEMS, *pos, *side)?
+                .backing(host, *slot),
+            Self::MenuSlot { menu, slot } => match menu.slot_backing(host, *slot) {
+                Some(MenuSlotBacking::BlockEntity { level, pos, slot }) => {
+                    Some(StorageSlot { level, pos, slot })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Lend the stack here to `read` and return its result, or return `None` without calling it
     /// if the place is empty or unavailable. Use [`ItemStackView::project`] to inspect components
     /// or retain an owned stack. Native reads never load chunks or initialize a player; reading a
@@ -632,7 +663,8 @@ impl ItemPlace {
         )
     }
 
-    /// What is here, with its components but without its count (`ItemAccess.getResource`).
+    /// What is here, with its live components but without its count (`ItemAccess.getResource`).
+    /// This includes a map's pending lock or scale even though it is not saved.
     pub fn resource(&self, host: &mut dyn ServerHost) -> Option<ItemResource> {
         self.with_stack(host, |stack| {
             stack.project().map(|stack| ItemResource::of(&stack))
@@ -671,9 +703,10 @@ impl ItemPlace {
     }
 
     /// Takes up to `amount` from here, in transaction `tx`, when the item and components
-    /// match `resource` (`ItemAccess.extract`). In places the game handles directly, an
-    /// override equal to the item's default does not change the match, and the resource
-    /// need not be valid for insertion. A creative player's hand gives without losing any.
+    /// match `resource` (`ItemAccess.extract`). Places the game handles directly compare
+    /// decoded live components: an override equal to the item's default does not change
+    /// the match, but a pending map lock or scale does. The resource need not be valid for
+    /// insertion. A creative player's hand gives without losing any.
     /// A mismatched `tx` returns `Err(TransactionError::InvalidContext)`.
     pub fn extract(
         &self,

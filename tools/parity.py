@@ -58,16 +58,11 @@ import subprocess
 import sys
 import time
 
-try:
-    from . import parity_reach
-    from . import file_lock
-    from . import process_tree
-except ImportError:
-    import parity_reach
-    import file_lock
-    import process_tree
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import file_lock, parity_reach, process_tree
+from tools.ci.surface_report import source_layout
+
 LOCAL = ROOT / ".local"
 STATE_DIR = LOCAL / "parity-runner"
 STATE = STATE_DIR / "state.json"
@@ -95,6 +90,12 @@ SHARED = Path(os.environ.get("PARITY_SHARED") or (LOCAL / "minecraft").resolve()
 MACHINE_JOBS = int(os.environ.get("PARITY_MACHINE_JOBS") or max(1, (os.cpu_count() or 4) // 2))
 HOST = socket.gethostname().split(".")[0]
 DEFAULT_MEMORY = 3 << 30  # assumed peak for a harness that never ran here
+FIXTURE_RECORD_VERSION = 1
+FIXTURE_ROOTS = "tools/ci/parity-fixture-roots.json"
+FIXTURE_BINARY = "sunrise-parity-fixtures"
+FIXTURE_VARIANTS = {f"{FIXTURE_BINARY}-client-defaults": "client-defaults",
+                    f"{FIXTURE_BINARY}-no-default-features": "lean"}
+
 FAILURE_TAILS, FAILURE_TAIL_LINES = 10, 30  # the summary prints the end of the first failures' logs
 
 
@@ -217,6 +218,9 @@ def environment_key(hasher):
 
 def key(record, hasher, environment):
     digest = hashlib.sha256(environment.encode())
+    if "fixture_record_version" in record:
+        digest.update(json.dumps([record["fixture_record_version"], record["fixture_runs"]],
+                                 sort_keys=True).encode())
     for path in sorted(record["dependencies"]):
         digest.update(f"{path}\0{hasher(ROOT / path)}\n".encode())
     return digest.hexdigest()
@@ -541,6 +545,77 @@ def recorded_artifacts(record):
     return artifacts
 
 
+def fixture_runs(commands):
+    runs = []
+    for command in commands:
+        if not command:
+            continue
+        binary = Path(command[0].replace("\\", "/")).name.removesuffix(".exe")
+        if binary not in FIXTURE_VARIANTS and binary != FIXTURE_BINARY:
+            continue
+        flags = {"--exact", "--ignored", "--include-ignored", "--nocapture", "--show-output", "--quiet", "-q"}
+        candidates = [arg for arg in command[1:] if arg not in flags]
+        runs.append({"binary": binary, "variant": FIXTURE_VARIANTS.get(binary), "arguments": command[1:],
+                     "selector": candidates[0] if len(candidates) == 1 and not candidates[0].startswith("-") else None,
+                     "exact": "--exact" in command[1:]})
+    return runs
+
+
+def fixture_coverage(record, mappings):
+    """Return covered packages, selected entries and routing inputs, or None for unknown ownership."""
+    packages, entries, inputs = set(), set(), {FIXTURE_ROOTS}
+    for run in record["fixture_runs"]:
+        mapping = mappings.get(run.get("variant"))
+        if not mapping or not all(mapping.get(key) for key in ("packages", "dispatcher", "fixtures")):
+            return None
+        if not set(mapping["packages"]) or "inputs" not in mapping:
+            return None
+        packages.update(mapping["packages"])
+        entries.add(mapping["dispatcher"])
+        inputs.update(mapping["inputs"])
+        selector = run["selector"]
+        matched = [path for name, path in mapping["fixtures"].items() if selector and
+                   (name == selector if run["exact"] else selector in name)]
+        entries.update(matched or mapping["fixtures"].values())
+    return packages, entries, inputs
+
+
+def fixture_mappings():
+    try:
+        data = json.loads((ROOT / FIXTURE_ROOTS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != FIXTURE_RECORD_VERSION:
+        return {}
+    return data.get("variants", {})
+
+
+def fixture_inputs(coverage):
+    packages, entries, inputs = coverage
+    return set(entries) | set(inputs) | {
+        path.relative_to(ROOT).as_posix()
+        for package in packages
+        for path in (ROOT / "crates" / package).rglob("*")
+        if path.is_file()
+    }
+
+
+def current_fixture_record(record):
+    return record.get("fixture_record_version") == FIXTURE_RECORD_VERSION
+
+
+def reusable_record(record, split):
+    return not split or (current_fixture_record(record) and record.get("fixture_ownership", False)
+                         and isinstance(record.get("fixture_runs"), list))
+
+
+def reusable_fixture_inputs(record):
+    if not record["fixture_runs"]:
+        return True
+    coverage = fixture_coverage(record, fixture_mappings())
+    return coverage is not None and fixture_inputs(coverage) <= set(record.get("dependencies", ()))
+
+
 def only_probes_run(paths, names):
     """A probe binary's dep-info lists every probe in it. Keep those the harness ran, the probes they include! or
     name (crate::<probe>) and the shared support modules they name (support::<module>), so that editing one probe
@@ -768,8 +843,9 @@ def publish(name, record):
     """Share a pass, so any worktree with the same inputs can reuse it."""
     if record["status"] != "pass" or "key" not in record:
         return
+    fields = ("dependencies", "artifacts", "fixture_record_version", "fixture_runs", "fixture_ownership")
     for path, data in ((SHARED / "passes" / name / f"{record['key']}.json", record),
-                       (SHARED / "dependencies" / f"{name}.json", {k: record[k] for k in ("dependencies", "artifacts")})):
+                       (SHARED / "dependencies" / f"{name}.json", {k: record[k] for k in fields if k in record})):
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         temporary.write_text(json.dumps(data))
@@ -781,7 +857,7 @@ def machine_slot():
     slots = SHARED / "slots"
     slots.mkdir(parents=True, exist_ok=True)
     for index in range(MACHINE_JOBS):
-        handle = open(slots / f"{index}.lock", "w")
+        handle = open(slots / f"{index}.lock", "a")
         if file_lock.lock(handle, wait=False):
             return handle
         handle.close()
@@ -825,12 +901,19 @@ def outcome(name, script, passed, elapsed, trace_path, hasher=None):
     """The record of a finished harness, from its trace. With a hasher, also the content hash of each dependency."""
     record = {"status": "pass" if passed else "fail", "seconds": round(elapsed, 1),
               "finished": time.strftime("%Y-%m-%dT%H:%M:%S"), "host": HOST}
-    try:
-        trace = json.loads(Path(trace_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        trace = None  # killed before writing it, or the disk was full: the pass can't be keyed
+    # No trace file: the harness was killed before writing it, so the pass can't be keyed. A trace that exists is
+    # written whole (trace_main), so one that cannot be read or parsed is an error.
+    trace = json.loads(Path(trace_path).read_text(encoding="utf-8")) if Path(trace_path).is_file() else None
     if trace:
         record["dependencies"], record["artifacts"] = dependencies(trace, harness_settings(script).get("PARITY_RUST_SCOPE"))
+        if source_layout(ROOT) != "legacy":
+            record["fixture_record_version"] = FIXTURE_RECORD_VERSION
+            record["fixture_runs"] = fixture_runs(trace["commands"])
+            coverage = fixture_coverage(record, fixture_mappings()) if record["fixture_runs"] else None
+            record["fixture_ownership"] = bool(coverage) if record["fixture_runs"] else not any(
+                artifact[1] == FIXTURE_BINARY for artifact in record["artifacts"])
+            if coverage:
+                record["dependencies"] = sorted(set(record["dependencies"]) | fixture_inputs(coverage))
         if "peak_bytes" in trace:
             record["peak_bytes"] = trace["peak_bytes"]
         if passed:
@@ -1134,10 +1217,10 @@ def fresh_only(keep):
     """{harness: date} of the harnesses that passed only without kept oracle runs, within FRESH_ONLY_DAYS."""
     listing = keep / "fresh-only.json"
     names = json.loads(listing.read_text(encoding="utf-8")) if listing.exists() else {}
-    if not isinstance(names, dict):
-        return {}
+    if not isinstance(names, dict) or not all(isinstance(day, str) for day in names.values()):
+        raise ValueError(f"{listing} is not an object of harness names and dates")
     oldest = time.strftime("%Y-%m-%d", time.gmtime(time.time() - FRESH_ONLY_DAYS * 86400))
-    return {name: day for name, day in names.items() if isinstance(name, str) and isinstance(day, str) and day >= oldest}
+    return {name: day for name, day in names.items() if day >= oldest}
 
 
 def remember_fresh_only(keep, results):
@@ -1150,7 +1233,7 @@ def remember_fresh_only(keep, results):
              if record.get("fresh_rerun") == "pass"}
     if not added:
         return
-    with open(keep / "fresh-only.lock", "w") as handle:
+    with open(keep / "fresh-only.lock", "a") as handle:
         file_lock.lock(handle)
         temporary = keep / f".fresh-only.{os.getpid()}.json"
         temporary.write_text(json.dumps(dict(fresh_only(keep), **added), indent=1, sort_keys=True) + "\n",
@@ -1339,7 +1422,10 @@ def serve(executor, inbox, empty, send, state, hasher):
 
 def stale(name, state, hasher, environment):
     record = state["harnesses"].get(name)
-    if record and record.get("status") == "pass" and "key" in record and key(record, hasher, environment) == record["key"]:
+    split = source_layout(ROOT) != "legacy"
+    if (record and reusable_record(record, split) and record.get("status") == "pass"
+            and "key" in record and key(record, hasher, environment) == record["key"]
+            and (not split or reusable_fixture_inputs(record))):
         return False
     # Passed elsewhere with the same inputs? Try this worktree's and the shared dependency lists.
     candidates = [record] if record and record.get("dependencies") else []
@@ -1347,10 +1433,14 @@ def stale(name, state, hasher, environment):
     if template.exists():
         candidates.append(json.loads(template.read_text(encoding="utf-8")))
     for candidate in candidates:
+        if not reusable_record(candidate, split) or (split and not reusable_fixture_inputs(candidate)):
+            continue
         shared = SHARED / "passes" / name / f"{key(candidate, hasher, environment)}.json"
         if shared.exists():
-            state["harnesses"][name] = dict(json.loads(shared.read_text(encoding="utf-8")), shared=True)
-            return False
+            result = json.loads(shared.read_text(encoding="utf-8"))
+            if reusable_record(result, split) and (not split or reusable_fixture_inputs(result)):
+                state["harnesses"][name] = dict(result, shared=True)
+                return False
     return True
 
 
@@ -1405,11 +1495,15 @@ def trace_main(output, script, arguments):
             peak = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
             peak //= 1024 if sys.platform == "darwin" else 1  # bytes on macOS, KiB elsewhere
             trace["peak_bytes"] = peak * 1024
-        Path(output).write_text(json.dumps(trace))
+        temporary = Path(f"{output}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(trace))
+        temporary.replace(output)
 
     atexit.register(write)
     sys.addaudithook(audit)
     sys.argv = [script, *arguments]
+    # What `python <script>` itself does (sys.path[0] is the script's folder) and runpy.run_path does not: a traced run
+    # imports exactly what the untraced run of the same harness would. Harnesses import tools.<name> from the root.
     sys.path.insert(0, str(Path(script).parent))
     runpy.run_path(script, run_name="__main__")
 
@@ -1560,13 +1654,13 @@ def affected_harnesses(found, records, changed, reach=True, base=None):
     if changed & SHARED_INPUTS:
         return set(found)
     graph, stop = None, frozenset()
+    split = source_layout(ROOT) != "legacy"
+    mappings = fixture_mappings() if split else {}
     # Parses are keyed by content, so every worktree sharing the vanilla data shares them.
-    cache_path = (SHARED if SHARED.is_dir() else STATE_DIR) / "reach-cache.json"
+    cache_name = f"reach-cache-fixtures-{FIXTURE_RECORD_VERSION}.json" if split else "reach-cache.json"
+    cache_path = (SHARED if SHARED.is_dir() else STATE_DIR) / cache_name
     if reach and any(path.startswith("crates/") for path in changed):
-        try:
-            cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            cache = {}
+        cache = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
         graph = parity_reach.SourceGraph(ROOT, rust_code, cache)
         # A changed file that differs in more than its `mod` declarations counts as soon as a harness reaches it,
         # so the search for that harness can stop there.
@@ -1586,6 +1680,21 @@ def affected_harnesses(found, records, changed, reach=True, base=None):
             continue
         dependencies = [canonical_dependency_path(path) for path in dependencies]
         plain = {path.split(KEEP)[0] for path in dependencies}
+        if split and not reusable_record(record, split):
+            affected.add(name)
+            continue
+        if split and record["fixture_runs"]:
+            coverage = fixture_coverage(record, mappings)
+            if coverage is None:
+                affected.add(name)
+                continue
+            packages, entries, inputs = coverage
+            # Generated dispatch and owner-local macros can hide dependencies from the source graph.
+            if (plain | entries | inputs) & changed or any(
+                    path.startswith("crates/") and parity_reach.crate_of(path) in packages for path in changed):
+                affected.add(name)
+                continue
+            # Other probes run by the same harness keep their usual dependency checks.
         hit = (plain & changed) | parity_reach.unrecorded(ROOT, plain, changed)
         if not hit:
             continue
@@ -1653,7 +1762,7 @@ def share_of(path, found, parser):
     plan and the tree disagree, which is refused rather than silently run as something else."""
     try:
         names = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError) as error:  # the command line's boundary: a share file the plan job did not write ends the run with a usage error
         parser.error(f"--harness-file: {path}: {error}")
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
         parser.error(f"--harness-file: {path} is not a JSON list of harness names")
@@ -1852,13 +1961,9 @@ def main():
         reuse_oracles = not args.fresh and (not args.all or ORACLE_KEEP is not None)
         kept_fresh_only = {}
         if reuse_oracles and ORACLE_KEEP:
-            # The keep only saves work: a keep that can't be read or tidied leaves this run without its list.
-            try:
-                ORACLE_KEEP.mkdir(parents=True, exist_ok=True)
-                prune_oracle_keep(ORACLE_KEEP)
-                kept_fresh_only = fresh_only(ORACLE_KEEP)
-            except (OSError, ValueError) as error:
-                print(f"oracle keep {ORACLE_KEEP}: {error}; running without its upkeep", flush=True)
+            ORACLE_KEEP.mkdir(parents=True, exist_ok=True)
+            prune_oracle_keep(ORACLE_KEEP)
+            kept_fresh_only = fresh_only(ORACLE_KEEP)
         local = LocalExecutor(jobs, int(memory_available() * 0.75), args.timeout,
                               REMOTE_LOCAL_PEAK if remotes and args.jobs is None else None)
         local.solo = solo_harnesses(config)
@@ -1870,12 +1975,6 @@ def main():
                   f"{', '.join(sorted(local.solo & {harness_of(name) for name in selected}))}", flush=True)
         results, elapsed = run(selected, state, hasher, environment_key(hasher), [*remotes, local], reuse_oracles,
                                rounds, set(kept_fresh_only))
-        if reuse_oracles and ORACLE_KEEP:
-            try:
-                remember_fresh_only(ORACLE_KEEP, results)
-            except (OSError, ValueError) as error:
-                print(f"oracle keep {ORACLE_KEEP}: {error}; the harnesses that passed only fresh are not kept",
-                      flush=True)
     finally:
         for executor in [*remotes, *([local] if local else [])]:
             executor.stop()
@@ -1897,6 +1996,8 @@ def main():
                 lines = []
             for line in lines:
                 print(f"    {line[:300]}")
+    if reuse_oracles and ORACLE_KEEP:  # after the run's state and report, so a keep that can't be written loses only its list
+        remember_fresh_only(ORACLE_KEEP, results)
     return 1 if failed else 0
 
 

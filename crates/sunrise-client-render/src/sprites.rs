@@ -135,6 +135,10 @@ pub struct Sprites {
     /// Each layer's frames at the texture's own resolution (square), and the
     /// frame shown first.
     native: Vec<(u32, Arc<Vec<Vec<u8>>>, usize)>,
+    /// The first frame, at its own side, of each layer larger than the array's edge, set by
+    /// [`Sprites::finish`]: `RenderAssets::atlas_sprite_pixels` returns it unscaled, where the
+    /// array holds it shrunk to the edge.
+    pub(crate) oversized: std::collections::BTreeMap<u32, (u32, Vec<u8>)>,
     /// Each layer's LabPBR maps (`_n` normals, `_s` specular) beside its texture: their
     /// frames at their own resolution (square).
     pbr: Vec<[Option<(u32, Vec<Vec<u8>>)>; 2]>,
@@ -342,6 +346,7 @@ impl Sprites {
         );
         let mut resized = Vec::with_capacity(self.native.len());
         self.pixels.clear();
+        self.oversized = oversized_frames(&self.native, size);
         for (from, frames, initial) in &self.native {
             // Native frames already match the atlas size: share the immutable
             // buffers with animations rather than copying every frame again.
@@ -1147,6 +1152,20 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
     // Only the atlas native minimum determines how many resampling-only mips to skip.
     let upscale = (size / minimum.max(1)).max(1).ilog2();
     requested.saturating_add(upscale).min(available - 1)
+}
+
+/// The frame each layer of `native` larger than the array's edge `size` starts on, at its own
+/// side, by layer: what [`Sprites::finish`] keeps in [`Sprites::oversized`].
+pub(crate) fn oversized_frames(
+    native: &[(u32, Arc<Vec<Vec<u8>>>, usize)],
+    size: u32,
+) -> std::collections::BTreeMap<u32, (u32, Vec<u8>)> {
+    native
+        .iter()
+        .enumerate()
+        .filter(|(_, (from, _, _))| *from > size)
+        .map(|(layer, (from, frames, initial))| (layer as u32, (*from, frames[*initial].clone())))
+        .collect()
 }
 
 #[cfg(test)]

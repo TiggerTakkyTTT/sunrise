@@ -12,10 +12,11 @@ import json
 import os
 from pathlib import Path
 import random
-try:
-    from . import lab, oracle_harness as h, test_rust_parity as base
-except ImportError:
-    import lab, oracle_harness as h, test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as h, test_rust_parity as base
 
 
 def fixtures():
@@ -47,7 +48,7 @@ def main():
     report = build / 'report.json'
     report.unlink(missing_ok=True)
     paths = ['crates/sunrise-world/src/nbt_path.rs',
-             'crates/sunrise-client-core/examples/nbt_path_reader_probe.rs',
+             'crates/sunrise-game-data/examples/nbt_path_reader_probe.rs',
              'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaNbtPathReaderOracle.java',
              'tools/test_nbt_path_reader_parity.py']
     sources = [lab.ROOT / path for path in paths]
@@ -59,7 +60,7 @@ def main():
         {'client': jars['server']}, libraries, lock['minecraft']['java_major'])
     h.java_run(build, classes, dependencies, 'VanillaNbtPathReaderOracle',
                [inputs, build / 'java.txt'], 'java')
-    h.run_logged(['cargo', 'build', '--offline', '--locked', '-p', 'sunrise-client-core',
+    h.run_logged(['cargo', 'build', '--offline', '--locked', '-p', 'sunrise-game-data',
                   '--example', 'nbt_path_reader_probe'], build, 'compile-rust',
                  env=dict(os.environ, CARGO_BUILD_JOBS=os.environ.get('CARGO_BUILD_JOBS', '2')))
     binary = lab.cargo_target() / 'debug/examples' / (

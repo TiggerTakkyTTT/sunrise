@@ -213,3 +213,27 @@ fn a_volume_only_edit_preserves_legacy_zero_pitch_clamping() {
     assert_eq!(backend.volume[&channel], 0.2);
     assert_eq!(backend.pitch[&channel], 0.5);
 }
+
+/// A mod's scale multiplies a source's volume on the channels already playing, its master scale
+/// every source's, and stays apart from the gain the music's fade owns.
+#[test]
+fn a_source_scale_reaches_playing_channels_and_keeps_apart_from_the_gain() {
+    let (mut engine, mut backend) = setup();
+    let (id, _) = engine.play_new(instance(), false, &mut backend);
+    let channel = engine.channel(id).unwrap();
+    let volume =
+        |backend: &test_backend::Null| (backend.volume[&channel] * 1000.0).round() / 1000.0;
+    assert_eq!(volume(&backend), 0.4);
+    engine.set_source_scale(4, 0.5, &mut backend);
+    assert_eq!(volume(&backend), 0.2);
+    assert_eq!(engine.source_scale(4), 0.5);
+    engine.set_source_scale(MASTER, 0.5, &mut backend);
+    assert_eq!(volume(&backend), 0.1);
+    assert_eq!(engine.source_scale(4), 0.25);
+    engine.update_category_volume(4, 0.5, &mut backend);
+    assert_eq!(volume(&backend), 0.05);
+    engine.set_source_scale(4, 2.0, &mut backend);
+    engine.set_source_scale(MASTER, 1.0, &mut backend);
+    assert_eq!(engine.source_scale(4), 1.0, "clamped to 1");
+    assert_eq!(volume(&backend), 0.2, "the gain stays");
+}

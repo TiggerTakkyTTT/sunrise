@@ -81,7 +81,7 @@ impl Deref for SectionLists {
 pub struct RendererMemorySnapshot {
     device: wgpu::Device,
     vertices: [u64; 2],
-    cpu: [(&'static str, usize); 4],
+    cpu: [(&'static str, usize); 3],
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -97,7 +97,7 @@ impl RendererMemorySnapshot {
     }
 
     /// Heap bytes of renderer per-section bookkeeping, by name.
-    pub fn cpu_census(&self) -> [(&'static str, usize); 4] {
+    pub fn cpu_census(&self) -> [(&'static str, usize); 3] {
         self.cpu
     }
 
@@ -245,8 +245,8 @@ impl Renderer {
         allocator_memory(&self.device)
     }
     /// Heap bytes of the renderer's per-section bookkeeping (`sunrise-ctl memory`):
-    /// resident sections, far tiles, block entities and light sources by section.
-    pub fn cpu_census(&self) -> [(&'static str, usize); 4] {
+    /// resident sections, far tiles and block entities by section.
+    pub fn cpu_census(&self) -> [(&'static str, usize); 3] {
         [
             ("resident_sections", self.sections.heap_bytes()),
             (
@@ -255,7 +255,6 @@ impl Renderer {
                     * (size_of::<crate::lod::TileKey>() + size_of::<lod::Tile>() + 1),
             ),
             ("block_entities", self.block_entities.heap_bytes()),
-            ("light_sources", self.light_blocks.heap_bytes()),
         ]
     }
 }

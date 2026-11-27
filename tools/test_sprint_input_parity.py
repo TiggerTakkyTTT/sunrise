@@ -8,10 +8,11 @@ import platform
 import random
 import struct
 import subprocess
-try:
-    from . import lab, test_rust_parity as base, test_model_baking_parity as baking
-except ImportError:
-    import lab, test_rust_parity as base, test_model_baking_parity as baking
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_model_baking_parity as baking
 
 def corpus():
     def step(keys,flags=0,food=20,window=7):return dict(keys=keys,flags=flags,food=food,window=window)
@@ -40,7 +41,7 @@ def main():
     build=lab.LOCAL/'rust-sprint-input';build.mkdir(exist_ok=True)
     report=build/'report.json';report.unlink(missing_ok=True)
     oracle=lab.ROOT/'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaSprintInputOracle.java'
-    sources=[Path(__file__),lab.ROOT/'tools/test_rust_parity.py',lab.ROOT/'tools/test_model_baking_parity.py',lab.ROOT/'tools/lab.py',oracle,lab.ROOT/'Cargo.toml',lab.ROOT/'Cargo.lock',lab.ROOT/'crates/sunrise-client/Cargo.toml',lab.ROOT/'crates/sunrise-client-input/src/input.rs',lab.ROOT/'crates/sunrise-client/src/sprint.rs',lab.ROOT/'crates/sunrise-client/src/lib.rs',lab.ROOT/'crates/sunrise-client/examples/probe/sprint_probe.rs']
+    sources=[Path(__file__),lab.ROOT/'tools/test_rust_parity.py',lab.ROOT/'tools/test_model_baking_parity.py',lab.ROOT/'tools/lab.py',oracle,lab.ROOT/'Cargo.toml',lab.ROOT/'Cargo.lock',lab.ROOT/'crates/sunrise-client/Cargo.toml',lab.ROOT/'crates/sunrise-client-input/src/input.rs',lab.ROOT/'crates/sunrise-sim/src/sprint.rs',lab.ROOT/'crates/sunrise-client/src/lib.rs',lab.ROOT/'crates/sunrise-client/examples/probe/sprint_probe.rs']
     tested=base.source_hashes(sources)
     def run(command,name):
         with (build/(name+'.log')).open('w') as log:subprocess.run(list(map(str,command)),cwd=lab.ROOT,check=True,timeout=600,stdout=log,stderr=subprocess.STDOUT)

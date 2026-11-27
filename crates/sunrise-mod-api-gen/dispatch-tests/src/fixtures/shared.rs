@@ -294,6 +294,8 @@ mod generated {
     }
     include!(concat!(env!("OUT_DIR"), "/mod_api_generated.rs"));
     pub(super) use self::mod_api::InlineImageReplacement;
+    // `living_heal` and the motion value hooks name the lent view unqualified.
+    pub(super) use self::mod_api::LivingView;
     pub(super) use self::mod_api::{BlockFace, BlockKey, BlockState, CrosshairTarget, NameTagLine};
     use self::mod_api::{GuiCanvas, StandaloneModelRegistration};
     pub use sunrise_mod_api_macros::__subscriptions;
@@ -373,13 +375,25 @@ fn enter_listener(entry: &'static ModEntry, hook: &'static str) -> ((), &'static
     ENTERED.with(|entered| entered.borrow_mut().push((index, hook)));
     ((), &*entry.hooks)
 }
+#[allow(dead_code)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Side {
+    Both,
+    Client,
+    Server,
+}
 struct ModEntry {
     id: &'static str,
     hooks: Box<dyn Hooks>,
+    side: Side,
 }
 impl ModEntry {
     fn new(id: &'static str, hooks: Box<dyn Hooks>) -> Self {
-        Self { id, hooks }
+        Self {
+            id,
+            hooks,
+            side: Side::Both,
+        }
     }
 }
 trait Registrar {}

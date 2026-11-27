@@ -14,10 +14,11 @@ import argparse
 import re
 from pathlib import Path
 
-try:
-    from . import input_recording
-except ImportError:
-    import input_recording
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import input_recording
 
 PLAYER = "Steve"
 # The opponent of the PvP routes: tools/client_packet_parity.py joins it as sunrise-bots --behaviour stand.

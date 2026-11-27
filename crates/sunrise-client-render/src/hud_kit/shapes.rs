@@ -61,6 +61,7 @@ impl HudBatch {
             color,
             depth: 0.0,
             glint_uv: [0.0, 0.0],
+            light: 0,
             text: 0,
         });
     }
@@ -82,6 +83,16 @@ impl HudBatch {
     /// A triangle in one colour (GUI px corners, any winding).
     pub fn fill_triangle(&mut self, atlas: &HudAtlas, corners: [[f32; 2]; 3], color: u32) {
         self.triangle_shaded(white(atlas), corners, [color; 3]);
+    }
+
+    /// A triangle, each corner its own colour blended across it (GUI px corners, any winding).
+    pub fn fill_triangle_shaded(
+        &mut self,
+        atlas: &HudAtlas,
+        corners: [[f32; 2]; 3],
+        colors: [u32; 3],
+    ) {
+        self.triangle_shaded(white(atlas), corners, colors);
     }
 
     /// An annular sector in one colour: between radii `r0` and `r1` (GUI px, snapped to whole

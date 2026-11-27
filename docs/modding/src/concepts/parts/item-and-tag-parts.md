@@ -316,7 +316,7 @@ a shield) goes on now that the used hand holds `event.held`. `event.stack` is th
 only the parts of its item are asked. `event.can_continue` arrives as vanilla's answer, `true` for the same item, and
 the part may set it either way. `true` goes on with `event.held` as the use's stack, so the next tick asks the parts
 of that item; `false` stops the use as another item would, without a release. It is asked each tick of a use, on the
-server and on a server's client, before `living_entity_use_item_tick`; `event.entity` is `None` for a player. An
+server and on a server's client, before `living_entity_use_item_tick`; `event.entity` is the user's id, a player's included. An
 emptied hand stops the use without asking, and so does a hotbar switch, which stops a main-hand use first.
 
 ## Stopping a use
@@ -394,6 +394,13 @@ across listeners and clamps to `0` when applied, matching NeoForge `AnvilMenu.se
 Changing only the costs doesn't revalidate vanilla's stack. Cancellation clears the output
 and both costs; an invalid replacement output is logged and ignored, keeping vanilla's
 output while still applying the cost edits.
+
+A mod's own anvil menu (an upgraded or portable anvil) runs the same listeners for its own
+inputs with `player.anvil_update(host, pos, &inputs)`, NeoForge's `CommonHooks.onAnvilUpdate`.
+Build an `AnvilUpdateInputs` from the menu's stacks, rename text, result and costs (the
+listeners see those as vanilla's), and apply the `AnvilUpdateEdits` it returns to the menu, or
+clear the result and both costs on `None` (a listener canceled). Other mods' anvil recipes
+then work in that menu too. It declines from inside an `anvil_update` listener.
 
 The server's `anvil_craft_pre` and `anvil_craft_post` both borrow the same pre-take snapshot
 through `event.inputs` (`AnvilCraftInputs<'_>`). Read the optional stacks through `inputs.left`

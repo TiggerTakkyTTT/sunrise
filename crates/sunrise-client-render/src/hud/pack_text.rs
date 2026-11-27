@@ -32,32 +32,7 @@ const GLUE: Glue = Glue {
     interface: sunrise_shaders::DEVICELESS_INTERFACE_LIMITS,
 };
 
-/// The packs' core shader stages `names` (`shaders/core/<name>.vsh` and `.fsh`, which may differ,
-/// as `core/screenquad` and `core/lightmap` do) with `defines`, over `defaults` (the game's own
-/// resources, which have vanilla's and its includes), when a pack replaces either stage, giving
-/// the blocks `provided` says yes to.
-pub(super) fn load_pair(
-    root: &ResourceSource,
-    defaults: &ResourceSource,
-    names: (&str, &str),
-    defines: &[&str],
-    glue: &Glue,
-    provided: &dyn Fn(&str) -> bool,
-) -> Option<Arc<Translated>> {
-    let name = names.1;
-    match translate_pair(root, defaults, names, defines, glue, provided)? {
-        Ok(program) => {
-            log::info!("the resource pack's {name} shader translated");
-            Some(Arc::new(program))
-        }
-        Err(e) => {
-            log::warn!("the resource pack's {name} shader is not used: {e}");
-            None
-        }
-    }
-}
-
-/// Why a pack's core shader is refused (`load_pair`), with the file it names.
+/// Why a pack's core shader is refused (`translate_selected`), with the file it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// A stage or include over the translator's budget for a whole shader
@@ -72,13 +47,14 @@ pub(crate) enum Refusal {
     /// An include the selected packs don't have (`ns:path`, as the shader asks for it).
     IncludeMissing { id: String },
     /// An include refused (`refusal`: missing, unreadable, over the budget, not text) at the
-    /// directive asking for it, in the file (`ns:path`) and on the line that has it.
+    /// directive asking for it, with the authored file and line and the stage that asked.
     Include {
         file: String,
         line: u32,
+        stage: Option<naga::ShaderStage>,
         refusal: Box<Refusal>,
     },
-    /// The translator refused the GLSL, at the files and lines the author wrote.
+    /// The translator refused the GLSL, with the authored positions and responsible stages.
     Translation(Vec<sunrise_glsl::Error>),
     /// The translator panicked on it.
     Panicked(String),
@@ -99,44 +75,16 @@ impl std::fmt::Display for Refusal {
             Self::Include {
                 file,
                 line,
+                stage,
                 refusal,
-            } => write!(f, "{file}:{line}: {refusal}"),
+            } => {
+                let message = sunrise_glsl::shader_message(*stage, refusal);
+                write!(f, "{file}:{line}: {message}")
+            }
             Self::Translation(errors) => f.write_str(&sunrise_glsl::describe(errors)),
             Self::Panicked(e) => write!(f, "the shader translator failed: {e}"),
         }
     }
-}
-
-/// [`load_pair`]'s program: none when no pack changes the shader, else the translation, or why
-/// the shader is refused. A stage the packs don't replace, and every include, is the stack's
-/// (`root`: what the selected packs left of the game's resources), never `defaults` beside it,
-/// so a file a pack's filter hid stays hidden and refuses the shader. `defaults` only tells a
-/// pack's shader from the game's: the packs change it when either stage, with its includes
-/// resolved, differs from the game's (a pack replacing only an include the shader uses changes
-/// it). Each stage and include is read only up to the translator's budget
-/// ([`read_shader_file`]); a stage over it refuses the shader by its path, an include only where
-/// the stage's `defines` keep it (`core_shader::expand_core_imports`). A panic in the
-/// translator refuses it too ([`contained`]).
-fn translate_pair(
-    root: &ResourceSource,
-    defaults: &ResourceSource,
-    (vertex_name, name): (&str, &str),
-    defines: &[&str],
-    glue: &Glue,
-    provided: &dyn Fn(&str) -> bool,
-) -> Option<Result<Translated, Refusal>> {
-    let stages = match selected_stages(root, defaults, (vertex_name, name), &[defines])? {
-        Ok(stages) => stages,
-        Err(e) => return Some(Err(e)),
-    };
-    Some(translate_selected(
-        root,
-        &stages,
-        (vertex_name, name),
-        defines,
-        glue,
-        provided,
-    ))
 }
 
 /// The id of the core shader stage `name` (`minecraft:shaders/core/<name>.<extension>`), which
@@ -145,7 +93,16 @@ fn stage_id(name: &str, extension: &str) -> String {
     format!("minecraft:shaders/core/{name}.{extension}")
 }
 
-/// Return both selected stage files if any required variant uses a pack override.
+/// Both stages as the selected packs have them, when the packs change the shader: none when they
+/// don't, or why a stage can't be read. A stage the packs don't replace, and every include, is
+/// the stack's (`root`: what the selected packs left of the game's resources), never `defaults`
+/// beside it, so a file a pack's filter hid stays hidden and refuses the shader. `defaults` only
+/// tells a pack's shader from the game's: the packs change it when either stage, with its
+/// includes resolved under any of `variants`' defines, differs from the game's (a pack replacing
+/// only an include one of them keeps changes it). Each stage and include is read only up to the
+/// translator's budget ([`read_shader_file`]); a stage over it refuses the shader by its path, an
+/// include only where a program's defines keep it (`core_shader::expand_core_imports`). A panic
+/// refuses it too.
 fn selected_stages(
     root: &ResourceSource,
     defaults: &ResourceSource,
@@ -192,6 +149,11 @@ fn selected_stages(
         .transpose()
 }
 
+/// The program `stages` (as [`selected_stages`] gives them) make with `defines` and `glue`, the
+/// pipeline giving the blocks and samplers `provided` says yes to; or why it is refused, a file
+/// the translation couldn't read named by its path and the stage that needed it, a panic in
+/// the translator a refusal too
+/// ([`contained`]).
 fn translate_selected(
     root: &ResourceSource,
     (vertex, fragment): &(String, String),
@@ -209,7 +171,8 @@ fn translate_selected(
     let (vertex_file, fragment_file) =
         (stage_id(vertex_name, "vsh"), stage_id(fragment_name, "fsh"));
     let stages = sunrise_glsl::Stages {
-        dir: "minecraft:shaders/core/",
+        vertex_dir: "minecraft:shaders/core/",
+        fragment_dir: "minecraft:shaders/core/",
         vertex,
         fragment,
         vertex_file: &vertex_file,
@@ -219,12 +182,13 @@ fn translate_selected(
         crate::core_shader::translate_core_at(&stages, defines, &include, glue, provided)
     });
     // An include that couldn't be given stops the translation at its directive, the error's
-    // file and line.
+    // file, line and stage.
     translated.map_err(|e| match (e, unavailable.into_inner()) {
         (Refusal::Translation(errors), Some(refusal)) => match errors.first() {
             Some(at) => Refusal::Include {
                 file: at.file.clone(),
                 line: at.line,
+                stage: at.stage,
                 refusal: Box::new(refusal),
             },
             None => refusal,
@@ -291,110 +255,304 @@ pub(crate) fn read_shader_file(
         .map_err(|_| Refusal::NotText { path })
 }
 
-/// The packs' `core/lightmap` with `core/screenquad`, when a pack replaces either stage: the
-/// pass gives it `LightmapInfo` besides vanilla's blocks, and the packs' expression uniforms
-/// (`modifiers`) of either stage's file. Unspecified float blocks read zero.
-fn load_lightmap(
+/// One pipeline vanilla 26.3 requires (`RenderPipelines.register`: every pipeline but the
+/// wireframe ones, which `ShaderManager.apply` compiles whatever the frame draws) made from a
+/// core shader Sunrise runs: its location, its defines, the Improved Transparency stage its
+/// `OitPipelineSet` adds (`core_clouds::OIT_STAGES`' index, whose defines follow its own), and
+/// the glue of the vertex format Sunrise gives the shader.
+pub(crate) struct Required {
+    pub pipeline: &'static str,
+    pub defines: &'static [&'static str],
+    pub oit: Option<usize>,
+    pub glue: &'static Glue<'static>,
+}
+
+impl Required {
+    /// Its defines, the Improved Transparency stage's after its own.
+    fn all_defines(&self) -> Vec<&'static str> {
+        let stage = self
+            .oit
+            .map(|i| crate::gfx::core_clouds::OIT_STAGES[i].defines);
+        (self.defines.iter().chain(stage.into_iter().flatten()))
+            .copied()
+            .collect()
+    }
+}
+
+/// `core/text`'s required pipelines, in `RenderPipelines`' order, each program once: `TEXT_POLYGON_OFFSET`
+/// is `TEXT`'s program and `OIT_TEXT_POLYGON_OFFSET` `OIT_TEXT`'s (with `IS_GRAYSCALE` alike).
+/// Sunrise draws [`TEXT_WORLD`], [`TEXT_GUI`], [`TEXT_SEE_THROUGH`] and [`TEXT_OIT`] with the
+/// pack's shader.
+pub(crate) const TEXT: [Required; 12] = {
+    let world = &crate::gfx::core_text::WORLD_GLUE;
+    let see_through = &crate::gfx::core_text::SEE_THROUGH_GLUE;
+    let gray: &[&str] = &["IS_GRAYSCALE"];
+    [
+        Required {
+            pipeline: "minecraft:pipeline/text",
+            defines: &[],
+            oit: None,
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_depth_bounds_text",
+            defines: &[],
+            oit: Some(0),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_transmittance_text",
+            defines: &[],
+            oit: Some(1),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_accumulate_text",
+            defines: &[],
+            oit: Some(2),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/gui_text",
+            defines: &["IS_GUI"],
+            oit: None,
+            glue: &GLUE,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/text_grayscale",
+            defines: gray,
+            oit: None,
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_depth_bounds_text_grayscale",
+            defines: gray,
+            oit: Some(0),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_transmittance_text_grayscale",
+            defines: gray,
+            oit: Some(1),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_accumulate_text_grayscale",
+            defines: gray,
+            oit: Some(2),
+            glue: world,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/gui_text_grayscale",
+            defines: &["IS_GUI", "IS_GRAYSCALE"],
+            oit: None,
+            glue: &GLUE,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/text_see_through",
+            defines: &["IS_SEE_THROUGH"],
+            oit: None,
+            glue: see_through,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/text_grayscale_see_through",
+            defines: &["IS_GRAYSCALE", "IS_SEE_THROUGH"],
+            oit: None,
+            glue: see_through,
+        },
+    ]
+};
+/// [`TEXT`]'s pipelines Sunrise draws with the pack's shader.
+pub(crate) const TEXT_WORLD: usize = 0;
+pub(crate) const TEXT_GUI: usize = 4;
+pub(crate) const TEXT_SEE_THROUGH: usize = 10;
+/// `OIT_TEXT`'s stages, in `OitStage`'s order.
+pub(crate) const TEXT_OIT: [usize; 3] = [1, 2, 3];
+const _: () = assert!(
+    matches!(TEXT[TEXT_OIT[0]].oit, Some(0))
+        && matches!(TEXT[TEXT_OIT[1]].oit, Some(1))
+        && matches!(TEXT[TEXT_OIT[2]].oit, Some(2))
+        && TEXT[TEXT_OIT[0]].defines.is_empty()
+        && TEXT[TEXT_OIT[1]].defines.is_empty()
+        && TEXT[TEXT_OIT[2]].defines.is_empty()
+);
+
+/// `core/rendertype_lines`' required pipelines, each program once: `LINES`' (also
+/// `LINES_TRANSLUCENT`'s, `LINES_DEPTH_BIAS`' and `SECONDARY_BLOCK_OUTLINE`'s, which Sunrise
+/// draws with the pack's shader), then `OIT_LINES_TRANSLUCENT`'s stages.
+pub(crate) const LINES: [Required; 4] = {
+    let glue = &crate::gfx::core_lines::GLUE;
+    [
+        Required {
+            pipeline: "minecraft:pipeline/lines",
+            defines: &[],
+            oit: None,
+            glue,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_depth_bounds_lines_translucent",
+            defines: &[],
+            oit: Some(0),
+            glue,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_transmittance_lines_translucent",
+            defines: &[],
+            oit: Some(1),
+            glue,
+        },
+        Required {
+            pipeline: "minecraft:pipeline/oit_accumulate_lines_translucent",
+            defines: &[],
+            oit: Some(2),
+            glue,
+        },
+    ]
+};
+
+pub(crate) const SKY: [Required; 1] = [Required {
+    pipeline: "minecraft:pipeline/sky",
+    defines: &[],
+    oit: None,
+    glue: &crate::gfx::core_sky::GLUE,
+}];
+
+pub(crate) const STARS: [Required; 1] = [Required {
+    pipeline: "minecraft:pipeline/stars",
+    defines: &[],
+    oit: None,
+    glue: &crate::gfx::core_sky::GLUE,
+}];
+
+/// `core/screenquad` with `core/lightmap`.
+pub(crate) const LIGHTMAP: [Required; 1] = [Required {
+    pipeline: "minecraft:pipeline/lightmap",
+    defines: &[],
+    oit: None,
+    glue: &crate::gfx::core_lightmap::GLUE,
+}];
+
+/// What every program of a shader is checked against beside its translation: the packs'
+/// expression uniforms (`shader_modifiers`), the shaders' ids in those files (vertex, fragment),
+/// and the blocks the pass gives of its own (an Improved Transparency stage adds its samplers).
+type Blocks<'a> = (
+    &'a crate::polytone_post::ShaderModifiers,
+    (&'a str, &'a str),
+    &'a [&'a str],
+);
+
+/// A program with the expression uniforms of the blocks its stages read.
+type Checked = (Translated, Vec<crate::polytone_post::ExpressionUniform>);
+
+/// The packs' core shader stages `names` (`shaders/core/<name>.vsh` and `.fsh`, which may
+/// differ, as `core/screenquad` and `core/lightmap` do) over `defaults` (the game's own
+/// resources), as vanilla compiles them for each of `required`'s pipelines: none when no pack
+/// changes either stage or an include any of them keeps, else each pipeline's program in
+/// `required`'s order, with its expression uniforms. A program any of them can't make refuses
+/// the whole load, named by that pipeline, whether Sunrise draws it or not: a stage or include
+/// that can't be read, the translator refusing it, its stages not meeting
+/// (`sunrise_glsl::LinkRefusal`), or a block its stages read that the pipeline can't give, as
+/// vanilla's builder refuses a descriptor missing from the pipeline's layout (a block that isn't
+/// one float, a `PolyGlobals` declared otherwise, an expression for one of the pass's own
+/// blocks; `ShaderModifiers::resolve`).
+fn translate_required(
     root: &ResourceSource,
     defaults: &ResourceSource,
-    modifiers: &crate::polytone_post::ShaderModifiers,
-) -> Option<(
+    names: (&str, &str),
+    required: &[Required],
+    (modifiers, ids, own): Blocks<'_>,
+) -> Result<Option<Vec<Checked>>, RequiredShaderRefused> {
+    let defines: Vec<Vec<&str>> = required.iter().map(Required::all_defines).collect();
+    let variants: Vec<&[&str]> = defines.iter().map(Vec::as_slice).collect();
+    let Some(stages) = selected_stages(root, defaults, names, &variants) else {
+        return Ok(None);
+    };
+    let stages = stages.map_err(|e| RequiredShaderRefused {
+        pipeline: required[0].pipeline,
+        why: e.to_string(),
+    })?;
+    (required.iter().zip(&defines))
+        .map(|(r, defines)| {
+            let refused = |why: String| RequiredShaderRefused {
+                pipeline: r.pipeline,
+                why,
+            };
+            let program = translate_selected(root, &stages, names, defines, r.glue, &|_| true)
+                .map_err(|e| refused(e.to_string()))?;
+            let stage = r
+                .oit
+                .map(|i| crate::gfx::core_clouds::OIT_STAGES[i].samplers);
+            let own: Vec<&str> = (own.iter().chain(stage.into_iter().flatten()))
+                .copied()
+                .collect();
+            let expressions =
+                (modifiers.resolve(ids, &program, &own)).map_err(|e| refused(e.to_string()))?;
+            Ok((program, expressions))
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
+}
+
+/// A loaded pack shader program with its expression uniforms, as the atlas keeps them.
+type Loaded = (
     Arc<Translated>,
     Vec<crate::polytone_post::ExpressionUniform>,
-)> {
-    let shaders = crate::gfx::core_lightmap::SHADERS;
-    let info = crate::gfx::core_lightmap::INFO_BLOCK;
-    let globals = sunrise_polytone::globals::BLOCK;
-    let program = load_pair(
-        root,
-        defaults,
-        ("screenquad", "lightmap"),
-        &[],
-        &crate::gfx::core_lightmap::GLUE,
-        &|_| true,
-    )?;
-    match modifiers.resolve((shaders[0], shaders[1]), &program, &[info, globals]) {
-        Ok(expressions) => Some((program, expressions)),
-        Err(e) => {
-            log::warn!("the resource pack's lightmap shader is not used: {e}");
-            None
-        }
+);
+
+/// A drawn program as the atlas keeps it, said in the log; none, said too, when a vanilla block
+/// it declares doesn't fit the slot Sunrise binds it in
+/// (`expression_blocks::OversizedBlock`): that pipeline draws natively and the pack stays.
+fn loaded((program, expressions): Checked, pipeline: &str) -> Option<Loaded> {
+    let own = [crate::gfx::core_lightmap::INFO_BLOCK];
+    if let Some(oversized) = crate::gfx::expression_blocks::oversized_block(&program, &own) {
+        log::warn!("the resource pack's shader for {pipeline} is drawn natively: {oversized}");
+        return None;
+    }
+    log::info!("the resource pack's shader for {pipeline} translated");
+    Some((Arc::new(program), expressions))
+}
+
+/// A loaded program and its expression uniforms apart, none of either when it isn't used.
+fn unzip_or_default(
+    loaded: Option<Loaded>,
+) -> (
+    Option<Arc<Translated>>,
+    Vec<crate::polytone_post::ExpressionUniform>,
+) {
+    match loaded {
+        Some((program, expressions)) => (Some(program), expressions),
+        None => (None, Vec::new()),
     }
 }
 
-/// A loaded pack shader and its expression uniforms, as the atlas keeps them: none of either
-/// when no pack's shader is used.
-trait UnzipOrDefault {
-    fn unzip_or_default(
-        self,
-    ) -> (
-        Option<Arc<Translated>>,
-        Vec<crate::polytone_post::ExpressionUniform>,
-    );
-}
-
-impl UnzipOrDefault
-    for Option<(
-        Arc<Translated>,
-        Vec<crate::polytone_post::ExpressionUniform>,
-    )>
-{
-    fn unzip_or_default(
-        self,
-    ) -> (
-        Option<Arc<Translated>>,
-        Vec<crate::polytone_post::ExpressionUniform>,
-    ) {
-        match self {
-            Some((program, expressions)) => (Some(program), expressions),
-            None => (None, Vec::new()),
-        }
-    }
-}
-
-/// The packs' core shader `id` (`minecraft:core/<name>`, one shader for both stages: the sky,
-/// the stars, the block outline, and the text for the GUI's, the world's and the see-through
-/// text) for the program `label` names in the log, with its `defines` (the text's `IS_GUI`,
-/// none, `IS_SEE_THROUGH`), `PolyGlobals`, and expression uniforms for the blocks its stages read.
-/// Returns none when no pack replaces it,
-/// it doesn't translate, or a block refuses it (named in the log with the program).
-fn load_with_expressions(
-    root: &ResourceSource,
-    defaults: &ResourceSource,
-    modifiers: &crate::polytone_post::ShaderModifiers,
+/// The packs' `core/<name>` (one file for both stages: the block outline, the sky, the stars),
+/// translated for each of its `required` pipelines; the first is the one Sunrise draws with it,
+/// with `PolyGlobals` and the expression uniforms of its file.
+fn load_one(
+    (root, defaults, modifiers): (
+        &ResourceSource,
+        &ResourceSource,
+        &crate::polytone_post::ShaderModifiers,
+    ),
     id: &str,
-    (label, defines): (&str, &[&str]),
-    glue: &Glue,
-) -> Option<(
-    Arc<Translated>,
-    Vec<crate::polytone_post::ExpressionUniform>,
-)> {
-    let name = id.strip_prefix("minecraft:core/")?;
-    let globals = sunrise_polytone::globals::BLOCK;
-    let translated = translate_pair(root, defaults, (name, name), defines, glue, &|_| true)?;
-    let resolved = translated.map_err(|e| e.to_string()).and_then(|program| {
-        let expressions = modifiers.resolve((id, id), &program, &[globals]);
-        expressions
-            .map(|e| (Arc::new(program), e))
-            .map_err(|e| e.to_string())
-    });
-    match resolved {
-        Ok(loaded) => {
-            log::info!("the resource pack's {label} shader translated");
-            Some(loaded)
-        }
-        Err(e) => {
-            log::warn!("the resource pack's {label} shader is not used: {e}");
-            None
-        }
-    }
+    required: &[Required],
+) -> Result<Option<Loaded>, RequiredShaderRefused> {
+    let name = id.strip_prefix("minecraft:core/").unwrap_or(id);
+    let own = [sunrise_polytone::globals::BLOCK];
+    let blocks = (modifiers, (id, id), &own[..]);
+    let Some(programs) = translate_required(root, defaults, (name, name), required, blocks)? else {
+        return Ok(None);
+    };
+    Ok((programs.into_iter().next()).and_then(|p| loaded(p, required[0].pipeline)))
 }
 
-/// A pack's `core/clouds` that a pipeline vanilla requires can't be made from: in 26.3
-/// `ShaderManager.apply` compiles every required pipeline (`CLOUDS`, `FLAT_CLOUDS` and every
-/// stage of `OIT_CLOUDS` and `OIT_FLAT_CLOUDS`, whether Improved Transparency is on or not) and
-/// fails the reload when one doesn't ("Failed to load required shader programs"), which drops
-/// the selected packs. The atlas's load fails with it, through the same reload failure.
+/// A pack's core shader that a pipeline vanilla requires can't be made from: in 26.3
+/// `ShaderManager.apply` compiles every required pipeline (each pipeline the text, block outline,
+/// sky, stars, lightmap and clouds shaders make, every stage of their `OitPipelineSet`s and every
+/// grayscale variant included, whether Improved Transparency is on or not and whether Sunrise
+/// draws it or not) and fails the reload when one doesn't ("Failed to load required shader
+/// programs"), which drops the selected packs. The atlas's load fails with it, and so does making
+/// the renderer when the device refuses a pipeline it draws, through the same reload failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequiredShaderRefused {
     /// The pipeline's location, `minecraft:pipeline/oit_transmittance_clouds`.
@@ -419,7 +577,8 @@ impl std::error::Error for RequiredShaderRefused {}
 /// each stage of `OIT_CLOUDS` with that stage's defines (`core_clouds::OIT_STAGES`). Every pass
 /// gives it `CloudInfo` and the `CloudFaces` texel buffer besides vanilla's blocks, and an
 /// Improved Transparency stage its samplers. A program any of them can't use refuses the whole
-/// load, named by its pipeline.
+/// load, named by its pipeline; one declaring a vanilla block past the slot Sunrise binds it in
+/// leaves the native clouds (`expression_blocks::OversizedBlock`).
 fn load_clouds(
     root: &ResourceSource,
     defaults: &ResourceSource,
@@ -438,7 +597,7 @@ fn load_clouds(
         pipeline: clouds::CLASSIC_PIPELINE,
         why: e.to_string(),
     })?;
-    let translate = |defines: &[&str], samplers: &[&str], targets: usize, pipeline| {
+    let translate = |defines: &[&str], samplers: &[&str], pipeline| {
         translate_selected(
             root,
             &stages,
@@ -449,18 +608,25 @@ fn load_clouds(
         )
         .map_err(|e| e.to_string())
         .and_then(|program| {
-            clouds::check(&program, targets)
+            clouds::check(&program)
                 .map(|()| program)
                 .map_err(|e| e.to_string())
         })
         .map_err(|why| RequiredShaderRefused { pipeline, why })
     };
-    let classic = translate(&CLASSIC_DEFINES, &[], 1, clouds::CLASSIC_PIPELINE)?;
+    let classic = translate(&CLASSIC_DEFINES, &[], clouds::CLASSIC_PIPELINE)?;
     let stage = |i: usize| {
         let s = &OIT_STAGES[i];
-        translate(s.defines, s.samplers, clouds::oit_targets(i), s.pipeline)
+        translate(s.defines, s.samplers, s.pipeline)
     };
     let oit = Box::new([stage(0)?, stage(1)?, stage(2)?]);
+    let oversized = std::iter::once(&classic)
+        .chain(oit.iter())
+        .find_map(|p| crate::gfx::expression_blocks::oversized_block(p, &[clouds::INFO_BLOCK]));
+    if let Some(oversized) = oversized {
+        log::warn!("the resource pack's clouds shader is drawn natively: {oversized}");
+        return Ok(None);
+    }
     log::info!("the resource pack's clouds shader translated, with Improved Transparency's");
     Ok(Some(Arc::new(crate::clouds::pack::Programs {
         classic,
@@ -468,8 +634,10 @@ fn load_clouds(
     })))
 }
 
-/// The packs' core shaders the atlas carries (text, block outline, sky, stars, lightmap,
-/// clouds).
+/// The packs' core shaders the atlas carries (text, clouds, block outline, sky, stars,
+/// lightmap), each translated for every pipeline vanilla requires of it, in `RenderPipelines`'
+/// order: the first program any of them can't make, its blocks included, fails the load
+/// ([`RequiredShaderRefused`], [`translate_required`]).
 pub(super) fn load_shaders(
     atlas: &mut super::HudAtlas,
     root: &ResourceSource,
@@ -478,44 +646,75 @@ pub(super) fn load_shaders(
     // The packs' expression uniforms (`shader_modifiers`), read once, with their config entries.
     let configs = crate::packs::polytone_configs(&crate::packs::Source::Opened(root.clone()));
     let modifiers = crate::polytone_post::ShaderModifiers::read(root, configs);
-    let lines = load_with_expressions(
-        root,
-        defaults,
-        &modifiers,
-        crate::gfx::expression_blocks::LINES[0],
-        ("rendertype_lines", &[]),
-        &crate::gfx::core_lines::GLUE,
-    );
-    (atlas.lines_shader, atlas.lines_expressions) = lines.unzip_or_default();
-    let sky = |id, label| {
-        let glue = &crate::gfx::core_sky::GLUE;
-        load_with_expressions(root, defaults, &modifiers, id, (label, &[]), glue)
-    };
-    (atlas.sky_shader, atlas.sky_expressions) =
-        sky(crate::gfx::expression_blocks::SKY[0], "sky").unzip_or_default();
-    (atlas.stars_shader, atlas.stars_expressions) =
-        sky(crate::gfx::expression_blocks::STARS[0], "stars").unzip_or_default();
-    let lightmap = load_lightmap(root, defaults, &modifiers);
-    atlas.lightmap_shader = lightmap.as_ref().map(|(program, _)| program.clone());
-    atlas.lightmap_expressions = lightmap.map(|(_, e)| e).unwrap_or_default();
-    atlas.clouds_shader = load_clouds(root, defaults)?;
-    // The GUI's, the world's and the see-through text: one shader, three programs.
-    let text = |program: (&str, &[&str]), glue| {
-        let id = crate::gfx::expression_blocks::TEXT[0];
-        load_with_expressions(root, defaults, &modifiers, id, program, glue)
-    };
-    let gui = text(("GUI text", &["IS_GUI"]), &GLUE);
-    let world = text(("world text", &[]), &crate::gfx::core_text::WORLD_GLUE);
-    let see_through = text(
-        ("see-through text", &["IS_SEE_THROUGH"]),
-        &crate::gfx::core_text::SEE_THROUGH_GLUE,
-    );
+    let packs = (root, defaults, &modifiers);
+    // The GUI's, the world's, the see-through text and Improved Transparency's three stages:
+    // one shader, six drawn programs.
+    let text_id = crate::gfx::expression_blocks::TEXT[0];
+    let mut text: [Option<Loaded>; 6] = Default::default();
+    let own = [sunrise_polytone::globals::BLOCK];
+    let blocks = (&modifiers, (text_id, text_id), &own[..]);
+    if let Some(programs) = translate_required(root, defaults, ("text", "text"), &TEXT, blocks)? {
+        let mut programs: Vec<Option<Checked>> = programs.into_iter().map(Some).collect();
+        // Each program Sunrise draws, by its place in `TEXT`.
+        for (slot, index) in text.iter_mut().zip([
+            TEXT_WORLD,
+            TEXT_GUI,
+            TEXT_SEE_THROUGH,
+            TEXT_OIT[0],
+            TEXT_OIT[1],
+            TEXT_OIT[2],
+        ]) {
+            let program = programs[index].take().expect("each drawn program once");
+            *slot = loaded(program, TEXT[index].pipeline);
+        }
+    }
+    let [world, gui, see_through, oit @ ..] = text;
     let shaders = &mut atlas.text_shaders;
     let expressions = &mut shaders.expressions;
-    (shaders.gui, expressions.gui) = gui.unzip_or_default();
-    (shaders.world, expressions.world) = world.unzip_or_default();
-    (shaders.see_through, expressions.see_through) = see_through.unzip_or_default();
+    (shaders.gui, expressions.gui) = unzip_or_default(gui);
+    (shaders.world, expressions.world) = unzip_or_default(world);
+    (shaders.see_through, expressions.see_through) = unzip_or_default(see_through);
+    // The stages draw together or not at all.
+    shaders.oit = match oit {
+        [Some(a), Some(b), Some(c)] => Some(Box::new(crate::gfx::core_text::OitPrograms {
+            programs: [a.0, b.0, c.0],
+            expressions: [a.1, b.1, c.1],
+        })),
+        _ => None,
+    };
+    atlas.clouds_shader = load_clouds(root, defaults)?;
+    let lines = crate::gfx::expression_blocks::LINES[0];
+    (atlas.lines_shader, atlas.lines_expressions) =
+        unzip_or_default(load_one(packs, lines, &LINES)?);
+    let sky = crate::gfx::expression_blocks::SKY[0];
+    (atlas.sky_shader, atlas.sky_expressions) = unzip_or_default(load_one(packs, sky, &SKY)?);
+    let stars = crate::gfx::expression_blocks::STARS[0];
+    (atlas.stars_shader, atlas.stars_expressions) =
+        unzip_or_default(load_one(packs, stars, &STARS)?);
+    (atlas.lightmap_shader, atlas.lightmap_expressions) =
+        unzip_or_default(load_lightmap(root, defaults, &modifiers)?);
     Ok(())
+}
+
+/// The packs' `core/lightmap` with `core/screenquad`, when a pack replaces either stage or an
+/// include they keep: the pass gives it `LightmapInfo` besides vanilla's blocks, and the packs'
+/// expression uniforms (`modifiers`) of either stage's file. Unspecified float blocks read zero.
+fn load_lightmap(
+    root: &ResourceSource,
+    defaults: &ResourceSource,
+    modifiers: &crate::polytone_post::ShaderModifiers,
+) -> Result<Option<Loaded>, RequiredShaderRefused> {
+    let shaders = crate::gfx::core_lightmap::SHADERS;
+    let names = ("screenquad", "lightmap");
+    let own = [
+        crate::gfx::core_lightmap::INFO_BLOCK,
+        sunrise_polytone::globals::BLOCK,
+    ];
+    let blocks = (modifiers, (shaders[0], shaders[1]), &own[..]);
+    let Some(programs) = translate_required(root, defaults, names, &LIGHTMAP, blocks)? else {
+        return Ok(None);
+    };
+    Ok((programs.into_iter().next()).and_then(|p| loaded(p, LIGHTMAP[0].pipeline)))
 }
 
 /// The pipeline and its resources.
@@ -533,12 +732,35 @@ impl PackText {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         atlas: &wgpu::TextureView,
+        shader: (&Translated, &[crate::polytone_post::ExpressionUniform]),
+        coverage: bool,
+    ) -> Result<Option<Self>, String> {
+        let pipeline = TEXT[TEXT_GUI].pipeline;
+        // A program past the device's limits draws natively (`sunrise_glsl::PastDeviceLimit`).
+        if !crate::core_shader::within_device_limits(device, shader.0, pipeline, &[format]) {
+            return Ok(None);
+        }
+        let made = crate::core_shader::scoped(device, pipeline, || {
+            Self::made(device, format, atlas, shader, coverage)
+        })?;
+        if made.is_none() {
+            log::warn!(
+                "the resource pack's GUI text shader is not used: it writes no colour at location 0"
+            );
+        }
+        Ok(made)
+    }
+
+    /// The pipeline, made whatever the coverage mode so the device checks it, or none when the
+    /// fragment stage writes no colour at location 0 (which the GUI's coverage pass wraps): the
+    /// GUI text then draws natively, in every mode.
+    fn made(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        atlas: &wgpu::TextureView,
         (program, expressions): (&Translated, &[crate::polytone_post::ExpressionUniform]),
         coverage: bool,
     ) -> Option<Self> {
-        // A pack's shader is untrusted: the backend failing to compile it is an internal error.
-        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = |label, module: &naga::Module| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -615,16 +837,10 @@ impl PackText {
             cache: None,
         };
         let source = wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(program.fragment.clone()));
-        let pipeline = Pipeline::new(device, &desc, source, coverage);
-        let internal = pollster::block_on(internal.pop());
-        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
-            log::warn!("the resource pack's GUI text shader is not used: {e}");
+        let pipeline = Pipeline::new(device, &desc, source, coverage)?;
+        if !program.fragment_writes().contains(&0) {
             return None;
         }
-        let Some(pipeline) = pipeline else {
-            log::warn!("the resource pack's GUI text shader is not used: it has no colour output");
-            return None;
-        };
         Some(Self {
             pipeline,
             group,
@@ -716,11 +932,31 @@ pub(super) fn text_runs(
 mod tests {
     use super::*;
 
+    /// One program of the packs' stages `names` with `defines`, as [`translate_required`] makes
+    /// each: none when no pack changes the shader, else the translation, or why it is refused.
+    fn translate_pair(
+        root: &ResourceSource,
+        defaults: &ResourceSource,
+        names: (&str, &str),
+        defines: &[&str],
+        glue: &Glue,
+        provided: &dyn Fn(&str) -> bool,
+    ) -> Option<Result<Translated, Refusal>> {
+        let stages = match selected_stages(root, defaults, names, &[defines])? {
+            Ok(stages) => stages,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(translate_selected(
+            root, &stages, names, defines, glue, provided,
+        ))
+    }
+
     /// `refusal` of an include asked for on `line` of the pack's `lightmap.fsh`.
     fn in_lightmap(line: u32, refusal: Refusal) -> Refusal {
         Refusal::Include {
             file: "minecraft:shaders/core/lightmap.fsh".into(),
             line,
+            stage: Some(naga::ShaderStage::Fragment),
             refusal: Box::new(refusal),
         }
     }
@@ -819,17 +1055,16 @@ mod tests {
         (source(pack), source(vanilla.to_vec()))
     }
 
-    fn lightmap(own: &[(&str, &str)]) -> Option<Arc<Translated>> {
-        lightmap_with_expressions(own).map(|(program, _)| program)
+    /// The pack's lightmap program as the atlas loads it: none when no pack changes it, or why
+    /// `LIGHTMAP` can't be made from it.
+    fn lightmap(own: &[(&str, &str)]) -> Result<Option<Arc<Translated>>, RequiredShaderRefused> {
+        lightmap_with_expressions(own).map(|loaded| loaded.map(|(program, _)| program))
     }
 
     /// [`lightmap`] with its expression uniforms, as the atlas loads them.
     fn lightmap_with_expressions(
         own: &[(&str, &str)],
-    ) -> Option<(
-        Arc<Translated>,
-        Vec<crate::polytone_post::ExpressionUniform>,
-    )> {
+    ) -> Result<Option<Loaded>, RequiredShaderRefused> {
         let (root, defaults) = lightmap_packs(own);
         let modifiers = crate::polytone_post::ShaderModifiers::read(&root, Default::default());
         load_lightmap(&root, &defaults, &modifiers)
@@ -849,6 +1084,7 @@ mod tests {
         for stage in ["lightmap", "screenquad"] {
             let (program, expressions) =
                 lightmap_with_expressions(&[(fsh, tinted), (&on(stage), r#"{"Tint": "1"}"#)])
+                    .unwrap()
                     .unwrap_or_else(|| panic!("given by {stage}"));
             assert_eq!(program.other, ["LightmapInfo", "Tint"]);
             let resolved: Vec<_> = expressions.iter().map(|e| (&*e.name, e.stages)).collect();
@@ -859,18 +1095,26 @@ mod tests {
         let unread = tinted.replace("vec4(value, ", "vec4(0.0, ");
         let (_, expressions) =
             lightmap_with_expressions(&[(fsh, &unread), (&on("lightmap"), r#"{"Tint": "1"}"#)])
+                .unwrap()
                 .expect("the shader, without the block");
         assert!(expressions.is_empty());
         let wide = tinted
             .replace("float value;", "vec4 value;")
             .replace("vec4(value, ", "vec4(value.x, ");
-        assert!(lightmap(&[(fsh, &wide)]).is_none(), "a vec4 block");
+        // The pipeline gives no `vec4` block: the load fails.
+        assert_eq!(
+            lightmap(&[(fsh, &wide)]).unwrap_err().pipeline,
+            "minecraft:pipeline/lightmap",
+            "a vec4 block"
+        );
         let other = on("sky");
         for files in [
             vec![(fsh, tinted)],
             vec![(fsh, tinted), (&other, r#"{"Tint": "1"}"#)],
         ] {
-            let (_, expressions) = lightmap_with_expressions(&files).expect("shader uses zero");
+            let (_, expressions) = lightmap_with_expressions(&files)
+                .unwrap()
+                .expect("shader uses zero");
             assert_eq!(expressions.len(), 1);
             assert_eq!(expressions[0].name, "Tint");
             assert_eq!(expressions[0].evaluate(&Default::default()), 0.0);
@@ -887,8 +1131,9 @@ mod tests {
                        layout(std140) uniform LightmapInfo {\n    float SkyFactor;\n} info;\n\
                        layout(location = 0) in vec2 texCoord;\nlayout(location = 0) out vec4 fragColor;\n\
                        void main() {\n    fragColor = vec4(PolySunAngle, info.SkyFactor, 0.0, 1.0);\n}\n";
-        let (program, expressions) =
-            lightmap_with_expressions(&[(fsh, reading)]).expect("the built-in include");
+        let (program, expressions) = lightmap_with_expressions(&[(fsh, reading)])
+            .unwrap()
+            .expect("the built-in include");
         assert_eq!(program.other, ["PolyGlobals", "LightmapInfo"]);
         assert!(expressions.is_empty());
         // The pack's own copy is read instead: only it has `shipped()`, which the shader calls,
@@ -899,18 +1144,32 @@ mod tests {
             sunrise_polytone::globals::GLSL
         );
         let calling = reading.replace("vec4(PolySunAngle,", "vec4(PolySunAngle * shipped(),");
-        let (program, _) =
-            lightmap_with_expressions(&[(fsh, &calling), (include, &own)]).expect("the pack's own");
+        let (program, _) = lightmap_with_expressions(&[(fsh, &calling), (include, &own)])
+            .unwrap()
+            .expect("the pack's own");
         assert_eq!(program.other, ["PolyGlobals", "LightmapInfo"]);
-        assert!(
-            lightmap(&[(fsh, &calling)]).is_none(),
-            "the built-in has no shipped()"
+        // The built-in has no `shipped()`: the shader doesn't translate, which fails the load.
+        assert_eq!(
+            lightmap(&[(fsh, &calling)]).unwrap_err().pipeline,
+            "minecraft:pipeline/lightmap"
         );
-        // Its copy declaring the block otherwise refuses the shader.
+        // Its copy declaring the block otherwise fails the load too.
         let short = "layout(std140) uniform PolyGlobals {\n    float PolySunAngle;\n};\n";
-        assert!(lightmap(&[(fsh, reading), (include, short)]).is_none());
-        assert!(
-            lightmap(&[(fsh, &reading.replace("polytone_globals", "other"))]).is_none(),
+        assert_eq!(
+            lightmap(&[(fsh, reading), (include, short)])
+                .unwrap_err()
+                .pipeline,
+            "minecraft:pipeline/lightmap"
+        );
+        let missing = lightmap(&[(fsh, &reading.replace("polytone_globals", "other"))]);
+        assert_eq!(
+            missing.unwrap_err(),
+            RequiredShaderRefused {
+                pipeline: "minecraft:pipeline/lightmap",
+                why: "minecraft:shaders/core/lightmap.fsh:2: fragment shader: \
+                      minecraft:shaders/include/other.glsl is not in the selected packs"
+                    .to_owned(),
+            },
             "another missing import"
         );
     }
@@ -1216,12 +1475,18 @@ mod tests {
             refused(&[(fsh, &big_stage), (tint, TINT_GLSL)]),
             Refusal::OverBudget { path: fsh.into() }
         );
-        assert!(lightmap(&[(fsh, &big_stage), (tint, TINT_GLSL)]).is_none());
+        assert_eq!(
+            lightmap(&[(fsh, &big_stage), (tint, TINT_GLSL)]).unwrap_err(),
+            RequiredShaderRefused {
+                pipeline: "minecraft:pipeline/lightmap",
+                why: Refusal::OverBudget { path: fsh.into() }.to_string()
+            }
+        );
     }
 
     /// A pack's `core/lightmap` is loaded with vanilla's `core/screenquad` (a stage of another
-    /// name), and the reverse; none when no pack replaces either; refused when it reads an
-    /// extra block whose layout the lightmap pass cannot bind.
+    /// name), and the reverse; none when no pack replaces either; the load fails when it reads
+    /// an extra block whose layout the lightmap pass cannot bind.
     #[test]
     fn a_pack_replacing_either_lightmap_stage_is_loaded() {
         let red = "#version 330\nlayout(std140) uniform LightmapInfo {\n    float SkyFactor;\n} info;\n\
@@ -1229,17 +1494,25 @@ mod tests {
                    void main() {\n    fragColor = vec4(info.SkyFactor, 0.0, 0.0, 1.0);\n}\n";
         let fsh = "assets/minecraft/shaders/core/lightmap.fsh";
         let vsh = "assets/minecraft/shaders/core/screenquad.vsh";
-        let program = lightmap(&[(fsh, red)]).expect("the pack's lightmap");
+        let program = lightmap(&[(fsh, red)])
+            .unwrap()
+            .expect("the pack's lightmap");
         assert_eq!(program.other, ["LightmapInfo"]);
         let quad = "#version 330\nlayout(location = 0) out vec2 texCoord;\n\
                     void main() {\n    texCoord = vec2(0.5);\n    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);\n}\n";
-        assert!(lightmap(&[(vsh, quad)]).is_some());
-        assert!(lightmap(&[]).is_none(), "no pack replaces either stage");
+        assert!(lightmap(&[(vsh, quad)]).unwrap().is_some());
+        assert!(
+            matches!(lightmap(&[]), Ok(None)),
+            "no pack replaces either stage"
+        );
         let other = red
             .replace("LightmapInfo", "Elsewhere")
             .replace("float SkyFactor", "vec4 SkyFactor")
             .replace("info.SkyFactor", "info.SkyFactor.x");
-        assert!(lightmap(&[(fsh, &other)]).is_none());
+        assert_eq!(
+            lightmap(&[(fsh, &other)]).unwrap_err().pipeline,
+            "minecraft:pipeline/lightmap"
+        );
     }
 
     #[test]
@@ -1250,6 +1523,7 @@ mod tests {
             color: 0,
             depth: 0.0,
             glint_uv: [0.0; 2],
+            light: 0,
             text,
         };
         let vertices: Vec<HudVertex> = [0, 0, 1, 1, 1, 0].into_iter().map(vertex).collect();
@@ -1275,3 +1549,7 @@ mod clouds_tests;
 #[cfg(test)]
 #[path = "pack_text_depth_tests.rs"]
 mod depth_tests;
+
+#[cfg(test)]
+#[path = "pack_text_required_tests.rs"]
+mod required_tests;

@@ -17,10 +17,12 @@ import json
 import shutil
 import zipfile
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 FORMAT = {"min_format": [97, 0], "max_format": [97, 1]}
 
@@ -128,8 +130,8 @@ def main():
                                     "pack_resources_fixture", make,
                                     "Pack discovery, overlays, filters and the resource stacks vanilla merges.",
                                     sources=[lab.ROOT / "crates/sunrise-client-render/src/packs.rs",
-                                             lab.ROOT / "crates/sunrise-client-render/src/sound_events.rs",
-                                             lab.ROOT / "crates/sunrise-client-core/src/lang.rs"])
+                                             lab.ROOT / "crates/sunrise-level/src/sound_events.rs",
+                                             lab.ROOT / "crates/sunrise-game-data/src/lang.rs"])
         total += len(QUERIES)
     print(f"{total} resource pack queries match the pinned client over {len(SELECTIONS)} selections")
 

@@ -64,7 +64,11 @@ impl Uploads {
         self.belt.allocate(size, alignment)
     }
     /// Copy tightly packed RGBA8 `pixels` (`width` by `height`) into one mip
-    /// level of one array layer, padding rows to the copy alignment.
+    /// level of one array layer, starting at `destination`'s origin and
+    /// padding rows to the copy alignment. The copy goes in bands of whole
+    /// rows, each as large as one belt chunk allows (at least one row), so no
+    /// staging slice outgrows the chunk and a large texture needs no buffer
+    /// past the device's `max_buffer_size`.
     pub fn texture(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -76,37 +80,52 @@ impl Uploads {
         let row = width as usize * 4;
         debug_assert_eq!(pixels.len(), row * height as usize);
         let padded = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
-        let Some(size) = NonZeroU64::new((padded * height as usize) as u64) else {
+        if padded == 0 {
             return;
-        };
+        }
         let alignment = NonZeroU64::new(u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT))
             .expect("non-zero alignment");
-        let slice = self.allocate(size, alignment);
-        {
-            let mut view = slice
-                .get_mapped_range_mut()
-                .expect("staging belt slices are mapped");
-            for (i, src) in pixels.chunks(row).enumerate() {
-                view.slice(i * padded..i * padded + row)
-                    .copy_from_slice(src);
+        // A padded row is at most 65 536 bytes at the 16 384 side, so one row
+        // always fits a chunk.
+        let band_rows = (self.chunk as usize / padded).max(1);
+        let mut done = 0u32;
+        for band in pixels.chunks(band_rows * row) {
+            let rows = (band.len() / row) as u32;
+            let size = NonZeroU64::new((padded * rows as usize) as u64).expect("a band has rows");
+            let slice = self.allocate(size, alignment);
+            {
+                let mut view = slice
+                    .get_mapped_range_mut()
+                    .expect("staging belt slices are mapped");
+                for (i, src) in band.chunks(row).enumerate() {
+                    view.slice(i * padded..i * padded + row)
+                        .copy_from_slice(src);
+                }
             }
-        }
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: slice.buffer(),
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: slice.offset(),
-                    bytes_per_row: Some(padded as u32),
-                    rows_per_image: Some(height),
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: slice.buffer(),
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: slice.offset(),
+                        bytes_per_row: Some(padded as u32),
+                        rows_per_image: Some(rows),
+                    },
                 },
-            },
-            destination,
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+                wgpu::TexelCopyTextureInfo {
+                    origin: wgpu::Origin3d {
+                        y: destination.origin.y + done,
+                        ..destination.origin
+                    },
+                    ..destination
+                },
+                wgpu::Extent3d {
+                    width,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+            done += rows;
+        }
     }
     /// Copy `bytes` into `target` at `offset`, as `Queue::write_buffer`
     /// would, in the encoder's order.
@@ -282,6 +301,95 @@ mod tests {
                 "frame {frame}"
             );
         }
+    }
+
+    /// A texture past one belt chunk goes up in bands of rows (here one row
+    /// each) and lands whole, whether written from the corner or at an origin.
+    #[test]
+    #[ignore = "daily"]
+    fn texture_uploads_in_row_bands_land_exactly() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        const W: u32 = 16;
+        const H: u32 = 40;
+        const PADDED: u32 = (W * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let at = |x, y| wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        };
+        let mut uploads = Uploads::with_chunk(&device, 256);
+        let mut expected = vec![0u8; (W * H * 4) as usize];
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let whole: Vec<u8> = (0..W * H * 4)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add((i / 251) as u8))
+            .collect();
+        uploads.texture(&mut encoder, at(0, 0), W, H, &whole);
+        expected.copy_from_slice(&whole);
+        // A region at a non-zero origin, over the whole upload.
+        let (rx, ry, rw, rh) = (3u32, 11u32, 5u32, 9u32);
+        let region: Vec<u8> = (0..rw * rh * 4)
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(5))
+            .collect();
+        uploads.texture(&mut encoder, at(rx, ry), rw, rh, &region);
+        for r in 0..rh {
+            let dst = (((ry + r) * W + rx) * 4) as usize;
+            let src = (r * rw * 4) as usize;
+            expected[dst..dst + rw as usize * 4]
+                .copy_from_slice(&region[src..src + rw as usize * 4]);
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(PADDED * H),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            at(0, 0),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(PADDED),
+                    rows_per_image: Some(H),
+                },
+            },
+            wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+        );
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        let rows: Vec<u8> = data
+            .chunks(PADDED as usize)
+            .flat_map(|row| row[..(W * 4) as usize].iter().copied())
+            .collect();
+        assert!(rows == expected);
     }
 
     /// Staging buffers the belt holds, once every submitted frame is done

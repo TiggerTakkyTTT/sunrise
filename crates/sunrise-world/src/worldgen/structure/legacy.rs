@@ -535,7 +535,7 @@ impl PieceFrame {
         }
         let mut state = state;
         if self.mirror != Mirror::None {
-            state = c.resources.transforms.mirror(state, self.mirror);
+            state = c.resources.transforms.mirror_at(state, pos, self.mirror);
         }
         if self.rotation != Rotation::None {
             state = c.resources.transforms.rotate_at(state, pos, self.rotation);

@@ -73,6 +73,8 @@ pub enum MenuSlotBacking {
     /// 0..36, the armour 36..40 from feet to head, the off hand 40.
     Player(usize),
     /// Slot `slot` of the block entity at `pos`, through its [`ITEMS`](crate::ITEMS) handler.
+    /// `(level, pos, slot)` is the same identity as [`StorageSlot`](crate::StorageSlot): a
+    /// double chest's slot names the half that owns it, with that half's own unsided index.
     BlockEntity {
         /// The level the block entity is in.
         level: LevelRef,

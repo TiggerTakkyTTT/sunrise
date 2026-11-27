@@ -2,13 +2,12 @@
 """Compare text-display matrices with the real Java client renderer (no window)."""
 import json
 import os
-try:
-    from . import lab, test_rust_parity as base, oracle_harness as harness, test_text_display_parity as metadata
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import oracle_harness as harness
-    import test_text_display_parity as metadata
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, oracle_harness as harness, test_text_display_parity as metadata
 
 
 def main():
@@ -22,7 +21,7 @@ def main():
     classes.mkdir(exist_ok=True)
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaTextDisplayTransformOracle.java'
     sources = [oracle, lab.ROOT/'crates/sunrise-client/src/text_display.rs',
-        lab.ROOT/'crates/sunrise-client/src/game/entities/text_displays.rs']
+        lab.ROOT/'crates/sunrise-client-gameplay/src/game/entities/text_displays.rs']
     tested = base.source_hashes(sources)
     source = lab.LOCAL / 'text-display-parity/java.jsonl'
     # Every billboard mode, coupled and independent entity/camera rotations.

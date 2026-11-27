@@ -31,6 +31,7 @@ pub(crate) mod poi_types;
 pub(crate) mod prepared_drops;
 pub(crate) mod rail_shape;
 pub(crate) mod removal_effects;
+pub(crate) mod state_collision;
 pub(crate) mod types;
 pub(crate) mod unresolved_fluid;
 pub(crate) mod voxel_shape;

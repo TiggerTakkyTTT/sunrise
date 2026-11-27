@@ -81,10 +81,18 @@ components). By contrast, the server's [`PlayerRef::give_stack`](../how-to/entit
 gives to a server player as `/give` does, normally dropping overflow for that player instead
 of returning it.
 
-A `TagKey` identifies a **name**, not its members. Request it during registration with `r.tag_key`;
-a missing tag can still have a key. Item, block, fluid and damage type tags share the name table but have
-separate membership. A reload replaces membership, not the key. Clients use the authoritative
-tags applied from the server, not locally prepared tag data.
+A `TagKey<K>` identifies a **name**, parameterized by the registry key type `K` it queries
+(`TagKey<ItemKey>`, `TagKey<BlockKey>`, `TagKey<FluidKey>`, `TagKey<EntityTypeKey>`,
+`TagKey<BiomeKey>`, `TagKey<EnchantmentKey>`, `TagKey<StructureKey>`, `TagKey<PotionKey>`,
+`TagKey<DamageTypeKey>`, `TagKey<WorldClockKey>`), so a block tag cannot be passed to an item
+query. Sunrise provides const-built convention tag constants under `mod_api::tags::c::*` (for
+example `mod_api::tags::c::items::INGOTS` and `mod_api::tags::c::blocks::ORES`), seeded beneath
+vanilla, data packs and mods so `values`, `remove` and `replace` work as usual. For custom tags,
+request an untyped `TagKey` during registration with `r.tag_key` or look it up with `tags.key(&id)`,
+then convert it with `.typed::<ItemKey>()` (or `.typed()` when the query fixes `K`). A missing tag
+can still have a key; all registries share the name table but have separate membership. A reload
+replaces membership, not the key. Clients use the authoritative tags applied from the server, not
+locally prepared tag data.
 
 | Membership result | Meaning |
 | --- | --- |

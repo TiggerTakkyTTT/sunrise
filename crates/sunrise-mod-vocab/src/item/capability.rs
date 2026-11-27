@@ -7,7 +7,7 @@
 use super::item_stack::read_stack_view;
 use crate::{
     Answer, BlockEntityRef, BlockEntityTypeKey, BlockProviders, BlockState, Direction,
-    ItemResource, LevelHost, LevelRef, Overanswered, ResourceHandler, ServerHost,
+    ItemResource, LevelHost, LevelRef, Overanswered, ResourceHandler, ServerHost, StorageSlot,
     TransactionContext, TransactionError, backend_mut_of, backend_of,
 };
 use std::{
@@ -222,6 +222,10 @@ impl<R> ResourceHandler<R> for Capability<dyn ResourceHandler<R>> {
 
     fn is_valid(&self, host: &mut dyn ServerHost, index: usize, resource: &R) -> bool {
         self.handler.is_valid(host, index, resource)
+    }
+
+    fn backing(&self, host: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+        self.handler.backing(host, index)
     }
 
     fn insert_at(
@@ -471,6 +475,9 @@ impl ResourceHandler<ItemResource> for GameItems {
         backend_of(&*host).map_or(0, |backend| {
             backend.container_capacity(self.0, index, resource.map(ItemResource::as_stack))
         })
+    }
+    fn backing(&self, host: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+        backend_of(&*host)?.container_slot_backing(self.0, index)
     }
     fn insert_at(
         &self,

@@ -8,10 +8,12 @@ creative, adventure (with/without can_place_on), peaceful monster eggs, removed
 and replaced entity_data, and the Ender Dragon's egg on a block.
 """
 import json
-try:
-    from . import test_locator_bar_parity as net
-except ImportError:
-    import test_locator_bar_parity as net
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import test_locator_bar_parity as net
 
 CASES = [
     ('block-use', 'stone', 'cow', 'survival', '', True),

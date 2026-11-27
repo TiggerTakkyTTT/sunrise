@@ -54,8 +54,8 @@ pub trait DrawContext {
     }
     /// Part `src` (`[x, y, w, h]` in the sprite's own pixels) of sprite
     /// `name` (a GUI atlas sprite by its id, `container/slot` or a mod's `mymod:panel`, another
-    /// texture the atlas holds such as vanilla's `gui/...` files, or
-    /// a client mod's dynamic texture, `ClientRenderClientHost::create_dynamic_texture`),
+    /// texture the atlas holds such as vanilla's `gui/...` files; a client mod's dynamic texture
+    /// is not one: draw it with `GuiCanvas::texture`),
     /// drawn stretched into `dst` (`[x, y, w, h]` in GUI pixels), every texel multiplied by
     /// `tint` (`0xAARRGGBB`, a fluid's colour) when there is one. False when there is
     /// no such sprite.
@@ -275,6 +275,14 @@ pub trait BlockEntityDrawContext {
     fn keep(&mut self) {
         unimplemented!("BlockEntityDrawContext::draw_keep")
     }
+    /// Read-only frame state for the world view this draw belongs to.
+    ///
+    /// [`Self::partial`], [`Self::game_time`] and [`Self::animation_time`] are shorthands
+    /// returning the same values as this view. In [`DrawContext::draw_scene`], the view carries
+    /// the scene's camera and clock with `camera_entity_eye: None`.
+    fn view(&self) -> &WorldRenderView<'_> {
+        unimplemented!("BlockEntityDrawContext::view")
+    }
     /// The frame's partial tick, 0 to 1 (`BlockEntityRenderState`).
     fn partial(&self) -> f32 {
         unimplemented!("BlockEntityDrawContext::draw_partial")
@@ -329,14 +337,76 @@ pub trait BlockEntityDrawContext {
     fn unlit(&mut self, on: bool) {
         unimplemented!("BlockEntityDrawContext::draw_unlit")
     }
+    /// The breaking stage, `0..=9`, being drawn at this block entity's position, or `None`
+    /// when nobody is mining it or the draw is not a world block entity's (an entity, a mob
+    /// model or a preview). It is `Some` at the cracked block and at each extra position its
+    /// `break_progress_positions` answer gave, for the local player's crack and for other
+    /// players' (`BlockEntityRenderState.breakProgress`; the highest stage at a position when
+    /// several players mine it). Read when the block entity is submitted: geometry kept with
+    /// `keep` is not submitted again as the stage changes, so mark it with
+    /// [`Self::crumbling`] and let the game apply the stage each frame.
+    fn crumbling_stage(&self) -> Option<u8> {
+        unimplemented!("BlockEntityDrawContext::draw_crumbling_stage")
+    }
+    /// While `on`, what is drawn next by `quad`, `cube`, `block`, `model` and `terrain_model`
+    /// receives the breaking crack at this position (`ModelFeatureRenderer.CrumblingOverlay`, as
+    /// `ChestRenderer` covers the parts it chooses): that geometry is drawn again under the
+    /// stage's `destroy_stage_0..9` sprite in the frame's `DESTROY` pass, after the block
+    /// entities, wherever [`Self::crumbling_stage`] is `Some` at draw time. Items, text,
+    /// `model_part` and `fluid_box` are never covered. Off by default; lasts until
+    /// `crumbling(false)` or the end of the draw. With `keep`, the marked geometry shows
+    /// the current stage, starting, advancing and clearing as the crack does, with no new
+    /// `block_entity_submit`, and under `spin` the crack turns with it. Models drawn
+    /// under it are drawn as vertices, not instanced copies, while their block is
+    /// cracked. Display only, a client's call.
+    fn crumbling(&mut self, on: bool) {
+        unimplemented!("BlockEntityDrawContext::draw_crumbling")
+    }
     /// Draws a quad with `corners` in blocks under `draw`'s pose, in a model
     /// face's order (top left, bottom left, bottom right, top right as seen
     /// from its front), textured with the `uv` rectangle (u0, v0, u1, v1 in
     /// texels of 16 per side) of `sprite` (`mymod:entity/screen`,
     /// `mymod:block/casing`, `block/stone`) times the 0xRRGGBB `tint`
-    /// (0xFFFFFF for none). False for an unknown sprite.
+    /// (0xFFFFFF for none). False for an unknown sprite. Its UVs are texels of 16; those of
+    /// [`Self::textured_quad`] are unit.
     fn quad(&mut self, sprite: &str, corners: [[f32; 3]; 4], uv: [f32; 4], tint: u32) -> bool {
         unimplemented!("BlockEntityDrawContext::draw_quad")
+    }
+    /// Draws a quad of `corners` in blocks under `draw`'s pose, in `quad`'s corner order, showing
+    /// the client mod's dynamic texture (`create_dynamic_texture`) that `render_type` was made
+    /// for (`RenderAssets::entity_solid`, `entity_cutout` or `entity_translucent`, as vanilla's
+    /// `RenderTypes.entitySolid(texture)`, `entityCutout` and `entityTranslucent` are), times the
+    /// 0xRRGGBB `tint` (0xFFFFFF for none). `uv` is each corner's texture coordinate, one per
+    /// corner in the order of `corners`, in unit coordinates: 0 to 1 is the texture once, and
+    /// the texture repeats beyond it. A monitor shows its whole texture with
+    /// `[[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]]`. `quad`'s UVs are texels of 16.
+    ///
+    /// The texture is looked up each frame the quad draws, not when it is submitted:
+    /// `update_dynamic_texture` shows on the next frame with no new geometry, and kept geometry
+    /// (`keep`) stays valid. A texture released after the quad was submitted draws the missing
+    /// texture, as vanilla's `TextureManager.getTexture` answers after `release`. Light follows
+    /// `quad`: `set_light`, `level_light`, and `unlit(true)` for full bright and no directional
+    /// shading. `cutout` and `translucent` discard texels under alpha 0.1
+    /// (`ALPHA_CUTOUT`); `translucent` blends, writes depth and, outside a shader pack, sorts far
+    /// to near. `solid` keeps the entity shader's alpha discard too, where vanilla's
+    /// `ENTITY_SOLID` has none: give it an opaque texture. Under a shader pack the quad draws through the pack's entity program (the
+    /// block entity program in a block entity's draw), with its texture bound as the entity
+    /// texture.
+    ///
+    /// It takes only a dynamic texture id: a render type made for any other id, such as a
+    /// texture in the resource packs, draws nothing and returns false.
+    ///
+    /// Returns false, appending nothing, when `render_type` is not one of the three
+    /// texture-taking built-ins or is stale, when no dynamic texture named by it is live, when a
+    /// corner or UV is not finite, or in a first-person hand draw. It never panics.
+    fn textured_quad(
+        &mut self,
+        render_type: RenderTypeRef,
+        corners: [[f32; 3]; 4],
+        uv: [[f32; 2]; 4],
+        tint: u32,
+    ) -> bool {
+        unimplemented!("BlockEntityDrawContext::draw_textured_quad")
     }
     /// Draws a box from `from` to `to` (texels of 16 per block, as a block
     /// model's element) under `draw`'s pose, with the faces given, by
@@ -476,6 +546,20 @@ pub trait BlockEntityDrawContext {
     fn model_part(&mut self, part: &ModelPart, sprite: &str, tint: u32) -> bool {
         unimplemented!("BlockEntityDrawContext::draw_model_part")
     }
+    /// Draws a retained [`InstanceGroupRef`] under `draw`'s current pose: each live copy in the
+    /// group is transformed by the group transform and then by `draw`'s pose stack. Works in
+    /// entity renderers, entity layers, block entities, and screen scenes. Stale, destroyed, or
+    /// disabled-owner groups return [`GroupError::Stale`] without appending geometry.
+    fn instance_group(&mut self, group: InstanceGroupRef) -> Result<(), GroupError> {
+        unimplemented!("BlockEntityDrawContext::instance_group")
+    }
+    /// Draws a [`PreparedItemRef`] resolved by
+    /// [`ClientRenderClientHost::prepare_item`](crate::prelude::ClientRenderClientHost::prepare_item)
+    /// under `draw`'s current pose, matching [`Self::item`] without resolving the stack's model
+    /// again. A stale or destroyed handle draws nothing and returns [`ModelError::StaleModel`].
+    fn prepared_item(&mut self, item: PreparedItemRef) -> Result<(), ModelError> {
+        unimplemented!("BlockEntityDrawContext::prepared_item")
+    }
     /// Draws `stack` as a still fluid filling `bounds` (`[x0, y0, z0, x1, y1, z1]` in blocks
     /// under `draw`'s pose), as a tank's contents: `minecraft:water`, `minecraft:lava` or any
     /// fluid with a look (`data/<mod>/sunrise/fluid/<name>.json`; a registered fluid without a
@@ -493,6 +577,34 @@ pub trait BlockEntityDrawContext {
     /// device's vertex and index buffer capacity for the combined entity batch.
     fn fluid_box(&mut self, stack: &FluidStack, bounds: [f32; 6], options: FluidBoxOptions) {
         unimplemented!("BlockEntityDrawContext::draw_fluid_box")
+    }
+    /// Draws `entity`, a block entity a mod carries (a moving structure's chest, sign, banner or
+    /// another mod's machine), under `draw`'s current pose and light, as vanilla's
+    /// `BlockEntityRenderDispatcher` extracts and submits one. The pose starts at the block's
+    /// lower north-west corner as in a block entity's own submit; the light is `draw.light`, which
+    /// the caller samples itself; the overlay is vanilla's `NO_OVERLAY`.
+    ///
+    /// A block entity of the game goes through the engine's vanilla renderer for its block state
+    /// (`entity.state`), read from `entity.fields.nbt`, with no case for any type. A mod's goes
+    /// to its registered [`BlockEntityPart`](crate::BlockEntityPart) submit with the entity as a
+    /// [`BlockEntityDataView`]. A type with no renderer draws nothing and returns `Ok(())`, as the
+    /// dispatcher does when it finds none.
+    ///
+    /// Nothing ticks. The renderer has no level, so what it reads from one is its default:
+    /// a double chest draws as a single closed chest, an enchanting table as its closed book
+    /// lying on it, a conduit inactive, an end portal and gateway on every face with no beam,
+    /// a banner's flag at rest, a beacon with no beam (its sections are computed in a tick it
+    /// never gets), and a spawner or a bed, which have no block entity renderer here, nothing.
+    /// Animations driven by tickers (chest lids, the bell's shake, the enchanting book, conduit
+    /// rotation) stay at rest: build a new [`SceneBlockEntity`] when the data changes. The dispatcher's `shouldRender` culling is skipped, since the caller's
+    /// entity was already culled; the block entity's own position is never used.
+    ///
+    /// Returns [`BlockEntityDrawRefusal::Nested`], drawing nothing, when called from inside a
+    /// mod's submit that `block_entity` itself dispatched. One level is allowed: input a mod
+    /// controls must never recurse without end, and a carried block entity is drawn from an
+    /// entity renderer, not from inside another block entity's draw.
+    fn block_entity(&mut self, entity: &SceneBlockEntity) -> Result<(), BlockEntityDrawRefusal> {
+        unimplemented!("BlockEntityDrawContext::block_entity")
     }
 }
 /// What a [`BlockScreenEffectRenderer`](crate::BlockScreenEffectRenderer) draws with: quads in
@@ -537,18 +649,67 @@ pub trait WorldDrawContext {
     fn quads(&mut self, quads: &[WorldQuad]) -> Result<(), DrawError> {
         unimplemented!("WorldDrawContext::world_draw_quads")
     }
-    /// Submit world quads drawn by the mod pipeline `pipeline`: its shader gets each
-    /// quad's texture coordinate and colour, and its blend and depth modes apply. Checks
-    /// `RenderPipelineRef` validity and staleness ([`PipelineDrawError::Pipeline`]), skips
-    /// any quad with non-finite coordinates or UVs individually without rejecting valid quads
-    /// in the same slice, and lets quad storage grow dynamically into the GPU buffers. Within
-    /// a stage, pipeline quads draw after its plain quads and lines, in the order submitted.
+    /// Submit world quads drawn by the mod pipeline `pipeline`: shorthand over
+    /// [`Self::draw_vertices`] for pipelines using the default vertex format
+    /// (`VertexFormat::position_tex_color`) and [`PrimitiveTopology::Quads`]. Checks
+    /// `RenderPipelineRef` validity and staleness ([`PipelineDrawError::Pipeline`]), refuses
+    /// non-`Quads` pipelines
+    /// ([`PipelineDrawError::TopologyMismatch`]) and custom vertex-format pipelines
+    /// ([`PipelineDrawError::VertexFormatMismatch`]), skips any quad with non-finite coordinates
+    /// or UVs individually without rejecting valid quads in the same slice, and lets quad storage
+    /// grow dynamically into the GPU buffers. Within a stage, pipeline draws run after plain
+    /// quads and lines, in the order submitted.
     fn pipeline_quads(
         &mut self,
         pipeline: RenderPipelineRef,
         quads: &[PipelineQuad],
     ) -> Result<(), PipelineDrawError> {
         unimplemented!("WorldDrawContext::pipeline_quads")
+    }
+    /// Draw a retained GPU [`MeshRef`] with `pipeline`, recording a POD draw command with zero
+    /// per-frame CPU vertex copying. Validates pipeline liveness, mesh ownership/liveness,
+    /// per-binding strides against the pipeline's [`VertexFormat`] bindings, and vertex/index/
+    /// instance bounds before queueing (never panics, never triggers a GPU validation error).
+    fn draw_mesh(
+        &mut self,
+        pipeline: RenderPipelineRef,
+        mesh: MeshRef,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (pipeline, mesh, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+    /// Draw transient per-frame vertex (and optional index) byte slices with `pipeline`,
+    /// uploaded into growing per-view GPU byte pages (bounded only by `max_buffer_size`).
+    /// Validates pipeline liveness, binding count and stride alignment, and vertex/index/instance
+    /// bounds before queueing.
+    fn draw_vertices(
+        &mut self,
+        pipeline: RenderPipelineRef,
+        vertices: &[&[u8]],
+        indices: Option<(IndexFormat, &[u8])>,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (pipeline, vertices, indices, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+    /// Draw `draw.max_count` commands a compute shader wrote into a storage buffer
+    /// (vanilla's `RenderPass.drawIndexedIndirect(commands, drawCount)` and `drawIndirect`), with
+    /// no CPU readback, or with a count buffer as many as the GPU wrote, at most `max_count`. The
+    /// same draw on every backend and through a translated shader pack. See [`IndirectDraw`] for
+    /// the command layout. Everything is checked before anything is recorded (never panics,
+    /// never triggers a GPU validation error): pipeline liveness
+    /// ([`PipelineDrawError::Pipeline`]), mesh ownership, liveness and strides
+    /// ([`PipelineDrawError::Mesh`]), the command and count buffers' handles
+    /// ([`PipelineDrawError::Buffer`]) and their use as indirect arguments
+    /// ([`PipelineDrawError::InvalidIndirect`]), a count buffer the adapter cannot read
+    /// ([`PipelineDrawError::UnsupportedIndirectCount`]), and the bindings. A `max_count` of
+    /// zero is a legal no-op.
+    fn draw_indirect(&mut self, draw: &IndirectDraw<'_>) -> Result<(), PipelineDrawError> {
+        let _ = draw;
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
     }
     /// A label at world position `at`, drawn as vanilla draws a name tag
     /// (`SubmitNodeCollection.submitNameTag`): 0.5 blocks above `at`, facing the camera,
@@ -582,7 +743,12 @@ pub trait WorldDrawContext {
     /// with a translucent face, is drawn in the sorted translucent material vanilla uses for a
     /// translucent block outside the terrain (`translucent_moving_block`: alpha blended, depth
     /// tested, depth written, back faces culled), their quads sorted far to near each frame as
-    /// vanilla's `sortOnUpload` does.
+    /// vanilla's `sortOnUpload` does. The special renderer's part of a block state model
+    /// (`RenderAssets::block_state_model`) follows its copy's faces in the entity materials,
+    /// multiplied by [`ModelInstance::color`], and blends as `entity_translucent` when that
+    /// colour's alpha is below `0xFF`; the end portal's and gateway's starfield ignores the
+    /// colour, as vanilla's `end_portal` render type does. Quads of that part whose pose throws
+    /// them past the finite range are skipped individually.
     /// Tint is `0xAARRGGBB` and light is [`LightCoords`]: both stay in
     /// vanilla's space, and the engine converts them to the frame. A tint's alpha
     /// multiplies only faces that have a tint index, the same as vanilla's model
@@ -598,6 +764,22 @@ pub trait WorldDrawContext {
     ) -> Result<(), InstanceError> {
         let _ = (model, instances);
         unimplemented!("WorldDrawContext::draw_model_instances")
+    }
+    /// Run `draw` with `modifier` pushed onto the active pipeline modifier stack (NeoForge's
+    /// `RenderSystem.renderWithPipelineModifier`). Applies to `lines`, `quads`, `pipeline_quads`,
+    /// and `draw_model_instances` drawn inside `draw` (not `name_tag` labels). Only the
+    /// modifier's `depth` applies to the built-in `lines`, `quads` and `draw_model_instances`;
+    /// the whole `PipelineModifier` applies to a registered pipeline drawn with `pipeline_quads`.
+    ///
+    /// Scopes nest: the most recently pushed modifier applies first, then older ones, so for a
+    /// field set by two modifiers the outermost wins (`PipelineModifierStack.apply`). The
+    /// modifier is popped automatically when `draw` returns or unwinds.
+    fn with_pipeline_modifier(
+        &mut self,
+        modifier: PipelineModifierRef,
+        draw: &mut dyn FnMut(&mut dyn WorldDrawContext),
+    ) {
+        let _ = (modifier, draw);
     }
     /// Supply this frame's value for a mod-declared shader-pack uniform ([`PackUniformDecl`]).
     /// Returns `true` when `name` matches a registered mod uniform with the matching
@@ -635,6 +817,64 @@ pub trait PrepareRenderBuffersContext {
         stage: RenderLevelStage,
         quads: &[WorldQuad],
     ) -> Result<PreparedWorldDraw, DrawError>;
+
+    /// Prepare a batch of mod-pipeline quads for `stage` (standard pass stages or
+    /// [`RenderLevelStage::OitTranslucent`]). Refuses pipelines whose effective
+    /// [`PrimitiveTopology`] is not [`PrimitiveTopology::Quads`]
+    /// ([`PipelineDrawError::TopologyMismatch`]). At `OitTranslucent`, a pipeline without
+    /// [`RenderPipeline::order_independent`] or with [`PipelineBlend::Opaque`] is refused with
+    /// [`PipelineDrawError::Pipeline`] (`RenderPipelineError::Invalid`), logged once per mod and
+    /// pipeline. Individual quads with non-finite coordinates or UVs are skipped.
+    fn pipeline_quads(
+        &mut self,
+        stage: RenderLevelStage,
+        pipeline: RenderPipelineRef,
+        quads: &[PipelineQuad],
+    ) -> Result<PreparedWorldDraw, PipelineDrawError> {
+        let _ = (stage, pipeline, quads);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Prepare a retained GPU [`MeshRef`] draw for `stage` (standard pass stages or
+    /// [`RenderLevelStage::OitTranslucent`]).
+    fn draw_mesh(
+        &mut self,
+        stage: RenderLevelStage,
+        pipeline: RenderPipelineRef,
+        mesh: MeshRef,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<PreparedWorldDraw, PipelineDrawError> {
+        let _ = (stage, pipeline, mesh, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Prepare a transient per-frame vertex/index draw for `stage` (standard pass stages or
+    /// [`RenderLevelStage::OitTranslucent`]).
+    fn draw_vertices(
+        &mut self,
+        stage: RenderLevelStage,
+        pipeline: RenderPipelineRef,
+        vertices: &[&[u8]],
+        indices: Option<(IndexFormat, &[u8])>,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<PreparedWorldDraw, PipelineDrawError> {
+        let _ = (stage, pipeline, vertices, indices, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Prepare a GPU-driven [`IndirectDraw`] for `stage` (standard pass stages or
+    /// [`RenderLevelStage::OitTranslucent`]), checked as
+    /// [`WorldDrawContext::draw_indirect`] checks it.
+    fn draw_indirect(
+        &mut self,
+        stage: RenderLevelStage,
+        draw: &IndirectDraw<'_>,
+    ) -> Result<PreparedWorldDraw, PipelineDrawError> {
+        let _ = (stage, draw);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
 }
 
 /// Draw batches prepared for the active standard render stage, in call order.
@@ -677,5 +917,103 @@ pub trait RenderLevelStageContext {
             StagePass::Oit(stage, pass) => Some((stage, pass)),
             StagePass::None | StagePass::World(_) => None,
         }
+    }
+}
+
+/// Draw recorder handed to a pass callback inside [`FrameGraphContext::add_pass`].
+///
+/// Draws are recorded as data during [`crate::Hooks::frame_graph_setup`] and executed when the
+/// pass runs in the compiled frame graph. Self-sampling the pass's own target returns
+/// [`PipelineDrawError::TargetReadWriteHazard`].
+pub trait OffscreenDrawContext {
+    /// Record a retained GPU [`MeshRef`] draw into this offscreen pass.
+    fn draw_mesh(
+        &mut self,
+        pipeline: RenderPipelineRef,
+        mesh: MeshRef,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (pipeline, mesh, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Record a transient per-frame vertex/index draw into this offscreen pass.
+    fn draw_vertices(
+        &mut self,
+        pipeline: RenderPipelineRef,
+        vertices: &[&[u8]],
+        indices: Option<(IndexFormat, &[u8])>,
+        draw: MeshDraw,
+        bindings: &DrawBindings<'_>,
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (pipeline, vertices, indices, draw, bindings);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Record a GPU-driven [`IndirectDraw`] into this offscreen pass, checked as
+    /// [`WorldDrawContext::draw_indirect`] checks it. A compute node earlier in the graph can
+    /// write the commands this pass reads.
+    fn draw_indirect(&mut self, draw: &IndirectDraw<'_>) -> Result<(), PipelineDrawError> {
+        let _ = draw;
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+
+    /// Shorthand for drawing [`PipelineQuad`]s into this offscreen pass with a quad pipeline of the
+    /// default vertex format (`VertexFormat::position_tex_color`).
+    fn pipeline_quads(
+        &mut self,
+        pipeline: RenderPipelineRef,
+        quads: &[PipelineQuad],
+    ) -> Result<(), PipelineDrawError> {
+        let _ = (pipeline, quads);
+        Err(PipelineDrawError::Pipeline(RenderPipelineError::Invalid))
+    }
+}
+
+/// Per-frame graph setup surface passed to
+/// [`crate::Hooks::frame_graph_setup`] (NeoForge 26.3's `FrameGraphSetupEvent`, vanilla
+/// `FrameGraphBuilder`).
+pub trait FrameGraphContext {
+    /// Allocate a transient per-frame offscreen render target (`FrameGraphBuilder.createInternal`).
+    ///
+    /// Pooled across frames and released after the last pass in the compiled graph that reads it.
+    /// Passes that write only to transient targets with no downstream reader reaching an external
+    /// target (`FrameTarget::Mod` or a built-in `LevelTargetBundle` target) are culled unless
+    /// `disable_culling` is set.
+    fn create_transient(
+        &mut self,
+        desc: &RenderTargetDescriptor,
+    ) -> Result<TransientTargetId, RenderTargetError> {
+        let _ = desc;
+        Err(RenderTargetError::Unavailable)
+    }
+
+    /// Add a data-driven offscreen render pass to this frame's graph
+    /// (`FrameGraphBuilder.addPass`).
+    ///
+    /// `record` records draw commands synchronously during setup. Kept passes are executed in
+    /// deterministic topological order (registration order breaks ties); cycles are refused with
+    /// [`FrameGraphError::Cycle`] without panicking or breaking other passes in the frame.
+    fn add_pass(
+        &mut self,
+        desc: FramePassDescriptor,
+        record: &mut dyn FnMut(&mut dyn OffscreenDrawContext),
+    ) -> Result<FramePassId, FrameGraphError> {
+        let _ = (desc, record);
+        Err(FrameGraphError::Unavailable)
+    }
+
+    /// Add a compute node to this frame's graph: `record` issues dispatches synchronously during
+    /// setup, and the graph runs them outside any render pass at the node's place in the
+    /// topological order. Never culled. A dispatch the device cannot run is refused by
+    /// [`ComputeDispatchContext`] with an `Err`, never a panic.
+    fn add_compute_pass(
+        &mut self,
+        desc: ComputePassDescriptor,
+        record: &mut dyn FnMut(&mut dyn ComputeDispatchContext),
+    ) -> Result<FramePassId, FrameGraphError> {
+        let _ = (desc, record);
+        Err(FrameGraphError::Unavailable)
     }
 }

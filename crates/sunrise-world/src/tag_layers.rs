@@ -1,4 +1,5 @@
 //! Fold resource-pack tag layers, then bind the resulting entries to a registry.
+pub mod convention;
 mod order;
 pub(crate) use order::dependency_order;
 
@@ -46,6 +47,13 @@ impl TagLayers {
     /// The layers of one file.
     pub fn from_file(file: Value) -> io::Result<Self> {
         Self::decode(file).map(|(_, layer)| layer)
+    }
+
+    /// Decode one file and apply it on top of existing layers (clearing them if `replace: true`).
+    pub fn push_file(&mut self, file: Value) -> io::Result<()> {
+        let decoded = Self::decode(file)?;
+        self.push(decoded);
+        Ok(())
     }
 
     /// Decode the complete file before applying it over any lower layers
@@ -202,7 +210,7 @@ pub(crate) fn layers(
     kind: &str,
     overlay: &PackOverlay<'_>,
 ) -> io::Result<HashMap<String, TagLayers>> {
-    let mut raw = HashMap::<_, TagLayers>::new();
+    let mut raw = convention::layers(kind);
     let data = root.join("data");
     for namespace in crate::json_folder::namespaces(&data) {
         let dir = data.join(&namespace).join("tags").join(kind);
@@ -216,8 +224,10 @@ pub(crate) fn layers(
                 .bytes()
                 .and_then(|bytes| TagLayers::decode(serde_json::from_slice(bytes)?))
             {
-                Ok((_, layer)) => {
-                    raw.insert(format!("{namespace}:{}", file.name), layer);
+                Ok(layer) => {
+                    raw.entry(format!("{namespace}:{}", file.name))
+                        .or_default()
+                        .push(layer);
                 }
                 Err(error) => log::warn!(
                     "Sunrise: couldn't read tag file {}: {error}",
@@ -299,8 +309,12 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).unwrap();
         let bound = bound.unwrap();
+        let test_tags: HashMap<_, _> = bound
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("test:"))
+            .collect();
         assert_eq!(
-            bound,
+            test_tags,
             HashMap::from([("test:sticks".to_owned(), vec!["minecraft:stick".to_owned()])])
         );
     }
@@ -431,5 +445,56 @@ mod tests {
         let bound = TagLayers::bind("block", &raw, |_| true);
         assert_eq!(bound["test:a"], ["minecraft:dirt", "minecraft:sand"]);
         assert_eq!(bound["test:b"], ["minecraft:dirt"]);
+    }
+
+    #[test]
+    fn convention_tags_support_replace_remove_and_unresolved_optional_entries() {
+        let root = std::path::PathBuf::new();
+        let known = |id: &str| {
+            matches!(
+                id,
+                "minecraft:iron_ingot"
+                    | "minecraft:gold_ingot"
+                    | "minecraft:copper_ingot"
+                    | "minecraft:netherite_ingot"
+                    | "minecraft:brick"
+                    | "minecraft:nether_brick"
+                    | "minecraft:resin_brick"
+                    | "test:bronze_ingot"
+            )
+        };
+
+        // 1. replace: true over a built-in c: convention tag replaces its members.
+        let replace_files = [(
+            "tags/c:item/ingots/iron".to_owned(),
+            vec![br#"{"replace":true,"values":["test:bronze_ingot"]}"#.to_vec()],
+        )];
+        let replaced = load(&root, "item", &PackOverlay::new(&replace_files), known).unwrap();
+        assert_eq!(replaced["c:ingots/iron"], ["test:bronze_ingot"]);
+        assert!(!replaced["c:ingots"].contains(&"minecraft:iron_ingot".to_owned()));
+        assert!(replaced["c:ingots"].contains(&"test:bronze_ingot".to_owned()));
+
+        // 2. remove drops a built-in member while keeping other built-in members.
+        let remove_files = [(
+            "tags/c:item/ingots".to_owned(),
+            vec![br##"{"values":[],"remove":["#c:ingots/iron"]}"##.to_vec()],
+        )];
+        let removed = load(&root, "item", &PackOverlay::new(&remove_files), known).unwrap();
+        assert!(!removed["c:ingots"].contains(&"minecraft:iron_ingot".to_owned()));
+        assert!(removed["c:ingots"].contains(&"minecraft:gold_ingot".to_owned()));
+
+        // 3. Unresolved optional entry is skipped cleanly while built-in members remain.
+        let optional_files = [(
+            "tags/c:item/ingots/iron".to_owned(),
+            vec![
+                br#"{"values":[{"id":"absent:not_loaded","required":false},"test:bronze_ingot"]}"#
+                    .to_vec(),
+            ],
+        )];
+        let optional = load(&root, "item", &PackOverlay::new(&optional_files), known).unwrap();
+        assert_eq!(
+            optional["c:ingots/iron"],
+            ["minecraft:iron_ingot", "test:bronze_ingot"]
+        );
     }
 }

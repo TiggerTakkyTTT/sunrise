@@ -140,6 +140,89 @@ fn ranged_checks_constructor_bounds_and_maps_the_single_index() {
     assert_eq!(ranged.amount(host, 1), 0);
 }
 
+/// A two-slot chest at `pos` that names its slots as the game's block handlers do.
+struct Chest {
+    level: crate::LevelRef,
+    pos: [i32; 3],
+}
+
+impl ResourceHandler<Chemical> for Chest {
+    fn size(&self, _: &mut dyn ServerHost) -> usize {
+        2
+    }
+    fn resource(&self, _: &mut dyn ServerHost, _: usize) -> Option<Chemical> {
+        None
+    }
+    fn amount(&self, _: &mut dyn ServerHost, _: usize) -> u32 {
+        0
+    }
+    fn capacity(&self, _: &mut dyn ServerHost, _: usize, _: Option<&Chemical>) -> u32 {
+        0
+    }
+    fn backing(&self, _: &mut dyn ServerHost, index: usize) -> Option<crate::StorageSlot> {
+        (index < 2).then_some(crate::StorageSlot {
+            level: self.level,
+            pos: self.pos,
+            slot: index,
+        })
+    }
+    fn insert_at(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &TransactionContext,
+        _: usize,
+        _: &Chemical,
+        _: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        Ok(0)
+    }
+    fn extract_at(
+        &self,
+        _: &mut dyn ServerHost,
+        _: &TransactionContext,
+        _: usize,
+        _: &Chemical,
+        _: u32,
+    ) -> Result<u32, TransactionError<Overanswered>> {
+        Ok(0)
+    }
+}
+
+#[test]
+fn combined_and_ranged_handlers_report_the_backing_slot_of_the_index_they_map_to() {
+    let mut fake = FakeHost::new();
+    let level = fake.level.level();
+    let host: &mut dyn ServerHost = &mut fake;
+    let slot = |pos, slot| Some(crate::StorageSlot { level, pos, slot });
+    let combined = CombinedResourceHandler::new(
+        host,
+        vec![
+            Box::new(Chest {
+                level,
+                pos: [0, 64, 0],
+            }) as Box<dyn ResourceHandler<Chemical>>,
+            Box::new(Chest {
+                level,
+                pos: [1, 64, 0],
+            }),
+        ],
+    );
+    assert_eq!(combined.backing(host, 1), slot([0, 64, 0], 1));
+    assert_eq!(combined.backing(host, 2), slot([1, 64, 0], 0));
+    assert_eq!(combined.backing(host, 4), None);
+    let ranged = RangedResourceHandler::of_single_index(
+        host,
+        Box::new(Chest {
+            level,
+            pos: [0, 64, 0],
+        }),
+        1,
+    )
+    .unwrap();
+    assert_eq!(ranged.backing(host, 0), slot([0, 64, 0], 1));
+    assert_eq!(ranged.backing(host, 1), None);
+}
+
 #[test]
 fn an_empty_index_is_full_only_when_it_cannot_hold_anything() {
     let (mut fake, r) = items_host(&["minecraft:stone"]);

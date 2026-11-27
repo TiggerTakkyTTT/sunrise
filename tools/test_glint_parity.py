@@ -12,10 +12,9 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
 
 ORACLE = 'VanillaItemGlintOracle'
 
@@ -31,7 +30,7 @@ LIB_TESTS = [
 ]
 
 CLIENT_TESTS = [
-    'game::item_draw::tests::item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3',
+    'game::client_side::item_draw::tests::item_display_end_crystal_world_submit_uses_vanilla_glint_scale_and_atlas_uv_26_3',
 ]
 
 

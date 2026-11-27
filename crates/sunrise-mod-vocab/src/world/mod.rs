@@ -17,6 +17,7 @@ pub(crate) mod chunk_refusal;
 pub(crate) mod chunk_request;
 pub(crate) mod chunk_snapshot;
 pub(crate) mod clock_adjustment;
+pub(crate) mod convention_tags;
 pub(crate) mod criteria;
 pub(crate) mod custom_spawners;
 pub(crate) mod data_maps;
@@ -38,6 +39,9 @@ pub(crate) mod inside_write;
 pub(crate) mod landing_write;
 pub(crate) mod level_write_error;
 pub(crate) mod map_decoration_types;
+// hidden: a module of game-side entry points; mods use their re-exports
+#[doc(hidden)]
+pub mod mirror;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod mod_chunk_tickets;

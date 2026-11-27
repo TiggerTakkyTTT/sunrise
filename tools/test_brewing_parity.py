@@ -18,11 +18,9 @@ only the exact recipe pairs.
 import json
 from pathlib import Path
 import sys
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab
-    import oracle_harness as harness
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 POTION_ITEMS = ['potion', 'splash_potion', 'lingering_potion']
 
@@ -183,6 +181,6 @@ if __name__ == '__main__':
         'bundled recipe, potion type/id and item candidate, plus the brewing-stand tick: brew time and '
         'speed multiplier, fuel uses and loading, ingredient shrink, outputs and bottle bits. --baseline '
         'leaves out the cross-product and whole-registry slot candidates; --no-tick leaves out the tick cases.',
-        sources=[lab.ROOT / 'crates/sunrise-client-render/src/brewing.rs',
+        sources=[lab.ROOT / 'crates/sunrise-level/src/brewing.rs',
                  lab.ROOT / 'crates/sunrise-items/src/item_data.rs',
                  lab.ROOT / 'crates/sunrise-items/src/items.rs'])

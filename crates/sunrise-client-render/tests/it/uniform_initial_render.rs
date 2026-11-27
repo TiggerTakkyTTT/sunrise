@@ -1,23 +1,12 @@
 //! Original synthetic rendering controls for ordinary uniform initial values.
 use sunrise_render_shaderpack::pack_uniforms::Value;
-use sunrise_shaders::{Origin, Preprocessed, Target, translate_composite};
+use sunrise_shaders::{Preprocessed, Target, translate_composite};
 use wgpu::util::DeviceExt;
 
 fn source(code: &str) -> Preprocessed {
-    Preprocessed {
-        code: code.into(),
-        files: vec!["original-render.glsl".into()],
-        lines: code
-            .lines()
-            .enumerate()
-            .map(|(i, _)| Origin {
-                file: 0,
-                line: i as u32 + 1,
-            })
-            .collect(),
-        version: Some((430, None)),
-        ..Default::default()
-    }
+    let mut pp = Preprocessed::from_source("original-render.glsl", code);
+    pp.version = Some((430, None));
+    pp
 }
 
 #[test]

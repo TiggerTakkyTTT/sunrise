@@ -2,7 +2,7 @@
 
 pub trait Hooks {
     /// NeoForge's `IItemExtension.onStopUsing`: the use of `stack` by
-    /// `entity` (`None` for a player) in `hand` is over, with `time_left`
+    /// `entity` (a player's id or a mob's) in `hand` is over, with `time_left`
     /// ticks of it left (0 for a finished use). Where
     /// `LivingEntity.stopUsingItem` runs, once, after the use is cleared: a
     /// listener that releases again finds no use. It comes after
@@ -24,7 +24,8 @@ pub trait Hooks {
         contract = "listen",
         scope = "item",
         key = "stack",
-        neoforge = "IItemExtension.onStopUsing"
+        neoforge = "IItemExtension.onStopUsing",
+        version = 2
     )]
     fn on_stop_using(stack: &ItemStack, entity: Option<i32>, hand: Hand, time_left: i32);
 }

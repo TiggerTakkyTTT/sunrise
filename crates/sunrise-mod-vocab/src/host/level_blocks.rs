@@ -16,6 +16,48 @@ pub trait LevelBlocksBackend {
         visit: &mut dyn FnMut(&dyn LevelHost, BlockCapabilitySite),
     ) -> Result<(), LevelReadError>;
     /// Side: both.
+    /// Whether the supplied candidate state can survive at `pos` (`BlockState.canSurvive`),
+    /// evaluated with the level's normal block rules and survival Parts. `state` need not be
+    /// placed there. Vegetation checks the soil's `can_sustain_plant` Part before the plant's
+    /// own `may_place_on` Part. This does not run placement, obstruction, permission, or
+    /// `must_survive` checks. On a client, this is a prediction from its loaded local level.
+    /// On a server, this reads any open level named by the handle, including one that is parked
+    /// while another dimension is in play. On a client, it predicts only from its loaded local
+    /// level. `pos` must be in bounds and loaded; unknown states, unavailable hosts or phases,
+    /// and recursive queries return `Err(LevelReadError::Unavailable)`. A dead handle returns
+    /// `Err(LevelReadError::Stale)`. It reads without loading, placing, scheduling ticks, or
+    /// changing the level.
+    #[access(WorldOnly)]
+    #[game_method(native_level_can_survive)]
+    fn level_can_survive(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockState,
+    ) -> Result<bool, LevelReadError>;
+    /// Side: both.
+    /// The fire odds of the supplied `state` at `pos`, asked from its side `face`, the one
+    /// facing the fire or the air fire may take: `(ignite, burn)` as fire itself reads them
+    /// (`FireBlock.getIgniteOdds` and `getBurnOdds`; NeoForge's
+    /// `IBlockExtension.getFlammability` and `getFireSpreadSpeed`). The mods' `fire_odds`
+    /// answers come first, then the world's `neoforge:flammable` data map, then vanilla's
+    /// table (`FireBlock.bootStrap`). Ignite odds are at least 0 and burn odds 0 to 300; a
+    /// waterlogged state is `(0, 0)`. `state` need not be placed there. `pos` must be in
+    /// bounds and loaded; an unknown state, an unavailable host or phase and a query nested in
+    /// another block query of the same state at the same position return
+    /// `Err(LevelReadError::Unavailable)`, a dead handle `Err(LevelReadError::Stale)`. On a
+    /// client this is a prediction from its loaded local level. It reads without loading,
+    /// placing or changing the level.
+    #[access(WorldOnly)]
+    #[game_method(native_level_fire_odds)]
+    fn level_fire_odds(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        state: BlockState,
+        face: Direction,
+    ) -> Result<(i32, i32), LevelReadError>;
+    /// Side: both.
     /// The contextual friction of `state` at `pos` (`IBlockExtension.getFriction`).
     /// The state need not occupy the position. `entity` is the optional live handle passed to the block's part. A stale entity
     /// is refused. Returns `Ok(None)` for a nested query that repeats
@@ -267,22 +309,47 @@ pub trait LevelBlocksBackendMut {
     /// with the same block-entity rules as [`LevelRef::set_block`].
     fn level_remove_block(&mut self, level: LevelRef, pos: [i32; 3], moved: bool) -> bool;
     /// Side: server.
-    /// Destroy a block in the level in place (`Level.destroyBlock`), optionally dropping
-    /// resources with `tool` (None is an empty hand). With `collect`, return the dropped
-    /// stacks without spawning their item entities; otherwise return an empty list after
-    /// spawning them. The one level drop path runs loot, block-drop hooks and experience
-    /// once, in vanilla's random order. `drop` false suppresses resources entirely.
-    /// `Ok(None)` means nothing broke: air, a refused write, a stale handle, a client, an
-    /// unloaded/out-of-height position, or a parked level. In a transaction in the block's
-    /// level, loot is prepared against the old block, the new state is immediately readable,
-    /// and spawning and break effects are deferred to commit. Another level's transaction
-    /// alone does not defer the operation.
+    /// Destroy a block in the level in place (`Level.destroyBlock(pos, drop, breaker, maxUpdates)`),
+    /// optionally dropping resources with `tool` (None is an empty hand) and `breaker` as the
+    /// loot's `this` entity and the `minecraft:block_destroy` game event's source. With `collect`,
+    /// return the dropped stacks without spawning their item entities; otherwise return an empty
+    /// list after spawning them. The one level drop path runs loot, block-drop hooks and
+    /// experience once, in vanilla's random order. `drop` false suppresses resources entirely.
+    /// `Ok(None)` means nothing broke: air, a refused write, a stale or foreign `breaker`, a
+    /// stale handle, a client, an unloaded/out-of-height position, or a parked level. In a
+    /// transaction in the block's level, loot is prepared against the old block, the new state
+    /// is immediately readable, and spawning and break effects are deferred to commit. Another
+    /// level's transaction alone does not defer the operation.
     fn level_destroy_block(
         &mut self,
         level: LevelRef,
         pos: [i32; 3],
         drop: bool,
         tool: Option<&ItemStack>,
+        breaker: Option<EntityRef>,
+        collect: bool,
+    ) -> Result<Option<Vec<ItemStack>>, StackWriteError>;
+    /// Side: server.
+    /// Drop the resources of the block at `pos` without breaking it
+    /// (`Block.dropResources(state, level, pos, blockEntity, entity, tool)`): what
+    /// `destroy_block` drops, with `tool` (None is an empty hand) and `breaker` as the loot's
+    /// `this` entity, the block entity's contribution (a shulker box's contents), the
+    /// `block_drops` hook and the block's experience (`Block.spawnAfterBreak`), under the
+    /// `doTileDrops` game rule. Unlike `destroy_block` it sends no break particles or sound
+    /// (level event 2001), leaves the block in place and posts no `minecraft:block_destroy` game
+    /// event: a mod that breaks many blocks at once sends the effect once, drops each block's
+    /// resources, then removes the blocks and posts the game events itself. With `collect`,
+    /// return the stacks without spawning their item entities; otherwise an empty list after
+    /// spawning them. `Ok(None)` for air, a stale or foreign `breaker`, a stale handle, a
+    /// client, an unloaded or out-of-height position, or a parked level. In a transaction in
+    /// the block's level, the loot is rolled
+    /// now and the spawns wait for commit, as `destroy_block`'s do.
+    fn level_drop_resources(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        tool: Option<&ItemStack>,
+        breaker: Option<EntityRef>,
         collect: bool,
     ) -> Result<Option<Vec<ItemStack>>, StackWriteError>;
     /// Side: server.
@@ -290,6 +357,12 @@ pub trait LevelBlocksBackendMut {
     /// entity, tool)`), without breaking it or spawning anything: its loot table rolled with
     /// `tool` (None is an empty hand) and `entity` as the breaker, with what its block entity
     /// copies into the drops (a shulker box's contents, a banner's patterns, a pot's sherds).
+    /// The roll is given the block's centre as ORIGIN and its block entity as BLOCK_ENTITY,
+    /// saved as `BlockEntity.saveWithFullMetadata` gives it (stored components included), so
+    /// a `minecraft:match_block` tests the block state, then its NBT and components against
+    /// that entity. A `minecraft:location_check` tests this level at the centre moved by its
+    /// offsets (`LocationCheck.test`): its biome, structure, smoke, light, block and fluid
+    /// tests fail where that position isn't loaded (`LocationPredicate.matches`).
     /// The roll draws from the table's random sequence, else the level random, as vanilla's
     /// does, so it moves later draws: that is why this is a write. No `block_drops` event,
     /// item entity or experience: that is `destroy_block`. None for a refused write, a stale or

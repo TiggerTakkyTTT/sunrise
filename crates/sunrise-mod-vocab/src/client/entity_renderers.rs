@@ -25,6 +25,16 @@ pub struct EntityRenderState {
     pub yaw: f32,
     /// `Entity.getXRot` at the frame: its pitch, positive looking down.
     pub pitch: f32,
+    /// World-space position interpolated to `partial` (`EntityRenderState.x/y/z`).
+    pub position: [f64; 3],
+    /// Bounding box width and height in blocks (`EntityRenderState.boundingBoxWidth`,
+    /// `boundingBoxHeight`).
+    pub size: [f32; 2],
+    /// Eye height above `position[1]`, in blocks (`EntityRenderState.eyeHeight`).
+    pub eye_height: f32,
+    /// Squared distance from `position` to the active view's camera position
+    /// (`EntityRenderState.distanceToCameraSq`).
+    pub distance_to_camera_sq: f64,
     /// A living entity's own frame (`LivingEntityRenderState`); none for any other entity.
     pub living: Option<LivingRenderState>,
     /// The remaining primed-TNT fuse, in ticks, as vanilla draws it (`fuse - partial + 1`);
@@ -344,6 +354,10 @@ mod tests {
             age: 3.5,
             yaw: 0.0,
             pitch: 0.0,
+            position: [0.0; 3],
+            size: [0.25, 0.25],
+            eye_height: 0.2125,
+            distance_to_camera_sq: 0.0,
             living: None,
             tnt_fuse: None,
             orb_value: None,

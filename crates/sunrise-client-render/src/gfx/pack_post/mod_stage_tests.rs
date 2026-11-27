@@ -184,6 +184,7 @@ fn render_stage_quads(inside_pack: bool, quads: &[Vertex]) -> Option<[[u8; 3]; 3
 
     let draws = [DrawRanges {
         primitives: [0..quad_count, 0..0, 0..0, 0..0],
+        ..Default::default()
     }];
     let screen = gpu.texture(T::Rgba8Unorm);
     let stride = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -499,6 +500,7 @@ fn pack_boundaries_fire_in_order_and_draw_pack_custom_depth_tests_mod_pipelines(
         slot: 0,
         stage: world_primitives::STAGE_CUSTOM_GEOMETRY as u32,
         quads: 2,
+        modifier_stack: 0,
     }];
     let batch = Batch {
         pipelines: PipelineBatch {
@@ -506,6 +508,7 @@ fn pack_boundaries_fire_in_order_and_draw_pack_custom_depth_tests_mod_pipelines(
             vertices: &pipe_verts,
             runs: &runs,
             time: 0.0,
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -824,6 +827,7 @@ fn pack_composite_inverts_mod_glsl_quad_drawn_once_after_opaque_blocks() {
         slot: 0,
         stage: world_primitives::STAGE_AFTER_OPAQUE_BLOCKS as u32,
         quads: 1,
+        modifier_stack: 0,
     }];
     let batch = Batch {
         pipelines: PipelineBatch {
@@ -831,6 +835,7 @@ fn pack_composite_inverts_mod_glsl_quad_drawn_once_after_opaque_blocks() {
             vertices: &pipe_verts,
             runs: &runs,
             time: 0.0,
+            ..Default::default()
         },
         ..Default::default()
     };

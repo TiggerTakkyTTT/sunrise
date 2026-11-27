@@ -19,16 +19,9 @@ use sunrise_core::random::LegacyRandom;
 pub mod hooks;
 pub use hooks::PreparedPlay;
 
-/// `SoundSource` indices (vanilla order).
-pub const MASTER: usize = 0;
-pub const MUSIC: usize = 1;
-pub const RECORDS: usize = 2;
-pub const WEATHER: usize = 3;
-pub const BLOCKS: usize = 4;
-pub const NEUTRAL: usize = 6;
-pub const PLAYERS: usize = 7;
-pub const AMBIENT: usize = 8;
-pub const UI: usize = 10;
+pub use sunrise_game_data::sound_source::{
+    AMBIENT, BLOCKS, MASTER, MUSIC, NEUTRAL, PLAYERS, RECORDS, SoundEntityState, UI, WEATHER,
+};
 /// The pool sizes `Library.init` derives from OpenAL Soft's default 255 mono
 /// sources: `clamp((int) sqrt(255), 2, 8)` streaming, the rest static.
 pub const STATIC_CHANNELS: usize = 247;
@@ -55,12 +48,6 @@ pub enum Attenuation {
 pub struct SoundEntity {
     pub id: u32,
     state: Arc<RwLock<SoundEntityState>>,
-}
-#[derive(Clone, Copy, Debug)]
-pub struct SoundEntityState {
-    pub position: [f64; 3],
-    pub silent: bool,
-    pub removed: bool,
 }
 impl SoundEntity {
     pub fn new(id: u32, position: [f64; 3], silent: bool) -> Self {
@@ -1116,6 +1103,10 @@ pub struct SoundEngine {
     /// `instanceBySource`.
     instance_by_source: Vec<(usize, InstanceId)>,
     gain_by_source: [f32; 11],
+    /// A client mod's scale over each source's volume (`set_source_scale`), 1 by default; the
+    /// master's scales every source. Kept apart from `gain_by_source`, which the music's fade
+    /// owns, and from the player's options.
+    scale_by_source: [f32; 11],
     ticking: Vec<InstanceId>,
     live_scratch: Vec<(u64, ChannelId)>,
     mapped_scratch: Vec<u64>,
@@ -1158,6 +1149,7 @@ impl SoundEngine {
             next_handle: 1,
             instance_by_source: Vec::new(),
             gain_by_source: [1.0; 11],
+            scale_by_source: [1.0; 11],
             ticking: Vec::new(),
             live_scratch: Vec::new(),
             mapped_scratch: Vec::new(),
@@ -1308,6 +1300,21 @@ impl SoundEngine {
         volume.clamp(0.0, 1.0)
             * self.final_source_volume(source).clamp(0.0, 1.0)
             * self.gain_by_source[source]
+            * self.source_scale(source)
+    }
+    /// A mod's scale for `source`, times the master's for any other source.
+    pub fn source_scale(&self, source: usize) -> f32 {
+        if source == MASTER {
+            self.scale_by_source[MASTER]
+        } else {
+            self.scale_by_source[source] * self.scale_by_source[MASTER]
+        }
+    }
+    /// A mod scales `source`'s volume by `scale` (0 to 1), playing sounds included, as
+    /// `updateCategoryVolume` updates the live channels of a source.
+    pub fn set_source_scale(&mut self, source: usize, scale: f32, backend: &mut impl Backend) {
+        self.scale_by_source[source] = scale.clamp(0.0, 1.0);
+        self.refresh_category_volume(source, backend);
     }
     /// `calculatePitch`.
     pub(crate) fn calculate_pitch(pitch: f32) -> f32 {

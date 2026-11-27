@@ -25,6 +25,17 @@ impl GuiSpriteRegion {
     }
 }
 
+/// One corner of a [`GuiCanvas::triangles`] triangle, as vanilla's `POSITION_COLOR` GUI vertex.
+// no wire: arguments to an in-process GUI draw
+// exhaustive: plain vertex built by struct literal
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GuiVertex {
+    /// `x, y` in the canvas's local GUI pixels, before its pose.
+    pub pos: [f32; 2],
+    /// Straight-alpha ARGB (`0xAARRGGBB`), blended across the triangle towards its other corners.
+    pub argb: u32,
+}
+
 /// A source rectangle for `blit`, in the texture's logical pixel units.
 // no wire: arguments to an in-process GUI draw
 // exhaustive: plain texture source rectangle coordinates built by struct literal
@@ -137,6 +148,15 @@ pub trait GuiCanvas {
     /// edges.
     fn fill_gradient(&mut self, rect: [f32; 4], top: u32, bottom: u32) -> Result<(), GuiDrawError>;
 
+    /// Draw untextured triangles from the mod's own corners, in order, for shapes a rectangle
+    /// cannot make: rounded panels, discs and rings, line icons, arrows. This is what a mod's
+    /// own `GuiElementRenderState` with `POSITION_COLOR` triangles draws when submitted through
+    /// NeoForge's `GuiGraphicsExtractor.submitGuiElementRenderState`. Each corner takes the
+    /// current pose and scissor like the other draws, its colour is blended across the
+    /// triangle, and either winding draws. A corner that is not finite, before or after the
+    /// pose, refuses the whole call with [`GuiDrawError::NotFinite`].
+    fn triangles(&mut self, triangles: &[[GuiVertex; 3]]) -> Result<(), GuiDrawError>;
+
     /// Draw styled text, including legacy formatting, with `argb` as the default colour.
     fn text(
         &mut self,
@@ -167,6 +187,24 @@ pub trait GuiCanvas {
     /// to commit.
     fn item(&mut self, stack: &ItemStack, at: [f32; 2], seed: i32) -> Result<(), GuiDrawError>;
 
+    /// [`Self::item`] with every vertex it draws, the enchantment glint's included, multiplied
+    /// by straight-alpha ARGB `argb`: a fading pickup icon, a translucent ghost item in a recipe
+    /// preview, a dimmed unavailable slot. `0xFFFFFFFF` draws exactly what [`Self::item`] draws,
+    /// and a zero alpha (`argb >> 24 == 0`) draws nothing, as [`Self::text`] does: the item is
+    /// not drawn at all, so its model hooks do not run for that call. An OptiFine CIT glint
+    /// layer of a resource pack takes the tint's alpha only, as its own colour comes from the
+    /// pack. The current
+    /// pose and scissor apply as for [`Self::item`]. Vanilla 26.3's `GuiGraphicsExtractor.item`
+    /// always draws opaque (its item blit's colour is `-1`); this is the multiplier
+    /// `RenderSystem.setShaderColor` gave around `GuiGraphics.renderItem` before 1.21.6.
+    fn item_tinted(
+        &mut self,
+        stack: &ItemStack,
+        at: [f32; 2],
+        seed: i32,
+        argb: u32,
+    ) -> Result<(), GuiDrawError>;
+
     /// Draw the stack's bar, cooldown, count and custom item decorations at `at`, in that order.
     /// In an item decorator's canvas or its children, this paints only the standard bar, cooldown
     /// and count, without invoking item decorators again.
@@ -194,8 +232,14 @@ pub trait GuiCanvas {
     /// Draw a sprite by its exact packed atlas name (not its GUI id) at `[x, y, w, h]`.
     fn atlas_sprite(&mut self, name: &str, dst: [f32; 4], argb: u32) -> Result<(), GuiDrawError>;
 
-    /// Draw a region of a raw texture (path under `textures/`, without `.png`, or a live or
-    /// registered texture id) at `[x, y, w, h]`. Accepts every [`Blend`].
+    /// Draw a region of a texture packed in the GUI atlas at `[x, y, w, h]`: `texture` is the
+    /// packed name (a path under `textures/`, without `.png`) or a registered atlas's sprite
+    /// (`mymod:gui/atlases/icons/mymod/heart`); `minecraft:name` and `name` are the same texture.
+    /// Accepts every [`Blend`]. A live dynamic texture
+    /// or a standalone resource-pack texture is not in the atlas and is refused with
+    /// [`GuiDrawError::UnknownTexture`]: draw those with [`Self::texture`]. A non-finite `dst`
+    /// or `uv` is refused with [`GuiDrawError::NotFinite`] and a zero `tex` side with
+    /// [`GuiDrawError::BadBlitRegion`], before the name is looked up, as in [`Self::texture`].
     fn blit(
         &mut self,
         texture: &str,
@@ -207,16 +251,24 @@ pub trait GuiCanvas {
 
     /// `GuiGraphicsExtractor.blit` of a standalone texture, a picture outside the GUI atlas such
     /// as a guide book's chapter art, at `dst = [x, y, w, h]`, tinted by ARGB `argb`, under the
-    /// current pose and scissor. `id` is the exact resource (`mymod:textures/gui/chapter.png`),
+    /// current pose and scissor.
+    ///
+    /// One lookup rule for `id`: a live dynamic texture of that id
+    /// (`ClientRenderClientHost::create_dynamic_texture`, of any mod: drawing has no owner check)
+    /// is drawn, nearest with repeat and one mip level; otherwise `id` is the exact resource (`mymod:textures/gui/chapter.png`),
     /// read from the active resource stack, mod packs included, never rewritten: name the
     /// `textures/` folder and `.png` yourself. The quad samples `region.uv / region.tex` to
     /// `(region.uv + region.src) / region.tex` unclamped, as `innerBlit` does (a negative extent
     /// flips that axis), with the sampler the winning `.png.mcmeta` sets: `blur` filters
     /// linearly, `clamp` clamps to the edge, else nearest and repeat, no mipmaps. The image loads
-    /// on first use and stays loaded until the next resource reload. A missing or undecodable
-    /// image, or a `.png.mcmeta` vanilla cannot read, draws vanilla's missing texture in its
-    /// place rather than refusing. A non-finite `uv` is refused with
-    /// [`GuiDrawError::NotFinite`] and a zero `tex` side with [`GuiDrawError::BadBlitRegion`].
+    /// on first use and stays loaded until the next resource reload. An `id` that names neither a
+    /// live dynamic texture nor a resource in the stack when this is called is refused with
+    /// [`GuiDrawError::UnknownTexture`] and draws nothing. An image that is there but undecodable,
+    /// or a `.png.mcmeta` vanilla cannot read, draws vanilla's missing texture in its
+    /// place rather than refusing, and so does a dynamic texture released after this call
+    /// and before the frame draws, as vanilla's `TextureManager.release` leaves its id. A
+    /// non-finite `uv` is refused with [`GuiDrawError::NotFinite`] and a zero `tex` side with
+    /// [`GuiDrawError::BadBlitRegion`].
     fn texture(
         &mut self,
         id: &Identifier,

@@ -31,15 +31,11 @@ import shutil
 import subprocess
 import sys
 
-try:
-    from . import lab, test_rust_parity as base
-    from .test_dedicated_server_parity import Server
-    from .test_locator_bar_parity import generate_world, server_dir
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server
-    from test_locator_bar_parity import generate_world, server_dir
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server
+from tools.test_locator_bar_parity import generate_world, server_dir
 
 NAME = 'server-entities-parity'
 # Ticks the scene runs for once it is summoned: 10 seconds, within the client's 20.

@@ -135,6 +135,10 @@ pub struct Program {
     pub vertex: naga::Module,
     pub fragment: naga::Module,
     pub interface: Interface,
+    /// The location each varying got between the stages, by its GLSL name (a matrix, array or
+    /// struct varying by the name of each part). A varying the fragment stage never reads has
+    /// none.
+    pub varyings: std::collections::BTreeMap<String, u32>,
     /// Non-fatal translation diagnostics, located in the authored source.
     pub notes: Vec<Error>,
 }
@@ -301,20 +305,6 @@ const GBUFFERS_MATRICES: &str = "    hz_ModelViewMatrix = gbufferModelView;\n   
      mat4 hz_light = mat4(vec4(1.0 / 256.0, 0.0, 0.0, 0.0), vec4(0.0, 1.0 / 256.0, 0.0, 0.0), vec4(0.0, 0.0, 1.0, 0.0), vec4(1.0 / 32.0, 1.0 / 32.0, 0.0, 1.0));\n    \
      hz_TextureMatrix = mat4[8](mat4(1.0), hz_light, hz_light, mat4(1.0), mat4(1.0), mat4(1.0), mat4(1.0), mat4(1.0));\n";
 
-/// `pp` with `declaration` after its leading directives (`#version`, `#extension`...).
-fn with_declaration(pp: &Preprocessed, declaration: &str) -> Preprocessed {
-    let mut at = 0;
-    for line in pp.code.split_inclusive('\n') {
-        let t = line.trim_start();
-        if !(t.is_empty() || t.starts_with('#')) {
-            break;
-        }
-        at += line.len();
-    }
-    let code = format!("{}{declaration}\n{}", &pp.code[..at], &pp.code[at..]);
-    Preprocessed { code, ..pp.clone() }
-}
-
 /// The type of a game input a vertex stage may read without declaring it: terrain's
 /// `mc_chunkFade`, and the core-profile vertex attributes (`vaPosition`...) that a
 /// `#version 130` line program reads as it would in a core-profile one (Complementary
@@ -346,7 +336,7 @@ fn implicit_inputs<'a>(
             Some((name.as_str(), value.as_str(), implicit_input_type(name)?))
         })
         .filter(|(name, _, _)| {
-            uses_name(&vertex.code, name)
+            uses_name(vertex.code(), name)
                 && !scanned.globals.contains(*name)
                 && !scanned.declared.contains(*name)
         })
@@ -386,14 +376,9 @@ fn translate(
     );
     let vertex = vertex_bools.as_ref().unwrap_or(vertex);
     let fragment = fragment_bools.as_ref().unwrap_or(fragment);
-    // The boats' water patches' depth, read by our `main` (`GbuffersInputs::water_mask`).
-    let masked = gbuffers
-        .filter(|g| g.water_mask)
-        .map(|_| with_declaration(fragment, &format!("uniform sampler2D {WATER_MASK};")));
-    let fragment = masked.as_ref().unwrap_or(fragment);
-    // The boats' water patches (`GbuffersInputs::water_patches`): the vertex's camera-relative
-    // place to the fragment, and the patches' boxes.
-    let patches = gbuffers.is_some_and(|g| g.water_patches);
+    // The declarations each stage gets, put in once: the boats' water patches (`GbuffersInputs::
+    // water_patches`), the vertex's camera-relative place to the fragment and the patches' boxes,
+    // then the patches' depth (`GbuffersInputs::water_mask`) that our `main` reads.
     let varying = |pp: &Preprocessed, dir: &str| {
         let old = pp.version.as_ref().is_none_or(|(v, _)| *v < 130);
         format!(
@@ -401,18 +386,25 @@ fn translate(
             if old { "varying" } else { dir }
         )
     };
-    let patch_vertex = patches.then(|| with_declaration(vertex, &varying(vertex, "out")));
+    let patches = gbuffers.is_some_and(|g| g.water_patches);
+    let mut vertex_declarations: Vec<String> = Vec::new();
+    let mut fragment_declarations: Vec<String> = Vec::new();
+    if patches {
+        vertex_declarations.push(varying(vertex, "out"));
+        fragment_declarations.push(varying(fragment, "in"));
+        fragment_declarations.push("uniform int sunriseWaterPatchCount;".to_owned());
+        fragment_declarations
+            .extend((0..2 * WATER_PATCHES).map(|k| format!("uniform vec4 sunriseWaterPatch{k};")));
+    }
+    if gbuffers.is_some_and(|g| g.water_mask) {
+        fragment_declarations.push(format!("uniform sampler2D {WATER_MASK};"));
+    }
+    let declared = |pp: &Preprocessed, declarations: &[String]| {
+        (!declarations.is_empty()).then(|| pp.with_declaration(&declarations.join("\n")))
+    };
+    let patch_vertex = declared(vertex, &vertex_declarations);
     let vertex = patch_vertex.as_ref().unwrap_or(vertex);
-    let patch_fragment = patches.then(|| {
-        let uniforms: String = std::iter::once("uniform int sunriseWaterPatchCount;".to_owned())
-            .chain((0..2 * WATER_PATCHES).map(|k| format!("uniform vec4 sunriseWaterPatch{k};")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        with_declaration(
-            fragment,
-            &format!("{}\n{uniforms}", varying(fragment, "in")),
-        )
-    });
+    let patch_fragment = declared(fragment, &fragment_declarations);
     let fragment = patch_fragment.as_ref().unwrap_or(fragment);
     let mut v = Stage::scan(vertex, ShaderStage::Vertex);
     let mut f = Stage::scan(fragment, ShaderStage::Fragment);
@@ -554,7 +546,7 @@ fn translate(
             && !uniforms.contains_key(item)
             && [vertex, fragment]
                 .iter()
-                .any(|pp| uses_name(&pp.code, item));
+                .any(|pp| uses_name(pp.code(), item));
     }
     let samplers: Vec<Sampler> = samplers
         .into_iter()
@@ -841,6 +833,10 @@ fn translate(
     mark_atomic(&fragment, &mut images);
     Ok(Program {
         notes,
+        varyings: locations
+            .iter()
+            .map(|(name, (location, _))| (name.clone(), *location))
+            .collect(),
         interface: Interface {
             uniform_size,
             initial_values,
@@ -992,10 +988,7 @@ fn resources(
 
 /// Translates a compute program (`.csh`).
 pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<Error>> {
-    let named = anonymous_structs::name(&compute.code).map(|code| Preprocessed {
-        code,
-        ..compute.clone()
-    });
+    let named = anonymous_structs::name(compute.code()).map(|code| compute.with_code(code));
     let compute = named.as_ref().unwrap_or(compute);
     let split = atomic_vectors::rewrite(compute);
     let compute = split.as_ref().unwrap_or(compute);
@@ -1027,11 +1020,11 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
     let mut sizes = |name: &str, counts: &[usize]| {
         let v = constant(&c, name)?;
         if !counts.contains(&v.len()) {
-            errors.push(Error {
-                file: compute.files.first().cloned().unwrap_or_default(),
-                line: 0,
-                message: format!("`{name}` must have {counts:?} numbers, not {}", v.len()),
-            });
+            errors.push(Error::new(
+                compute.file(),
+                0,
+                format!("`{name}` must have {counts:?} numbers, not {}", v.len()),
+            ));
             return None;
         }
         Some(v)
@@ -1049,21 +1042,13 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
             code
         }
         Some(Err(message)) => {
-            errors.push(Error {
-                file: compute.files.first().cloned().unwrap_or_default(),
-                line: 0,
-                message,
-            });
+            errors.push(Error::new(compute.file(), 0, message));
             code
         }
         _ => code,
     };
     let code = work_group_size(&code).unwrap_or_else(|message| {
-        errors.push(Error {
-            file: compute.files.first().cloned().unwrap_or_default(),
-            line: 0,
-            message,
-        });
+        errors.push(Error::new(compute.file(), 0, message));
         code
     });
     let code = ordering::barriers_after_atomics(&code).unwrap_or(code);
@@ -1442,13 +1427,8 @@ fn compile(
     limits: InterfaceLimits,
 ) -> Result<naga::Module, Vec<Error>> {
     let header_lines = header.lines().count();
-    let specialized = image_parameters::rewrite(&format!("{header}{code}")).map_err(|message| {
-        vec![Error {
-            file: stage.pp.files.first().cloned().unwrap_or_default(),
-            line: 1,
-            message,
-        }]
-    })?;
+    let specialized = image_parameters::rewrite(&format!("{header}{code}"))
+        .map_err(|message| vec![Error::new(stage.pp.file(), 1, message)])?;
     let text = integer_bounds::rewrite(&array_constructors::rewrite(&specialized));
     // The rewrites keep every line where it is: the header is the text's first `header_lines`.
     let code_start = match header_lines.checked_sub(1) {
@@ -1457,13 +1437,11 @@ fn compile(
     };
     let locate = |line: usize| match line
         .checked_sub(header_lines)
-        .and_then(|l| stage.pp.lines.get(l))
+        .and_then(|l| stage.pp.origin_at(l))
     {
-        Some(o) => sunrise_glsl::Location {
-            file: (stage.pp.files.get(o.file as usize))
-                .cloned()
-                .unwrap_or_default(),
-            line: o.line,
+        Some((file, line)) => sunrise_glsl::Location {
+            file: file.to_owned(),
+            line,
         },
         None => sunrise_glsl::Location {
             file: "<sunrise>".into(),
@@ -1540,6 +1518,31 @@ mod tests {
             game,
             InterfaceLimits::WGPU_DEFAULT,
         )
+    }
+
+    /// `with_declaration` puts the water mask's sampler after `#version`; an error on a later
+    /// line still names the pack's line (an inserted line used to be left out of `lines`, so
+    /// the error moved one line up).
+    #[test]
+    fn an_error_after_an_inserted_declaration_names_the_packs_line() {
+        let game = GbuffersInputs {
+            water_mask: true,
+            ..item_game()
+        };
+        let Err(errors) = item_program(
+            "gbuffers_basic",
+            "layout(location = 1, component = 4) out float x;",
+            "x",
+            &game,
+        ) else {
+            panic!("a component past the location's four is refused");
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.file.ends_with("gbuffers_basic.fsh") && e.line == 2),
+            "{errors:?}"
+        );
     }
 
     fn item_game() -> GbuffersInputs {
@@ -3961,24 +3964,20 @@ in VertexData {{ {member} }} vIn;
         assert!(errors[0].message.contains("needs a binding"), "{errors:?}");
     }
 
-    /// Where each way of writing a buffer block's layout binds it, and a uniform block of the
-    /// pack at an SSBO's binding: each as before this crate compiled through `sunrise-glsl`
-    /// (the scanner writes `set = 4` before the pack's `binding`; naga keeps the last `set`).
+    /// A buffer block without a `set` binds in set 4 at its binding, a block or member the pack
+    /// names `set` included, and a uniform block of the pack at an SSBO's binding stays in set 0.
     #[test]
     fn buffer_blocks_and_a_packs_uniform_block_keep_their_bindings() {
         let csh = "#version 430\nlayout(local_size_x = 1) in;\nuniform float frameTime;\n\
                    layout(std430, binding = 0) buffer A { float a[]; } ga;\n\
-                   layout(std430, set = 1, binding = 1) buffer B { float b[]; } gb;\n\
-                   layout(std430, binding = 3, set = 2) buffer C { float c[]; } gc;\n\
-                   layout(std430, set = 1, set = 2, binding = 6) buffer D { float d[]; } gd;\n\
-                   layout(set = 1) layout(std430, binding = 7) buffer E { float e[]; } ge;\n\
                    layout(std430, binding = 5) buffer F { float f[]; } gf;\n\
                    layout(std140, binding = 5) uniform U { float u; } gu;\n\
-                   void main() { ga.a[0] = gb.b[0] + gc.c[0] + gd.d[0] + ge.e[0] + gf.f[0] + gu.u + frameTime; }\n";
+                   layout(std430, binding = 2) buffer set { float set; float s[]; } gs;\n\
+                   void main() { ga.a[0] = gf.f[0] + gu.u + gs.set + gs.s[0] + frameTime; }\n";
         let pack = Pack::from_zip_bytes("P.zip", zip(&[("shaders/deferred_a.csh", csh)])).unwrap();
         let c = translate_compute(&preprocess(&pack, "deferred_a.csh", &Macros::standard()))
             .unwrap_or_else(|e| panic!("{e:?}"));
-        assert_eq!(c.interface.buffers, [0, 1, 3, 5, 6, 7]);
+        assert_eq!(c.interface.buffers, [0, 2, 5]);
         let bound = |name: &str| {
             (c.module.global_variables.iter())
                 .find(|(_, g)| g.name.as_deref() == Some(name))
@@ -3986,17 +3985,95 @@ in VertexData {{ {member} }} vIn;
                 .map(|b| (b.group, b.binding))
         };
         assert_eq!(
-            ["ga", "gb", "gc", "gd", "ge", "gf", "gu"].map(bound),
-            [
-                Some((4, 0)),
-                Some((4, 1)),
-                Some((2, 3)),
-                Some((4, 6)),
-                Some((4, 7)),
-                Some((4, 5)),
-                Some((0, 5)),
-            ]
+            ["ga", "gf", "gu", "gs"].map(bound),
+            [Some((4, 0)), Some((4, 5)), Some((0, 5)), Some((4, 2))]
         );
+    }
+
+    /// A `set` in a buffer block's layout, wherever the pack writes it, refuses the program with
+    /// an error at the block's line naming the block: GLSL 4.60.8, 4.4.5 makes `set` a
+    /// compile-time error when not targeting an API with descriptor sets, and packs target
+    /// OpenGL (spec rev 1, line 810).
+    #[test]
+    fn a_buffer_block_naming_a_set_is_refused_with_its_name() {
+        let forms = [
+            ("layout(std430, set = 1, binding = 1) buffer B", "B"),
+            ("layout(std430, binding = 3, set = 2) buffer C", "C"),
+            (
+                "layout(std430, set = 1, set = 2, binding = 6) buffer D",
+                "D",
+            ),
+            ("layout(set = 1) layout(std430, binding = 7) buffer E", "E"),
+            ("layout(std430, binding = 4, set = 4) buffer G", "G"),
+            ("layout(std430, binding = 3)\nlayout(set = 0) buffer H", "H"),
+        ];
+        for (layout, name) in forms {
+            let csh = format!(
+                "#version 430\nlayout(local_size_x = 1) in;\n\
+                 layout(std430, binding = 0) buffer A {{ float a[]; }} ga;\n\
+                 {layout} {{ float b[]; }} gb;\n\
+                 void main() {{ ga.a[0] = gb.b[0]; }}\n"
+            );
+            let pack =
+                Pack::from_zip_bytes("P.zip", zip(&[("shaders/deferred_a.csh", &csh)])).unwrap();
+            let errors =
+                translate_compute(&preprocess(&pack, "deferred_a.csh", &Macros::standard()))
+                    .err()
+                    .unwrap_or_else(|| panic!("{layout} translated"));
+            let [error] = &errors[..] else {
+                panic!("{layout}: {errors:?}");
+            };
+            // The line of the `set`: the 4th of the file, or the 5th where the layout is split.
+            let line = if layout.contains('\n') { 5 } else { 4 };
+            assert_eq!(
+                (error.file.as_str(), error.line),
+                ("deferred_a.csh", line),
+                "{layout}"
+            );
+            assert!(error.message.contains(&format!("`{name}`")), "{error:?}");
+        }
+        // In a composite program's fragment stage, the same: one error at the fragment file's
+        // line, naming the block.
+        let fsh = "#version 430 compatibility\n\
+                   layout(std430, binding = 3, set = 2) buffer C { vec4 c[]; } gc;\n\
+                   void main() { gl_FragData[0] = gc.c[0]; }\n";
+        let errors = program(
+            &[("composite.vsh", VSH_120), ("composite.fsh", fsh)],
+            Target::Buffers,
+        )
+        .err()
+        .expect("the fragment stage's `set` refuses the program");
+        let [error] = &errors[..] else {
+            panic!("{errors:?}");
+        };
+        assert_eq!((error.file.as_str(), error.line), ("composite.fsh", 2));
+        assert!(error.message.contains("`C`"), "{error:?}");
+        // Without its binding, the block gets both errors: the `set` one naming it, and the one
+        // the same block without its `set` gets.
+        let refused = |layout: &str| {
+            let csh = format!(
+                "#version 430\nlayout(local_size_x = 1) in;\n\
+                 {layout} buffer B {{ float b[]; }} gb;\n\
+                 void main() {{ gb.b[0] = 1.0; }}\n"
+            );
+            let pack =
+                Pack::from_zip_bytes("P.zip", zip(&[("shaders/deferred_a.csh", &csh)])).unwrap();
+            translate_compute(&preprocess(&pack, "deferred_a.csh", &Macros::standard()))
+                .err()
+                .unwrap_or_else(|| panic!("{layout} translated"))
+        };
+        let unbound = refused("layout(std430)");
+        let [unbound] = &unbound[..] else {
+            panic!("{unbound:?}");
+        };
+        let both = refused("layout(std430, set = 1)");
+        let [set, binding] = &both[..] else {
+            panic!("{both:?}");
+        };
+        assert_eq!((set.file.as_str(), set.line), ("deferred_a.csh", 3));
+        assert!(set.message.contains("`B`"), "{set:?}");
+        assert_ne!(set.message, unbound.message);
+        assert_eq!(binding, unbound);
     }
 
     #[test]

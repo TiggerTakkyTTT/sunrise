@@ -2,10 +2,18 @@
 """Compare real model-shaped breaking geometry and projected UVs with vanilla 26.3."""
 import json
 import itertools
-try:
-    from . import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base, test_section_mesh_parity as mesh
-except ImportError:
-    import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base, test_section_mesh_parity as mesh
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import (
+    lab,
+    oracle_harness as harness,
+    test_model_baking_parity as baking,
+    test_rust_parity as base,
+    test_section_mesh_parity as mesh,
+)
 
 BLOCKS = ["stone", "oak_slab", "stone_slab", "oak_stairs", "stone_stairs", "oak_fence", "iron_bars", "glass_pane", "white_stained_glass_pane", "glass", "tinted_glass", "cobblestone_wall", "oak_fence_gate", "oak_trapdoor", "iron_trapdoor", "oak_door", "white_carpet", "moss_carpet", "pale_moss_carpet", "snow", "cake", "candle", "sea_pickle", "dandelion", "tall_grass", "bamboo", "torch", "wall_torch", "lantern", "chain", "end_rod", "lightning_rod", "lever", "stone_button", "repeater", "comparator", "farmland", "enchanting_table", "lectern", "scaffolding", "anvil", "brewing_stand", "hopper", "cauldron", "composter", "potted_fern", "lily_pad", "sunflower", "chest", "air", "water"]
 
@@ -29,7 +37,7 @@ def canonical(quads):
 def main():
     lock,jars,_=base.verify_artifacts();libraries=baking.client_libraries()
     resources=lab.RESOURCES;build=lab.LOCAL/"breaking-model-parity";build.mkdir(exist_ok=True)
-    paths=[lab.ROOT/"tools/test_breaking_model_parity.py",lab.ROOT/"crates/sunrise-client-render/src/breaking.rs",lab.ROOT/"crates/sunrise-client/src/game.rs",lab.ROOT/"crates/sunrise-client-render/src/gfx.rs",lab.ROOT/"crates/sunrise-client-render/src/entity.wgsl",lab.ROOT/"crates/sunrise-client-render/src/models/catalog.rs",lab.ROOT/"crates/sunrise-client-render/src/mesher.rs",lab.ROOT/"crates/sunrise-client-render/src/camera.rs",lab.ROOT/"crates/sunrise-client/examples/probe/breaking_fixture.rs",lab.ROOT/"mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaBreakingModelOracle.java",lab.ROOT/"mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaSectionMeshOracle.java",lab.ROOT/"Cargo.lock"]
+    paths=[lab.ROOT/"tools/test_breaking_model_parity.py",lab.ROOT/"crates/sunrise-client-render/src/breaking.rs",lab.ROOT/"crates/sunrise-gameplay-common/src/game.rs",lab.ROOT/"crates/sunrise-client-render/src/gfx.rs",lab.ROOT/"crates/sunrise-client-render/src/entity.wgsl",lab.ROOT/"crates/sunrise-client-render/src/models/catalog.rs",lab.ROOT/"crates/sunrise-client-render/src/mesher.rs",lab.ROOT/"crates/sunrise-client-render/src/camera.rs",lab.ROOT/"crates/sunrise-client/examples/probe/breaking_fixture.rs",lab.ROOT/"mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaBreakingModelOracle.java",lab.ROOT/"mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaSectionMeshOracle.java",lab.ROOT/"Cargo.lock"]
     tested=base.source_hashes(paths)
     rows=[dict(case=i,**row) for i,row in enumerate(cases(resources))]
     inputs=build/"inputs.jsonl";inputs.write_text("".join(json.dumps(row)+"\n" for row in rows))

@@ -11,7 +11,7 @@ renderers use their CPU routes; groups are a world-drawing facility, not another
 
 Implement `Hooks::resolve_player_skin` to change the local player's appearance
 without changing their profile. Upload the skin with
-[`create_dynamic_texture`](dynamic-textures.md) as a 64×64 RGBA image once per
+[`create_dynamic_texture`](dynamic-textures.md) as a 64×64 texture once per
 skin file. Normalize legacy 64×32 skins before uploading. Keep the texture id
 and its model width, then select them in the hook:
 
@@ -26,7 +26,8 @@ fn resolve_player_skin(&self, _: &dyn ClientHost, event: &mut ResolvePlayerSkinE
 Use `PlayerModel::Wide` for four-pixel arms and `PlayerModel::Slim` for
 three-pixel arms. The selection starts at `None` each frame; listeners can leave
 an earlier answer alone or clear it with `*event.selection = None`. A missing,
-freed or wrongly sized texture keeps the original texture **and** model.
+released or wrongly sized texture keeps the original texture **and** model. A selected
+texture is copied on the GPU into the player's skin slot each frame it is selected.
 The selection affects the third-person avatar and its skin layers, first-person
 arms, and inventory and creative previews. It does not change the cape, tab
 list, or anyone else's view.
@@ -298,8 +299,11 @@ cull mask the caller supplies) are Sunrise's options for mod copies.
 `block_state_model(state)` (on `RenderAssets`) resolves a `BlockState` as one model: the parts
 its blockstate file selects for its properties, weighted alternatives at the fixed seed
 `BlockEntityDrawContext::block(state)` uses (which likewise takes a resolved `BlockState`),
-each tinted face in the block's default tint. It draws through `draw_model_instances`,
-instance groups and `draw.terrain_model`, not `draw.model`.
+each tinted face in the block's default tint. A block vanilla also draws with a special
+renderer (a chest, shulker box, banner, head, bell, decorated pot and the other blocks of
+vanilla's `BuiltInBlockModels`) adds that renderer's geometry with no block entity data, as a
+block display shows it: a closed chest, a plain banner. It draws through
+`draw_model_instances`, instance groups and `draw.terrain_model`, not `draw.model`.
 Resolve it once per state in `client_setup` and `client_resources_reloaded`.
 
 ## Terrain materials in a block entity
@@ -418,6 +422,12 @@ reload context. The scoped contexts do not lend a world.
 - `draw.draw_instance_group(group)` explicitly submits the group's live copies for this
   view. Repeated submissions of the same group in one view each draw again. Culling uses
   the composed pose.
+- `draw.instance_group(group)` draws a retained group under the draw context's current pose,
+  in entity renderers, entity layers, block entities and screen scenes. A stale or destroyed
+  group returns `GroupError::Stale` and draws nothing.
+- `host.prepare_item(stack, display, seed)` resolves an item's model once and returns a
+  `PreparedItemRef`; `draw.prepared_item(item)` then draws it as `draw.item` would, without
+  resolving the model again. A stale handle draws nothing and returns `ModelError::StaleModel`.
 - `group.destroy(host)` retires the handle and releases capacity and CPU caches.
   Copies already accepted for a view remain drawn; subsequent calls return `Stale`.
 - `Hooks::prepare_render_buffers` runs once per world view before any pass-bearing render stage.
@@ -492,6 +502,34 @@ draw.fluid_box(&tank.stack, [0.125, 0.0625, 0.125, 0.875, level, 0.875], options
 - A stack of 0, an empty or unresolved fluid, or reversed or non-finite bounds draws nothing.
   Valid quads are submitted individually up to the device's vertex and index buffer capacity for
   the combined entity batch without artificial coordinate or quad caps.
+
+## Carried block entities
+
+A mod that moves blocks (a contraption drawn from an entity renderer) draws the block entities
+they carry with `draw.block_entity(&entity)`, vanilla's `BlockEntityRenderDispatcher` extract and
+submit. `entity` is a `SceneBlockEntity`: the type id, the block state and the saved fields. Build
+it once and again whenever its data changes; nothing ticks it.
+
+```rust,ignore
+draw.push();
+draw.translate(offset);
+draw.set_light(sampled_light); // the caller samples light itself
+draw.block_entity(&carried)?;
+draw.pop();
+```
+
+- The pose and light are `draw`'s; the overlay is vanilla's `NO_OVERLAY`. The block entity's own
+  position is never read, and the dispatcher's `shouldRender` culling is skipped: the caller's
+  entity was already culled.
+- A vanilla block entity draws through the engine's renderer for its block state, a mod's through
+  its `BlockEntityPart` submit. A type with no renderer draws nothing.
+- Without a level a double chest draws as a single closed chest, an enchanting table as its
+  closed book, a conduit inactive, an end portal and gateway on every face with no beam, and a
+  beacon with no beam. Chest lids, the bell's shake, the enchanting book and conduit rotation stay
+  at rest.
+- One level of nesting: a `block_entity` call from inside a submit that `block_entity` itself
+  dispatched returns `BlockEntityDrawRefusal::Nested`, because input a mod controls must never
+  recurse without end.
 
 ## Before and after a living entity draws
 
@@ -571,6 +609,24 @@ index makes `hide` return `false` without changing anything. Neither refuses the
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
   armour, held items and other layers keep every part, and the cape, a layer of its own, stays.
 
+## Pose a model after vanilla's last step
+
+One living draw runs four phases, in order:
+
+1. **Select** (`render_living_pre`): pick the body and hide parts.
+2. **Animate** (`setupAnim`, with `humanoid_setup_anim` inside it): vanilla poses the model.
+3. **Posed** (`living_model_posed`): the model after vanilla's last posing step.
+4. **Drawn**: the layers and `render_living_post` read the final pose.
+
+`living_model_posed(entity, layer, model)` fires once for each model that gets posed, the body and
+each armour or equipment model that runs its own setup. `layer` is the model's `ModelLayerLocation`
+(`minecraft:player#main`, `minecraft:zombie#chestplate`); a model the game names without a namespace reads as
+`minecraft:`. A mod layer that redraws stock layers (`StockLayerDraw::draw_stock_layer`) poses the body and those
+layers again, and the hook fires again for each, so keep an edit a function of its inputs. `model` is a `&mut dyn FrameModelPoseEdit`: find a part's index as in
+[the final model](#read-the-final-body-model), then `set_pose(index, PartPose)` writes position,
+rotation and scale, and `reset_pose(index)` returns the part to its bind pose. A non-finite write
+returns `false` and the part keeps its pose. Hiding stays in Select. With no listener, no event is built.
+
 ## Text and animation in block entities
 
 `BlockEntityDrawContext::text` draws a component under the current pose in font pixels,
@@ -608,6 +664,17 @@ shading and draws at full-bright light whatever `set_light` or `level_light` say
 top cell still applies, so night, `darkness` and coloured lights still tint it. An enchanted item
 keeps its glint. It lasts until `unlit(false)` or the end of the draw; `terrain_model` keeps its
 own shading option.
+
+To draw a texture of your own (a dynamic texture a mod made), get a render type from
+`RenderAssets::entity_solid`, `entity_cutout` or `entity_translucent` with the texture's id and call
+`BlockEntityDrawContext::textured_quad(render_type, corners, uv, tint)`. Unlike `quad`, the UVs are
+in the texture's own unit square (0 to 1), not texels of 16. The same texture gives the same render
+type, so keep it. Light and `unlit` apply as for `quad`. The call returns false, drawing nothing,
+for an id that is not a live dynamic texture, a first-person hand draw or a coordinate that is not
+finite. A texture released after the quad was submitted draws the missing texture. Resource-stack
+textures are not accepted. Under a shader pack these quads are drawn by the
+pack's entity program (the block entity program in a block entity's draw) with the texture bound
+as the entity texture.
 
 ## Copycat faces
 

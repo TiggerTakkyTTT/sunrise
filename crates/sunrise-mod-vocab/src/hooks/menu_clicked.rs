@@ -3,6 +3,10 @@
 pub trait Hooks {
     /// A click in `menu`, before its default action (`ServerGamePacketListenerImpl.handleContainerClick`,
     /// `AbstractContainerMenu.clicked`). Only parts registered for that menu type are asked.
+    /// The player's own `InventoryMenu` (window 0, while no other menu is open) is
+    /// `minecraft:inventory`: it has no owner, so every mod's Parts attached to it are asked, in
+    /// mod order, and the default runs only if none handles the click; a handled click resends
+    /// the inventory. The creative picker is never asked.
     /// `slot` is in menu order (container slots, then any player inventory; -999 outside),
     /// `button` and `mode` are the click input, and `uuid` identifies the clicking player.
     /// Menu-button clicks, recipe placement and the creative set-slot packet do not call it.
@@ -25,7 +29,7 @@ pub trait Hooks {
     /// Remaining parts continue, but the failed click's default never runs. The server resyncs
     /// the still-live menu and keeps committed edits.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_menu_clicked",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_menu_clicked",
         dispatch = "api_carrier",
         side = "server",
         contract = "cancel",
@@ -34,7 +38,7 @@ pub trait Hooks {
         out = "handled",
         cancellable = true,
         neoforge = "none (a Java menu overrides AbstractContainerMenu.clicked; no event)",
-        version = 4
+        version = 5
     )]
     fn menu_clicked(
         menu: &str,

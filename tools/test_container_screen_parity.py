@@ -10,10 +10,12 @@ book screens."""
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 # imageWidth, imageHeight; the recipe book screens only compare hasClickedOutside.
 SCREENS = {'chest': None, 'hopper': (176, 133), 'shulker': (176, 167), 'beacon': (230, 219),
@@ -136,7 +138,7 @@ def main():
     harness.differential(
         'rust-container-screen-parity', 'VanillaContainerScreenOracle', 'container_screen_probe', make_cases, scope,
         sources=[lab.ROOT / 'crates/sunrise-client/src/container_screen.rs',
-                 lab.ROOT / 'crates/sunrise-client/src/menu.rs'])
+                 lab.ROOT / 'crates/sunrise-sim/src/menu.rs'])
 
 
 if __name__ == '__main__':

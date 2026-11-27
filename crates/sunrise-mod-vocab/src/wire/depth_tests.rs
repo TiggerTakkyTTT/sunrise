@@ -2,6 +2,14 @@ use super::*;
 use crate::item::crafting::Shape;
 use crate::{RecipeSlotDisplay, Tag, Text};
 
+/// The stack these tests decode on (#6059): an eighth of the least stack a game thread that
+/// decodes Wire has. Every such thread (the client's main and network threads, the integrated
+/// server, the server's network workers, resource and datapack loads) gets at least
+/// `GAME_THREAD_STACK_BYTES`. The guard caps the depth, and each level's frames are fixed by the
+/// decoded type, so the deepest accepted value must fit there with room to spare, in a debug build
+/// on every platform, not only on a stack sized for Linux's smaller frames.
+const DECODE_STACK: usize = sunrise_threads::GAME_THREAD_STACK_BYTES / 8;
+
 fn round<T: Wire>(value: &T, initial: u16) {
     let mut out = Writer::new();
     out.put(value);
@@ -33,7 +41,7 @@ fn datapack_schemas_and_values_stop_at_the_generic_depth() {
         DatapackField, DatapackFieldKind, DatapackValue, DatapackVariant,
     };
     std::thread::Builder::new()
-        .stack_size(128 * 1024)
+        .stack_size(DECODE_STACK)
         .spawn(|| {
             // Value variants each take one envelope; their Vec and tuple add none.
             recursive_at_limit(DatapackValue::Int(1), 31, 0, |v| {
@@ -107,7 +115,7 @@ fn datapack_schemas_and_values_stop_at_the_generic_depth() {
 fn structural_families_fit_a_small_stack() {
     // Verify that the depth limit also bounds stack use.
     std::thread::Builder::new()
-        .stack_size(128 * 1024)
+        .stack_size(DECODE_STACK)
         .spawn(|| {
             // A raised limit is not safe merely because the depth counter still works.
             assert_eq!(MAX_DEPTH, 32);
@@ -146,7 +154,7 @@ fn structural_families_fit_a_small_stack() {
 #[test]
 fn vanilla_trees_keep_their_depth_on_a_small_stack() {
     std::thread::Builder::new()
-        .stack_size(128 * 1024)
+        .stack_size(DECODE_STACK)
         .spawn(|| {
             for compound in [false, true] {
                 let mut tag = Tag::Int(7);
@@ -196,7 +204,7 @@ fn vanilla_trees_keep_their_depth_on_a_small_stack() {
             let mut too_deep = Writer::new();
             too_deep.put(&text);
             assert_eq!(too_deep.error(), Some(WireError::Depth));
-            // Drop both deep trees directly on the 128 KiB stack (iterative Drop for Text).
+            // Drop both deep trees directly on the test stack (iterative Drop for Text).
             drop(text);
             drop(decoded);
         })
@@ -208,7 +216,7 @@ fn vanilla_trees_keep_their_depth_on_a_small_stack() {
 #[test]
 fn json_backed_codecs_preflight_before_serde_recursion() {
     std::thread::Builder::new()
-        .stack_size(128 * 1024)
+        .stack_size(DECODE_STACK)
         .spawn(|| {
             let quoted = serde_json::Value::String("[\\\"{".repeat(1024));
             let mut quoted_bytes = Writer::new();

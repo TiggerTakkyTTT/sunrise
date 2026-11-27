@@ -28,7 +28,7 @@ pub enum Page {
     General,
     Quality,
     Performance,
-    /// Shader packs, either kind (`shader_pack_list`), and what they cost.
+    /// Shader packs (`shader_pack_list`), and what they cost.
     Shaders,
     Advanced,
     /// HDR output's own settings.
@@ -116,8 +116,6 @@ pub enum H {
     HdrLighting,
     BatteryMode,
     ShadowCache,
-    /// Opens the shader pack list (`options_ui::Page::ShaderPacks`).
-    ShaderPacks,
     GraphicsApi,
     TranslucentBatching,
     HdrSmoothGradients,
@@ -176,15 +174,11 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                 (
                     "Preset",
                     vec![
+                        // Vanilla's own preset stays on vanilla's Video Settings.
                         h(
                             H::Preset,
                             None,
                             "Sets the options below together. Changing one makes it Custom.",
-                        ),
-                        v(
-                            Opt::Preset,
-                            None,
-                            "Vanilla's own preset: sets only vanilla's options, as Minecraft does.",
                         ),
                     ],
                 ),
@@ -212,7 +206,6 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             Medium,
                             "How far mobs, crops and machines keep working. CPU time.",
                         ),
-                        v(Opt::Gamma, None, "Brightens dark places."),
                     ],
                 ),
                 (
@@ -245,6 +238,7 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
                             None,
                             "Lowers the frame rate when minimised, or idle too.",
                         ),
+                        v(Opt::Gamma, None, "Brightens dark places."),
                     ],
                 ),
                 (
@@ -526,20 +520,14 @@ pub fn rows() -> Vec<(Page, Vec<(&'static str, Vec<Setting>)>)> {
         ),
         (
             Page::Shaders,
+            // The packs themselves are listed over these (`sunrise_ui`).
             vec![(
-                "Shader packs",
-                vec![
-                    h(
-                        H::ShaderPacks,
-                        High,
-                        "Picks a shader pack, Sunrise's or a shaders/ folder one, and sets its options.",
-                    ),
-                    h(
-                        H::ShadowCache,
-                        Saves,
-                        "Reuses the pack shadow map when sun, view and world match. Off by default.",
-                    ),
-                ],
+                crate::shader_ui::BUILT_IN,
+                vec![h(
+                    H::ShadowCache,
+                    Saves,
+                    "Reuses the pack shadow map when sun, view and world match. Off by default.",
+                )],
             )],
         ),
         (
@@ -944,8 +932,6 @@ impl H {
             H::HdrLighting => labelled("HDR Lighting", on_off(g.hdr_lighting)),
             H::BatteryMode => labelled("Battery Mode", on_off(g.battery)),
             H::ShadowCache => labelled("Shadow Cache", on_off(g.shadow_cache)),
-            // A press across the row, as Calibrate...: the list it opens shows the pick.
-            H::ShaderPacks => Text::literal(lang::get("Shader Packs...")),
             H::GraphicsApi => labelled("Graphics API", g.api.label()),
             // These two are greyed out where the device can't (`Item::blocked`): Off, as
             // they are there, while the saved value waits for a device that can.
@@ -1159,7 +1145,7 @@ impl Item {
     fn steps(self, s: &Settings, out: &EffectiveOutput) -> bool {
         self.switch(s, out).is_none()
             && self.slider(s).is_none()
-            && !matches!(self, Item::Sunrise(H::HdrCalibrate | H::ShaderPacks))
+            && !matches!(self, Item::Sunrise(H::HdrCalibrate))
     }
     /// On/off settings and their value.
     pub fn switch(self, s: &Settings, out: &EffectiveOutput) -> Option<bool> {
@@ -1231,7 +1217,7 @@ impl Item {
             return;
         }
         match self {
-            // Options.applyGraphicsPreset, as Video Settings' slider does it.
+            // A vanilla option's slider, as Video Settings' does it.
             Item::Vanilla(o) => crate::options_ui::set_slider(o, s, v),
             Item::Sunrise(h) => h.set_slider(s, v as f32),
             Item::Extra(_) => {}
@@ -1267,6 +1253,7 @@ impl Item {
                         | H::ShadowCache
                         | H::GraphicsApi
                         | H::TranslucentBatching
+                        | H::GpuCulling
                         | H::HdrSmoothGradients
                 )
                 | Item::Vanilla(
@@ -1488,15 +1475,6 @@ impl Screen for GraphicsScreen {
                 vec![Output::Event(Event::Changed)]
             }
             Item::Sunrise(H::HdrCalibrate) => vec![Output::Push(OptionsPage::HdrCalibration)],
-            // The list of either kind, as the Shaders page opens it from anywhere.
-            Item::Sunrise(H::ShaderPacks) => {
-                s.shader_options = None;
-                vec![
-                    Output::Event(Event::ListShaderPacks),
-                    Output::Event(Event::OpenShaderOptions),
-                    Output::Push(OptionsPage::ShaderPacks),
-                ]
-            }
             _ => {
                 item.cycle(s, back, self.framebuffer, &self.output);
                 vec![Output::Event(Event::Changed)]
@@ -1781,12 +1759,11 @@ mod tests {
         ui.set_search("tearing");
         let found = ui.listed(&s, SIZE);
         assert!(found.iter().any(|(_, i)| *i == Item::Vanilla(Opt::Vsync)));
-        // Both presets answer "preset"; Sunrise's own, named apart from vanilla's, answers its name.
+        // Sunrise's preset answers "preset" and its name (vanilla's stays on Video Settings).
         ui.set_search("preset");
         let found = ui.listed(&s, SIZE);
         let general = |item| (Page::General, item);
         assert!(found.contains(&general(Item::Sunrise(H::Preset))));
-        assert!(found.contains(&general(Item::Vanilla(Opt::Preset))));
         ui.set_search("sunrise preset");
         assert_eq!(ui.listed(&s, SIZE), [general(Item::Sunrise(H::Preset))]);
         ui.set_search("hdr");
@@ -1900,23 +1877,11 @@ mod tests {
         assert!(!ui.scroller_held());
     }
 
-    /// The rows only vanilla's Video Settings had work here as they do there: its preset
-    /// applies its distances (`Options.applyGraphicsPreset`), Max Anisotropy waits for
-    /// Anisotropic filtering, Exclusive Fullscreen is a tick box of `options.txt`.
+    /// The rows only vanilla's Video Settings had work here as they do there: Max Anisotropy
+    /// waits for Anisotropic filtering, Exclusive Fullscreen is a tick box of `options.txt`.
     #[test]
     fn vanilla_video_rows_work_on_the_graphics_screen() {
         let mut s = Settings::default();
-        let preset = Item::Vanilla(Opt::Preset);
-        preset.set_slider(&mut s, 0.0, &NONE);
-        assert_eq!(
-            (s.graphics_preset.as_str(), s.render_distance, s.cloud_range),
-            ("fast", 8, 32)
-        );
-        preset.set_slider(&mut s, 2.0 / 3.0, &NONE);
-        assert_eq!(
-            (s.graphics_preset.as_str(), s.render_distance, s.cloud_range),
-            ("fabulous", 32, 128)
-        );
         let anisotropy = Item::Vanilla(Opt::MaxAnisotropy);
         let filtering = Item::Vanilla(Opt::TextureFiltering);
         while s.file.int("textureFiltering") == 2 {
@@ -2276,7 +2241,7 @@ mod tests {
         assert_eq!(s.sunrise.preset, Preset::Ultra);
         // Ultra keeps the optimizations that leave the picture as it is, and no others.
         assert_eq!(s.sunrise.entity_culling, EntityCullingMode::Asynchronous);
-        assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Auto);
+        assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Off);
         assert_eq!((s.sunrise.lod_distance, s.sunrise.fxaa), (128, true));
         assert_eq!(
             (s.sunrise.resolution_scale, s.sunrise.opaque_ice),
@@ -2605,7 +2570,7 @@ mod tests {
             assert!(key(&mut ui, &mut s, K::Enter).is_empty());
             assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::On, "{offer:?}");
         }
-        // Where it is, it steps through its three values and leaves the preset.
+        // Where it is, it steps through its three values; the preset stays.
         crate::graphics::offer_gpu_culling(GpuCullingOffer::Offered);
         assert_eq!(item.blocked(&s, &NONE), None);
         for label in ["Auto", "Off", "On"] {
@@ -2621,7 +2586,8 @@ mod tests {
         }
         item.cycle(&mut s, true, FB, &NONE);
         assert_eq!(s.sunrise.gpu_culling, GpuCullingMode::Off);
-        assert_eq!(s.sunrise.preset, Preset::Custom);
+        // No preset sets it, so changing it keeps the preset.
+        assert_eq!(s.sunrise.preset, Preset::Balanced);
         // Auto says what it does.
         s.sunrise.gpu_culling = GpuCullingMode::Auto;
         assert!(description(item, &s, &NONE, "").starts_with("Auto: "));

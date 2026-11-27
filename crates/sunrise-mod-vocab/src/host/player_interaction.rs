@@ -6,7 +6,7 @@ use crate::*;
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait PlayerInteractionBackend {
-    /// Side: server.
+    /// Side: both.
     /// `Player.getAttackStrengthScale(partial)`: the charge the player's next
     /// `Player.attack` reads, from 0 (just swung) to 1 (full), where `partial`
     /// (vanilla reads 0.5) is how far between ticks the read is. It is
@@ -15,7 +15,25 @@ pub trait PlayerInteractionBackend {
     /// Inside `attack_entity` it reads the charge that blow uses: the hook
     /// runs before `Player.attack` resets the ticker. None for a stale or unavailable player.
     /// Non-finite partial ticks return `None`; finite partials are not restricted.
+    /// On a client it answers for the local player alone (vanilla's `minecraft.player`, not the
+    /// camera entity), from the client's own ticker, as `Hud.extractCrosshair`'s attack
+    /// indicator reads it; None for any other player.
     fn player_attack_strength_scale(&self, player: PlayerRef, partial: f32) -> Option<f32>;
+    /// Side: both.
+    /// `Player.getCurrentItemAttackStrengthDelay()`: the ticks a full charge takes, `20 / attack
+    /// speed` from the attack speed attribute with the main-hand item's modifiers.
+    /// `Hud.extractCrosshair` draws the full-charge icon when it is above 5 and the target is in
+    /// reach. On a client it answers for the local player alone, as
+    /// [`player_attack_strength_scale`](Self::player_attack_strength_scale) does. None for a
+    /// stale or unavailable player.
+    fn player_current_item_attack_strength_delay(&self, player: PlayerRef) -> Option<f32>;
+    /// Side: server.
+    /// `LivingEntity.attackStrengthTicker`: the ticks since the player's last attack, swing or
+    /// change of main-hand item, which [`player_attack_strength_scale`](Self::player_attack_strength_scale)
+    /// divides by the full charge's delay; `Player.tick` counts it up. A Java mod reads it
+    /// through an accessor. A connected or fake player answers, dead or alive; None for a
+    /// stale handle, a player who isn't here and a client.
+    fn player_attack_strength_ticker(&self, player: PlayerRef) -> Option<i32>;
     /// Side: server.
     /// `Player.mayUseItemAt(pos, face, stack)`: whether the player may use `stack` at `pos`, the
     /// block it would be placed in when clicked on its `face`. A player who may build (survival,
@@ -59,6 +77,44 @@ pub trait PlayerInteractionBackend {
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait PlayerInteractionBackendMut {
+    /// Side: server.
+    /// Sets `LivingEntity.attackStrengthTicker`, which a Java mod writes through an accessor:
+    /// a mod that strikes several targets in one gesture sets the swing's value back before
+    /// each [`player_attack`](Self::player_attack), since each one resets it. Any value is
+    /// kept as given, as vanilla's field takes it: `Player.getAttackStrengthScale` clamps the
+    /// charge it gives to 0..=1. The player's client is not told, as vanilla doesn't sync the
+    /// field. False for a stale handle, a player who isn't here and a client.
+    fn player_set_attack_strength_ticker(&mut self, player: PlayerRef, ticks: i32) -> bool;
+    /// Side: server.
+    /// `Player.attack(target)`, run from its start for a connected or fake player on a target
+    /// the mod chooses, as a NeoForge or Fabric mod calls it: the global `attack_entity` hook
+    /// (NeoForge's `AttackEntityEvent`, which `CommonHooks.onPlayerAttackTarget` fires where
+    /// `Player.attack` starts) and the held item's `on_left_click_entity` Part, then
+    /// `cannotAttack` (`Entity.isAttackable`, `skipAttackInteraction`), then `onAttack`, which
+    /// resets the attack strength ticker, a redirectable projectile's deflection, the held
+    /// weapon's damage with `getEnchantedDamage` and the charge the ticker held, the critical
+    /// hit, the sprint knockback, the sweep, `causeExtraKnockback`, `setLastHurtMob`,
+    /// `itemAttackInteraction` (durability and `postHurtEnemy`) and the food exhaustion, with
+    /// every damage hook the hit fires.
+    ///
+    /// Only `Player.attack` runs: none of `ServerGamePacketListenerImpl.handleAttack`'s checks
+    /// (spectator, reach, the world border, the targets it disconnects a player for), and no
+    /// swing, which is the packet's (`LivingRef::swing` swings). A target Sunrise strikes
+    /// along the player's aim (an item frame, a painting, an armor stand, a minecart, the
+    /// ender dragon...) is struck by a ray from the player's eyes turned toward it, so out of
+    /// the player's range or behind a block it isn't hit, though the ticker is reset.
+    ///
+    /// `Ok(true)` once the attack ran past `cannotAttack`, hurt or not; `Ok(false)` when a hook
+    /// canceled it or the target can't be attacked (an item, an experience orb, a falling
+    /// block, an eye of ender, a firework rocket, an arrow outside
+    /// `#minecraft:redirectable_projectile`). Refused with [`AttackRefused`] before anything
+    /// runs: `Stale`, `OtherLevel`, `Busy` (as a fake player's `perform_action` is) and
+    /// `Unsupported` (the player itself, or an entity Sunrise keeps no attack for).
+    fn player_attack(
+        &mut self,
+        player: PlayerRef,
+        target: EntityRef,
+    ) -> Result<bool, AttackRefused>;
     /// Side: both.
     /// `BlockBehaviour.getDestroyProgress(state, player, level, pos)`: the share of `state`
     /// one tick of mining removes at `pos`, using the tool in `player`'s selected hotbar

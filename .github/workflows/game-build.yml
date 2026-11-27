@@ -36,7 +36,7 @@ on:
         type: boolean
         default: true
       dev:
-        description: A Dev release's build (nightly-build.yml kind dev), whose macOS leg BLACKSMITH_DEV_MACOS may move
+        description: A Dev release's build (nightly-build.yml kind dev), whose legs BLACKSMITH_DEV and BLACKSMITH_DEV_MACOS may move and DEV_ON_DYNA_LINUX, DEV_ON_DYNA_WINDOWS and DEV_ON_DYNA_MACOS cross-build on Dyna's runners
         type: boolean
         default: false
 permissions:
@@ -51,36 +51,49 @@ jobs:
       matrix:
         include:
           - name: linux
+            dyna: DEV_ON_DYNA_LINUX
             os: ubuntu-22.04
             blacksmith: blacksmith-16vcpu-ubuntu-2204
             dir: sunrise-linux-x86_64
             asset: sunrise-linux-x86_64.tar.gz
+            cross_target: x86_64-unknown-linux-gnu
             # The server build too: packaging/server/install.sh installs it on Linux.
             server_dir: sunrise-server-linux-x86_64
             server_asset: sunrise-server-linux-x86_64.tar.gz
           - name: windows
+            dyna: DEV_ON_DYNA_WINDOWS
             os: windows-latest
             blacksmith: blacksmith-16vcpu-windows-2025
             dir: sunrise-windows-x64
             asset: sunrise-windows-x64.zip
             exe: .exe
             pe_arch: x64
+            cross_target: x86_64-pc-windows-msvc
             # The C runtime linked in, so the game runs without the Visual C++ redistributable.
             rustflags: -C target-feature=+crt-static
           - name: macos
+            dyna: DEV_ON_DYNA_MACOS
             mac: true
             os: macos-15
             blacksmith: blacksmith-12vcpu-macos-15
             target: aarch64-apple-darwin
             dir: sunrise-macos-arm64
             asset: sunrise-macos-arm64.zip
+            cross_target: aarch64-apple-darwin
+    # DEV_ON_DYNA_LINUX, DEV_ON_DYNA_WINDOWS and DEV_ON_DYNA_MACOS (the owner's switches, one per leg; unset or anything
+    # but `on` is off) build that leg of a Dev release on Dyna's Linux runners instead (docs/release-flow.md): Linux
+    # against glibc 2.35 with zig, Windows with cargo-xwin and macOS with zig and the Apple SDK kept in /keep
+    # (tools/ci/cross/). What must run a program of its own platform (`cross-check` below) runs on GitHub's hosted runner
+    # from the leg's artifact.
     # Blacksmith's machines (owner, 2026-11-18), the same images as GitHub's with the Rust cache beside them: 16 vCPUs
     # for Linux and Windows, the 12-vCPU M4 for macOS. The repository variable
     # BLACKSMITH=off puts every leg back on GitHub's `os`. Every leg is a fresh machine: nothing of a pull
-    # request's earlier jobs is on it. BLACKSMITH_DEV_MACOS=on (the owner's switch; unset or anything else is off) puts
-    # a Dev release's macOS leg alone back on Blacksmith while BLACKSMITH stays off.
+    # request's earlier jobs is on it. BLACKSMITH_DEV=on (the owner's switch; unset or anything else is off) puts
+    # every leg of a Dev release back on Blacksmith while BLACKSMITH stays off; BLACKSMITH_DEV_MACOS=on does so for
+    # its macOS leg alone.
     runs-on: >-
-      ${{ (vars.BLACKSMITH != 'off' || (inputs.dev && matrix.mac && vars.BLACKSMITH_DEV_MACOS == 'on'))
+      ${{ inputs.dev && vars[matrix.dyna] == 'on' && 'dyna-large' ||
+      (vars.BLACKSMITH != 'off' || (inputs.dev && (vars.BLACKSMITH_DEV == 'on' || (matrix.mac && vars.BLACKSMITH_DEV_MACOS == 'on'))))
       && matrix.blacksmith || matrix.os }}
     # The fork's cold client + headless builds need both feature variants; keep upstream's limits unchanged.
     # GitHub's macOS runner builds Sunrise's game cold: 60 minutes ran out mid-build (nightly dry run
@@ -88,6 +101,10 @@ jobs:
     # whole build stopped before signing.
     timeout-minutes: ${{ github.repository == 'sunrise-org/sunrise' && (matrix.mac && 100 || 60) || (matrix.mac && 60 || 40) }}
     env:
+      # `on` when this Dev leg is cross-built on Dyna's runner, empty otherwise.
+      CROSS: ${{ inputs.dev && vars[matrix.dyna] == 'on' && 'on' || '' }}
+      # The target cargo builds for: a cross leg's, or on a hosted runner macOS's alone (the others build for the host).
+      TARGET: ${{ inputs.dev && vars[matrix.dyna] == 'on' && matrix.cross_target || matrix.target }}
       RUSTFLAGS: ${{ matrix.rustflags }}
       # The release's version, built in (sunrise_core::release): --version, user agents and crash reports
       # say it. No version-bump commits.
@@ -95,7 +112,7 @@ jobs:
       # A nightly's date and commit ("2026-10-28 0c02067"), which the game shows; empty for a release.
       SUNRISE_NIGHTLY: ${{ inputs.nightly }}
       # Where cargo puts the programs: target/release, or target/<target>/release for another target.
-      BIN: ${{ matrix.target && format('target/{0}/release', matrix.target) || 'target/release' }}
+      BIN: ${{ (inputs.dev && vars[matrix.dyna] == 'on' && matrix.cross_target || matrix.target) && format('target/{0}/release', inputs.dev && vars[matrix.dyna] == 'on' && matrix.cross_target || matrix.target) || 'target/release' }}
     defaults:
       run:
         shell: bash
@@ -117,37 +134,85 @@ jobs:
             tools/check_cpu_baseline.py
             tools/check_glibc.py
             tools/check_imports.py
+            tools/check_macho.py
             tools/check_pe_arch.py
+            tools/ci/cross/
             tools/ci/game_smoke.sh
             tools/ci/rust-version
             tools/ci/with_xvfb.py
+      - name: Build in the runner's persistent target
+        # Dyna's runner points CARGO_TARGET_DIR at its persistent build folder; the steps below read target/.
+        if: env.CROSS == 'on'
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR:?}"
+          if [ ! -e target ] && [ ! -L target ]; then
+            ln -s "$CARGO_TARGET_DIR" target
+          elif [ ! target -ef "$CARGO_TARGET_DIR" ]; then
+            echo '::error::Existing target path does not point to CARGO_TARGET_DIR; refusing to replace it.'
+            exit 1
+          fi
       - name: The pinned Rust (tools/ci/rust-version)
         id: rust
         shell: bash
         run: echo "version=$(cat "$GITHUB_WORKSPACE/.workflow-tools/tools/ci/rust-version")" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
+        if: env.CROSS != 'on'
         with:
           toolchain: ${{ steps.rust.outputs.version }}
           targets: ${{ matrix.target }}
           components: rustfmt
       - uses: actions/setup-python@v6
+        if: env.CROSS != 'on'
         with:
           python-version: '3.13'
       - uses: Swatinem/rust-cache@v2
+        if: env.CROSS != 'on'
         with:
           # A release restores only what a release saved: an untrusted build has its own key and saves nothing.
           shared-key: ${{ inputs.trusted && 'release' || 'nightly' }}-${{ matrix.name }}
           save-if: ${{ inputs.trusted }}
+      # The Apple SDK, placed once by hand in this repository's /keep on the runner host and never in the image, an
+      # artifact, a cache or a log. A missing or different archive stops the job and names the file.
+      - name: Apple SDK from /keep
+        if: env.CROSS == 'on' && matrix.mac
+        env:
+          APPLE_SDK: MacOSX15.5.sdk
+          APPLE_SDK_SHA256: 60b9c5dc87ab7bf226eb0041d0b8e7b9f383b57e1cba56100fa1eebdbf9e995c
+        run: |
+          set -euo pipefail
+          archive="$DYNA_CI_KEEP/apple-sdk/$APPLE_SDK.tar.xz"
+          if [ ! -f "$archive" ]; then
+            echo "::error::$archive is missing: the Apple SDK is placed there by hand (sha256 $APPLE_SDK_SHA256)"
+            exit 1
+          fi
+          if ! echo "$APPLE_SDK_SHA256  $archive" | sha256sum -c --status -; then
+            echo "::error::$archive does not have sha256 $APPLE_SDK_SHA256"
+            exit 1
+          fi
+          tar --warning=no-unknown-keyword -C "$RUNNER_TEMP" -xf "$archive"
+          echo "SDKROOT=$RUNNER_TEMP/$APPLE_SDK" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      - name: Cross-compiling tools for ${{ matrix.cross_target }}
+        if: env.CROSS == 'on'
+        run: .workflow-tools/tools/ci/cross/setup.sh "${{ matrix.cross_target }}"
       - name: ALSA and udev headers
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.CROSS != 'on'
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
           dpkg-query -W libasound2-dev libudev-dev
-      - name: Build the official game, sunrise-ctl, sunrise-perf, sunrise-prepare, sunrise-server and sunrise-port-pack
+      # A Dyna runner keeps its target between jobs: the source snapshot stays true, and the build runs at the runner's
+      # size, not the host's (tools/ci/source_mtimes.py, tools/ci/cargo_jobs.py).
+      - name: Restore unchanged source timestamps
+        if: env.CROSS == 'on'
+        run: python3 tools/ci/source_mtimes.py "${CARGO_TARGET_DIR:-target}/ci-source-mtimes-v2.json"
+      - name: Cap build parallelism to the runner
+        if: env.CROSS == 'on'
+        run: python3 tools/ci/cargo_jobs.py --job-mib 3072 --cap
+      - name: Build the official game, sunrise-ctl, sunrise-prepare, sunrise-server and sunrise-port-pack
         run: |
-          cargo build --release --locked --timings ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
+          cargo build --release --locked --timings ${TARGET:+--target "$TARGET"} \
             -p sunrise-official --bin sunrise-official -p sunrise-client-lib --bin sunrise-ctl \
-            -p sunrise-perf --bin sunrise-perf -p sunrise-prepare --bin sunrise-prepare \
+            -p sunrise-prepare --bin sunrise-prepare \
             -p sunrise-server --bin sunrise-server -p sunrise-port-pack --bin sunrise-port-pack
       - name: The official game is the game players get, under its name
         # sunrise-official: sunrise-client's game with Sunrise's own parts plugged in (docs/layers.md, "How a
@@ -155,38 +220,53 @@ jobs:
         run: cp -f "$BIN/sunrise-official${{ matrix.exe }}" "$BIN/sunrise-client${{ matrix.exe }}"
       - name: Every program the release folder takes was built
         run: |
-          for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do
+          for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do
             test -f "$BIN/$binary${{ matrix.exe }}" || { echo "::error::$BIN/$binary${{ matrix.exe }} is missing"; exit 1; }
           done
       - name: Verify Windows executable architecture
         # Snapshots can build older refs, whose stack reservation may differ: the machine is checked, not the stack.
-        if: runner.os == 'Windows'
+        if: matrix.name == 'windows'
         run: |
           python .workflow-tools/tools/check_pe_arch.py "${{ matrix.pe_arch }}" \
             "$BIN/sunrise-client${{ matrix.exe }}" "$BIN/sunrise-ctl${{ matrix.exe }}" \
-            "$BIN/sunrise-perf${{ matrix.exe }}" "$BIN/sunrise-prepare${{ matrix.exe }}" \
+            "$BIN/sunrise-prepare${{ matrix.exe }}" \
             "$BIN/sunrise-server${{ matrix.exe }}" "$BIN/sunrise-port-pack${{ matrix.exe }}"
-      - name: Verify macOS executable architecture
-        if: runner.os == 'macOS'
+      - name: Verify macOS executable architecture, minimum system, SDK and Info.plist
+        # Cross-built on Linux: tools/check_macho.py reads what lipo and otool print on a Mac, and the build version the
+        # hosted builds carry (minimum macOS 11.0, SDK 15.5), and prints the signature.
+        if: matrix.mac && env.CROSS == 'on'
         run: |
+          python3 .workflow-tools/tools/check_macho.py --minos 11.0 --sdk 15.5 --plist NSMicrophoneUsageDescription \
+            "$BIN/sunrise-client" "$BIN/sunrise-ctl" "$BIN/sunrise-perf" "$BIN/sunrise-prepare" "$BIN/sunrise-server" "$BIN/sunrise-port-pack"
+          # Dev's programs carry only the linker's ad hoc signature: no hardened runtime, no entitlements, any identifier.
           for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do
+            info=$(rcodesign print-signature-info "$BIN/$binary")
+            grep -E 'flags:|identifier:' <<< "$info"
+            grep -q 'flags: CodeSignatureFlags(ADHOC | LINKER_SIGNED)' <<< "$info" \
+              || { echo "::error::$binary is not signed ad hoc by the linker alone"; exit 1; }
+            ! grep -qi entitlements <<< "$info" || { echo "::error::$binary carries entitlements"; exit 1; }
+          done
+      - name: Verify macOS executable architecture
+        if: matrix.mac && env.CROSS != 'on'
+        run: |
+          for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do
             actual=$(lipo -archs "$BIN/$binary")
             [[ "$actual" == arm64 ]] || { echo "::error::$binary is $actual, expected arm64"; exit 1; }
           done
           otool -P "$BIN/sunrise-client" | grep -q 'NSMicrophoneUsageDescription' \
             || { echo "::error::sunrise-client is missing embedded NSMicrophoneUsageDescription"; exit 1; }
       - name: The signing keychain, unlocked
-        if: runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
+        if: matrix.mac && env.CROSS != 'on' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
         env:
           MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
         run: packaging/macos/keychain.sh unlock
       - name: Signed with Developer ID and the hardened runtime
         # Before the checks below, so they run the programs as players will.
-        if: runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
+        if: matrix.mac && env.CROSS != 'on' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
         env:
           MACOS_SIGN_IDENTITY: ${{ vars.MACOS_SIGN_IDENTITY }}
         run: |
-          for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do
+          for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do
             entitlements=()
             if [[ "$binary" == sunrise-client ]]; then
               entitlements=(--entitlements packaging/macos/game-entitlements.plist)
@@ -196,13 +276,20 @@ jobs:
               --identifier "dev.sunrise.${binary#sunrise-}" --sign "$MACOS_SIGN_IDENTITY" "$BIN/$binary"
             codesign --verify --strict --verbose=2 "$BIN/$binary"
           done
-          codesign -d --entitlements - --xml "$BIN/sunrise-client" | grep -q 'com.apple.security.device.audio-input' \
-            || { echo "::error::sunrise-client is missing com.apple.security.device.audio-input entitlement"; exit 1; }
+          granted=$(codesign -d --entitlements - --xml "$BIN/sunrise-client")
+          for wanted in com.apple.security.device.audio-input com.apple.security.cs.allow-jit; do
+            grep -q "$wanted" <<<"$granted" || { echo "::error::sunrise-client is missing the $wanted entitlement"; exit 1; }
+          done
+          # allow-jit permits MAP_JIT regions only; these two would open every page to writes and execution.
+          for refused in com.apple.security.cs.allow-unsigned-executable-memory com.apple.security.cs.disable-executable-page-protection; do
+            ! grep -q "$refused" <<<"$granted" || { echo "::error::sunrise-client must not hold $refused"; exit 1; }
+          done
       - name: Only system libraries
+        if: ${{ !(matrix.mac && env.CROSS == 'on') }}
         # Windows: no non-system DLL (a "DLL not found" dialog on some players' machines). Linux: the standard
         # loader and libraries every desktop distribution has. macOS: only the system's own libraries.
         run: |
-          for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do
+          for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do
             file="$BIN/$binary${{ matrix.exe }}"
             if [[ "$RUNNER_OS" == macOS ]]; then
               others=$(otool -L "$file" | tail -n +2 | awk '{print $1}' | grep -v -E '^(/usr/lib/|/System/Library/)' || true)
@@ -214,24 +301,25 @@ jobs:
       - name: Baseline x86-64 CPUs only
         # No POPCNT or LZCNT at all (the script says why only those): a C library's count intrinsic killed the
         # game before main on a Core 2 (#7264). Not the Apple-chip Mac build.
-        if: runner.os != 'macOS'
+        if: ${{ !matrix.mac }}
         run: |
           set -euo pipefail
           rustup component add llvm-tools
           ${{ runner.os == 'Windows' && 'python' || 'python3' }} tools/check_cpu_baseline.py \
-            $(for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do echo "$BIN/$binary${{ matrix.exe }}"; done)
+            $(for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do echo "$BIN/$binary${{ matrix.exe }}"; done)
       - name: Linux glibc baseline (Ubuntu 22.04)
-        if: runner.os == 'Linux'
+        if: matrix.name == 'linux'
         run: |
           python3 .workflow-tools/tools/check_glibc.py \
-            "$BIN/sunrise-client" "$BIN/sunrise-ctl" "$BIN/sunrise-perf" "$BIN/sunrise-prepare" "$BIN/sunrise-server" "$BIN/sunrise-port-pack"
+            "$BIN/sunrise-client" "$BIN/sunrise-ctl" "$BIN/sunrise-prepare" "$BIN/sunrise-server" "$BIN/sunrise-port-pack"
       - name: Every program starts
+        # A cross-built macOS or Windows leg starts them in cross-check, on that platform.
+        if: ${{ env.CROSS != 'on' || matrix.name == 'linux' }}
         run: |
           set -euo pipefail
           bin=$BIN
           "$bin/sunrise-client${{ matrix.exe }}" --help | grep -q -- '--resources'
           "$bin/sunrise-ctl${{ matrix.exe }}" --help > /dev/null
-          "$bin/sunrise-perf${{ matrix.exe }}" --help | grep -q -- 'sunrise-perf summary'
           "$bin/sunrise-prepare${{ matrix.exe }}" --help | grep -q -- '--minecraft-dir'
           # The version is the release's.
           for binary in sunrise-prepare sunrise-server sunrise-port-pack; do
@@ -257,7 +345,10 @@ jobs:
           rm -f "${{ matrix.asset }}"
           case "${{ matrix.asset }}" in
             *.tar.gz) tar czf "${{ matrix.asset }}" "${{ matrix.dir }}" ;;
-            *) if [[ "$RUNNER_OS" == Windows ]]; then 7z a -tzip "${{ matrix.asset }}" "${{ matrix.dir }}" > /dev/null
+            *) if [[ "${{ matrix.name }}" == windows ]]; then 7z a -tzip "${{ matrix.asset }}" "${{ matrix.dir }}" > /dev/null
+               elif [[ "$CROSS" == on ]]; then
+                 # Cross-built macOS: no ditto here, and zip -X adds no extra attributes, so no `._` files either.
+                 zip -qr -X "${{ matrix.asset }}" "${{ matrix.dir }}"
                else
                  # Without resource forks and extended attributes: plain ditto adds an
                  # AppleDouble `._` file beside every file that has any.
@@ -270,9 +361,9 @@ jobs:
           ls -l "${{ matrix.asset }}"
       - name: Notarized
         # A zip of programs can't be stapled: Gatekeeper asks Apple the first time each one runs.
-        if: runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
+        if: matrix.mac && env.CROSS != 'on' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
         run: |
-          for binary in sunrise-client sunrise-ctl sunrise-perf sunrise-prepare sunrise-server sunrise-port-pack; do
+          for binary in sunrise-client sunrise-ctl sunrise-prepare sunrise-server sunrise-port-pack; do
             codesign --verify --strict "dist/${{ matrix.dir }}/$binary"
           done
           packaging/macos/notarize.sh "dist/${{ matrix.asset }}"
@@ -288,7 +379,7 @@ jobs:
           set -euo pipefail
           # After the client is packaged: target/release/sunrise-client is rebuilt without the audio and
           # controllers features, so it needs neither libasound nor libudev (minimal server images lack them).
-          cargo build --release --locked --timings -p sunrise-game --no-default-features --bin sunrise-client
+          cargo build --release --locked --timings ${TARGET:+--target "$TARGET"} -p sunrise-game --no-default-features --bin sunrise-client
           cargo run --locked -p xtask -- package-server "$BIN/sunrise-client" "dist/${{ matrix.server_dir }}"
           folder="dist/${{ matrix.server_dir }}"
           python3 tools/check_imports.py --server "$folder/sunrise-engine" "$folder/sunrise-server" "$folder/sunrise-prepare"
@@ -316,7 +407,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
       - name: The signing keychain, locked again
-        if: always() && runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
+        if: always() && matrix.mac && env.CROSS != 'on' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id
         run: packaging/macos/keychain.sh lock
       # Cargo's --timings reports of this leg's release builds: which units the build waits on (the Nightly's legs
       # take most of its time). A report, never a release asset, and after the leg's marker so a stalled upload
@@ -336,8 +427,61 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  legs:
+  # What runs a program of its own platform, for the cross-built legs: the leg's artifact, unpacked on GitHub's hosted
+  # runner, never rebuilt. The Linux leg checks itself on Dyna's runner. `legs` waits for it, so a failure here stops
+  # the release as a leg that did not build does.
+  cross-check:
+    name: ${{ matrix.name }} programs start on ${{ matrix.os }}
     needs: build
+    if: ${{ !cancelled() && inputs.dev && (vars.DEV_ON_DYNA_MACOS == 'on' || vars.DEV_ON_DYNA_WINDOWS == 'on') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: macos, dyna: DEV_ON_DYNA_MACOS, os: macos-15, dir: sunrise-macos-arm64, asset: sunrise-macos-arm64.zip}
+          - {name: windows, dyna: DEV_ON_DYNA_WINDOWS, os: windows-latest, dir: sunrise-windows-x64, asset: sunrise-windows-x64.zip, exe: .exe}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      SUNRISE_VERSION: ${{ inputs.version }}
+      # `on` when this leg was cross-built; a leg built on its own platform checked itself.
+      CROSS: ${{ vars[matrix.dyna] == 'on' && 'on' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v8
+        if: env.CROSS == 'on'
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ runner.temp }}/artifact
+      - name: Unpack the leg's zip, unchanged
+        if: env.CROSS == 'on'
+        run: |
+          if [[ "${{ matrix.name }}" == windows ]]; then
+            7z x -y "-o$RUNNER_TEMP/game" "$RUNNER_TEMP/artifact/${{ matrix.asset }}" > /dev/null
+          else
+            unzip -q "$RUNNER_TEMP/artifact/${{ matrix.asset }}" -d "$RUNNER_TEMP/game"
+          fi
+          echo "BIN=$RUNNER_TEMP/game/${{ matrix.dir }}" >> "$GITHUB_ENV"
+      - name: Every program starts
+        if: env.CROSS == 'on'
+        run: |
+          set -euo pipefail
+          bin=$BIN
+          "$bin/sunrise-client${{ matrix.exe }}" --help | grep -q -- '--resources'
+          "$bin/sunrise-ctl${{ matrix.exe }}" --help > /dev/null
+          "$bin/sunrise-perf${{ matrix.exe }}" --help | grep -q -- 'sunrise-perf summary'
+          "$bin/sunrise-prepare${{ matrix.exe }}" --help | grep -q -- '--minecraft-dir'
+          # The version is the release's.
+          for binary in sunrise-prepare sunrise-server sunrise-port-pack; do
+            out=$("$bin/$binary${{ matrix.exe }}" --version | tr -d '\r')
+            echo "$out"
+            [[ "$out" == "$binary $SUNRISE_VERSION" ]] || { echo "::error::expected $binary $SUNRISE_VERSION"; exit 1; }
+          done
+
+  legs:
+    needs: [build, cross-check]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -350,7 +494,10 @@ jobs:
           path: legs
       - name: Every required leg built
         id: decide
+        env:
+          CHECKS: ${{ needs.cross-check.result }}
         run: |
+          if [[ "$CHECKS" == failure || "$CHECKS" == cancelled ]]; then echo "::error::the cross-built legs' programs did not start on their platforms"; exit 1; fi
           missing=()
           for leg in linux windows macos; do [[ -d "legs/leg-$leg" ]] || missing+=("$leg"); done
           if (( ${#missing[@]} )); then echo "::error::required legs did not build: ${missing[*]}"; exit 1; fi

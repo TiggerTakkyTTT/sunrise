@@ -536,4 +536,136 @@ mod tests {
         );
         assert_eq!(e.typed_sets[&shade.key()].group, Some(1));
     }
+
+    #[test]
+    fn additive_group_and_explicit_quads_land_in_additive_layer() {
+        struct ExplicitAdditive;
+        impl ParticleProvider for ExplicitAdditive {
+            fn create_particle(
+                &self,
+                _: &mut ParticleSpawn<'_, ()>,
+                _: &mut dyn ParticleTickView,
+            ) -> Option<Box<dyn CustomParticle>> {
+                Some(Box::new(ExplicitAdditive))
+            }
+        }
+        impl CustomParticle for ExplicitAdditive {
+            fn tick(&mut self, particle: &mut dyn ParticleTickView, _: &dyn ParticleLevelView) {
+                particle.advance_age();
+            }
+            fn extract(
+                &self,
+                _: &dyn mod_api::ParticleView,
+                _: &mod_api::ParticleExtractView,
+                output: &mut dyn mod_api::QuadParticleRenderState,
+            ) {
+                let mut quad = mod_api::ParticleQuad::default();
+                quad.layer = ParticleBlend::Additive;
+                quad.center = [4.0, 0.0, 10.0];
+                quad.half_size = 0.5;
+                output.add(quad);
+            }
+        }
+
+        let (scene, pack) = (Scene::new(), Pack::new());
+        let level = scene.level();
+        let mut e = pack.engine(vec![
+            group("mymod:glow", ParticleBlend::Translucent, &["mymod:glow"]),
+            group(
+                "mymod:spark",
+                ParticleBlend::Additive,
+                &["mymod:orbit", "mymod:shade"],
+            ),
+        ]);
+        let [shade, plain] = super::super::native::tests::unit_types(["shade", "plain"]);
+        e.set_block_state_source(|| Some(Arc::new(Vec::<mod_api::BlockState>::new())));
+        e.providers.insert(
+            shade.key(),
+            mod_api::__private::particle_provider_factory(shade, |_| Stay),
+        );
+        e.providers.insert(
+            plain.key(),
+            mod_api::__private::particle_provider_factory(plain, |_| ExplicitAdditive),
+        );
+        let typed_shade =
+            ParticleOptions::typed(shade.options(()).typed().unwrap().clone()).unwrap();
+        let typed_plain =
+            ParticleOptions::typed(plain.options(()).typed().unwrap().clone()).unwrap();
+        pack.reload(&mut e);
+
+        let spawn_in_view = |e: &mut ParticleEngine, options: &ParticleOptions, x: f64| {
+            let at = [x, 0.0, 10.0];
+            let mut p = match &options.typed_particle {
+                Some((value, _)) => e
+                    .make_typed_particle(&level, value, at, [0.0; 3], 1)
+                    .unwrap(),
+                None => e.make(options, at, [0.0; 3], 1),
+            }
+            .unwrap();
+            p.lifetime = 2;
+            p.size = 0.5;
+            p.velocity = [0.0; 3];
+            e.push(p);
+        };
+        spawn_in_view(&mut e, &ParticleOptions::named("mymod:glow"), 1.0);
+        spawn_in_view(&mut e, &ParticleOptions::named("mymod:orbit"), 2.0);
+        spawn_in_view(&mut e, &typed_shade, 3.0);
+        spawn_in_view(&mut e, &typed_plain, 4.0);
+        e.tick(&level);
+
+        let cull = ParticleCullView::new(DVec3::ZERO, [0.0, 0.0], [512, 512], 70.0, 70.0, 128.0);
+        let mut explicit = ParticleQuads::default();
+        let mut vertices = Vec::new();
+        e.render_world(
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            0.0,
+            Some((&cull, &mut explicit)),
+            None,
+            &|_| 0,
+            &mut vertices,
+        );
+
+        assert_eq!(vertices.len(), 4);
+        assert!(
+            vertices
+                .iter()
+                .all(|v| v.layer & crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY != 0),
+            "translucent group draws on the translucent layer"
+        );
+        assert!(explicit.opaque.is_empty());
+        assert!(explicit.translucent.is_empty());
+        assert_eq!(explicit.additive.len(), 12);
+        assert!(
+            explicit
+                .additive
+                .iter()
+                .all(|v| v.layer & 0xffff == crate::gfx::EXPLICIT_PARTICLE_OVERLAY),
+            "additive group and explicit additive quads use the explicit additive layer"
+        );
+        let additive_xs: Vec<i32> = explicit
+            .additive
+            .chunks(4)
+            .map(|quad| (quad.iter().map(|v| v.pos[0]).sum::<f32>() / 4.0).round() as i32)
+            .collect();
+        assert_eq!(additive_xs, [4, 2, 3]);
+
+        // Without a world provider pass (GUI scenes), additive-group particles still route
+        // to the additive buffer rather than the opaque vertex stream.
+        let mut scene_vertices = Vec::new();
+        e.render(
+            DVec3::ZERO,
+            glam::Quat::IDENTITY,
+            0.0,
+            &|_| 0,
+            &mut scene_vertices,
+        );
+        let scene_additive = e.take_additive();
+        assert_eq!(scene_additive.len(), 8);
+        assert!(
+            scene_additive
+                .iter()
+                .all(|v| v.layer & 0xffff == crate::gfx::ADDITIVE_PARTICLE_OVERLAY)
+        );
+    }
 }

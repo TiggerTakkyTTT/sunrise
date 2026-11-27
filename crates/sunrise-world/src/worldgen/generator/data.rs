@@ -258,7 +258,21 @@ pub(in crate::worldgen) fn build_tags(
     dropped: &mut Vec<String>,
     known: impl Fn(&str) -> bool,
 ) -> Result<BTreeMap<String, Vec<String>>, GeneratorError> {
+    build_tags_with_base(&[], raw, overrides, name, dropped, known)
+}
+
+fn build_tags_with_base(
+    base: &[(String, String)],
+    raw: &Bundle,
+    overrides: &WorldgenOverrides,
+    name: &str,
+    dropped: &mut Vec<String>,
+    known: impl Fn(&str) -> bool,
+) -> Result<BTreeMap<String, Vec<String>>, GeneratorError> {
     let mut definitions = TagDefinitions::default();
+    for (tag_id, json) in base {
+        definitions.apply_json(tag_id, "sunrise:convention", json)?;
+    }
     for (name, json) in raw {
         definitions.apply_json(name, "vanilla", json)?;
     }
@@ -334,6 +348,22 @@ fn load_biome_sources(
                 .or_insert(quantize_parameter_report(&fs::read_to_string(&path)?)?);
         }
     }
+    // A parameter list file names one of the two built-in presets
+    // (`MultiNoiseBiomeSourceParameterList.Preset.CODEC`) and gives its table to the
+    // list's id, whichever tables the other lists hold.
+    let built_in = presets.clone();
+    for (id, json) in ov.entries(overrides::PARAMETER_LISTS) {
+        let list: Value = serde_json::from_str(json)?;
+        let preset = list["preset"]
+            .as_str()
+            .and_then(|name| super::super::density::identifier(name).ok())
+            .filter(|name| matches!(name.as_str(), "minecraft:overworld" | "minecraft:nether"))
+            .ok_or_else(|| resource(format!("parameter list {id}: unknown preset")))?;
+        let table = built_in
+            .get(&preset)
+            .ok_or_else(|| resource(format!("parameter list {id}: no table for {preset}")))?;
+        presets.insert(id.to_owned(), table.clone());
+    }
     let source_catalog =
         BiomeSourceCatalog::new(&biome_set, &biome_tags, &presets.keys().cloned().collect())?;
     Ok((biomes, biome_tags, presets, source_catalog))
@@ -371,16 +401,23 @@ pub(in crate::worldgen) fn load_fluid_tags(
     warnings: &mut Vec<String>,
 ) -> Result<BTreeMap<String, Vec<String>>, GeneratorError> {
     let raw = read_registry_bundle(dir, overrides, "fluid_tags")?.unwrap_or_default();
-    build_tags(&raw, overrides, "fluid_tags", warnings, |id| {
-        matches!(
-            id,
-            "minecraft:water"
-                | "minecraft:flowing_water"
-                | "minecraft:lava"
-                | "minecraft:flowing_lava"
-                | "minecraft:empty"
-        )
-    })
+    build_tags_with_base(
+        crate::tag_layers::convention::json_entries("fluid"),
+        &raw,
+        overrides,
+        "fluid_tags",
+        warnings,
+        |id| {
+            matches!(
+                id,
+                "minecraft:water"
+                    | "minecraft:flowing_water"
+                    | "minecraft:lava"
+                    | "minecraft:flowing_lava"
+                    | "minecraft:empty"
+            )
+        },
+    )
 }
 
 pub(in crate::worldgen) fn load_biome_tags(
@@ -396,6 +433,9 @@ pub(in crate::worldgen) fn load_biome_tags(
         read_registry_bundle(dir, overrides, "biome_tags")?.unwrap_or_default()
     };
     let mut tags = TagDefinitions::default();
+    for (id, json) in crate::tag_layers::convention::json_entries("worldgen/biome") {
+        tags.apply_json(id, "sunrise:convention", json)?;
+    }
     for (id, json) in entries {
         tags.apply_json(&id, "vanilla", &json)?;
     }
@@ -466,7 +506,8 @@ impl GeneratorData {
         if flags.len() != registry.len() {
             return Err(resource("block_flags.json does not match the registry"));
         }
-        let block_tags = build_tags(
+        let block_tags = build_tags_with_base(
+            crate::tag_layers::convention::json_entries("block"),
             &read_bundle(dir, ov, "block_tags")?,
             ov,
             "block_tags",

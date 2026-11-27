@@ -109,13 +109,16 @@ pub fn copy(bundle: &Bundle, to: &Path) -> Result<(), String> {
     copy_files(to, files)
 }
 
-/// Only code enters the tool; runtime resource packs stay with the package.
+/// Only code enters the tool; runtime resource packs stay with the package. A root
+/// `rust-toolchain` or `rust-toolchain.toml` is left out: the build runs the toolchain it pins
+/// itself, and a file there would let the mod name another.
 pub fn copy_tool_input(bundle: &Bundle, to: &Path) -> Result<(), String> {
     copy_files(
         to,
         checked_files(bundle)?.into_iter().filter(|(name, _)| {
-            manifest::source_file(name)
-                || bundle.native().mixin.iter().any(|row| row.helper == *name)
+            !matches!(name.as_str(), "rust-toolchain" | "rust-toolchain.toml")
+                && (manifest::source_file(name)
+                    || bundle.native().mixin.iter().any(|row| row.helper == *name))
         }),
     )
 }
@@ -214,5 +217,46 @@ mod tests {
                 format!("E_MIXIN_STATE_LAYOUT: localized stateful/{row}")
             );
         }
+    }
+
+    #[test]
+    fn the_staged_tool_input_leaves_out_a_root_toolchain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle(dir.path(), "example", "");
+        for name in [
+            "rust-toolchain",
+            "rust-toolchain.toml",
+            "vendor/rust-toolchain",
+        ] {
+            let path = dir.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "[toolchain]\nchannel = 'nightly'\n").unwrap();
+        }
+        let bundle = read(dir.path()).unwrap().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        copy_tool_input(&bundle, staged.path()).unwrap();
+        assert!(staged.path().join("src/lib.rs").is_file());
+        assert!(staged.path().join("vendor/rust-toolchain").is_file());
+        assert!(!staged.path().join("rust-toolchain").exists());
+        assert!(!staged.path().join("rust-toolchain.toml").exists());
+    }
+
+    #[test]
+    fn an_extracted_package_with_root_page_entries_stages_without_them() {
+        // An `.smod` packed before #5974 extracts with the registry page beside the source.
+        let dir = tempfile::tempdir().unwrap();
+        write_bundle(dir.path(), "example", "");
+        for name in ["page.toml", "page/runes.jpg", "src/page.rs"] {
+            let path = dir.path().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+        let bundle = read(dir.path()).unwrap().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        copy_tool_input(&bundle, staged.path()).unwrap();
+        assert!(staged.path().join("src/lib.rs").is_file());
+        assert!(staged.path().join("src/page.rs").is_file());
+        assert!(!staged.path().join("page.toml").exists());
+        assert!(!staged.path().join("page").exists());
     }
 }

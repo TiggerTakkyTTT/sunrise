@@ -1,3 +1,6 @@
+#[path = "../src/dev/work_dir.rs"]
+mod work_dir;
+
 use std::{fs, path::Path, process::Command};
 
 #[test]
@@ -15,10 +18,22 @@ fn installed_lower_bends_and_routes_a_client_model() {
         .unwrap();
     assert!(head.status.success());
     let commit = std::str::from_utf8(&head.stdout).unwrap().trim();
+    let project = root.join("lower");
+    assert!(
+        Command::new("cp")
+            .arg("-R")
+            .arg(repo.join("tools/ci/fn-replace-check/lower"))
+            .arg(&project)
+            .status()
+            .unwrap()
+            .success()
+    );
     let cache = root.join("cache");
     // On the carry head GitHub may not have the commit yet. Seed the native builder's normal
     // source cache with the exact tracked revision, as fn_replace_check.sh does.
-    let source = cache.join("work/fnr_lower/source").join(commit);
+    let source = work_dir::work_dir(&cache, "fnr_lower", &dunce::canonicalize(&project).unwrap())
+        .join("source")
+        .join(commit);
     fs::create_dir_all(&source).unwrap();
     let archive = root.join("source.tar");
     assert!(
@@ -42,17 +57,6 @@ fn installed_lower_bends_and_routes_a_client_model() {
     );
     fs::remove_file(archive).unwrap();
     fs::write(source.join(".horizon-revision"), commit).unwrap();
-
-    let project = root.join("lower");
-    assert!(
-        Command::new("cp")
-            .arg("-R")
-            .arg(repo.join("tools/ci/fn-replace-check/lower"))
-            .arg(&project)
-            .status()
-            .unwrap()
-            .success()
-    );
     let manifest = project.join("sunrise-mod.toml");
     let mixins = sunrise_mod_package::mixins_tool::REV;
     let mut content = fs::read_to_string(&manifest)
@@ -65,7 +69,7 @@ fn installed_lower_bends_and_routes_a_client_model() {
         r#"
 [[native.mixin]]
 id = "client_draw"
-target = "sunrise_client::game::loading_screen::preflight_resources"
+target = "sunrise_gameplay_common::game::preflight_resources"
 kind = "HEAD"
 helper = "src/mixins/client_draw.rs"
 "#,

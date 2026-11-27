@@ -144,4 +144,29 @@ pub trait PlayerMenusBackendMut {
         player: PlayerRef,
         title: Text,
     ) -> Result<bool, OpenMenuError>;
+    /// Side: server.
+    /// The server's implementation of [`PlayerRef::anvil_update`].
+    #[manual_handle]
+    fn player_anvil_update(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        inputs: &mod_api::item::menu::AnvilUpdateInputs<'_>,
+    ) -> Option<mod_api::item::menu::AnvilUpdateEdits>;
+}
+
+/// The client implementation of the player menu write backend.
+// hidden: client handles reach the engine through ClientBackendMut.
+#[doc(hidden)]
+#[sunrise_mod_api_macros::host_area]
+pub trait PlayerMenusClientBackendMut {
+    /// Side: client.
+    /// The client's implementation of [`PlayerRef::anvil_update`].
+    #[manual_handle]
+    fn player_anvil_update(
+        &mut self,
+        player: PlayerRef,
+        pos: [i32; 3],
+        inputs: &mod_api::item::menu::AnvilUpdateInputs<'_>,
+    ) -> Option<mod_api::item::menu::AnvilUpdateEdits>;
 }

@@ -25,6 +25,7 @@ fn data(tables: Vec<(&str, Value)>) -> LootData {
         global_modifiers: Arc::default(),
         modifiers,
         predicates,
+        slot_sources: HashMap::new(),
         items: HashMap::new(),
         enchantments: vec![],
         primary_answers: Default::default(),
@@ -572,6 +573,7 @@ fn a_fishing_roll_names_the_hook_its_owner_the_rod_and_the_position() {
             data.roll_as(
                 "test:caller",
                 &mut LegacyRandom::new(3),
+                None,
                 None,
                 Some(open),
                 &params(owner),

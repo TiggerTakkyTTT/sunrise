@@ -631,6 +631,7 @@ mod tests {
             color: 7,
             depth: 0.0,
             glint_uv: [0.0; 2],
+            light: 0,
             text: 1,
         };
         let layout = ([1920, 1080], 2.0f32.to_bits(), 5, true);

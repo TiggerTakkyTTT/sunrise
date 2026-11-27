@@ -603,7 +603,8 @@ pub fn reach(source: &Source, folder: &str, programs: &[String]) -> BTreeSet<Str
         .keys()
         .filter(|p| programs.iter().any(|program| owns_in(folder, program, p)));
     for path in owned {
-        reach.extend(sunrise_shaders::preprocess(&source.pack, path, &macros).files);
+        let read = sunrise_shaders::preprocess(&source.pack, path, &macros);
+        reach.extend(read.files().iter().cloned());
     }
     reach
 }

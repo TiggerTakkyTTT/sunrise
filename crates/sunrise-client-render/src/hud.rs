@@ -137,6 +137,9 @@ mod atlas;
 pub use atlas::*;
 mod atlas_pack;
 pub(crate) use atlas_pack::rgba_len;
+pub use sunrise_level::pack_image::{
+    MAX_IMAGE_BYTES, OverSizeLimit, check_pack_size, image_buffer, image_bytes,
+};
 mod atlas_pages;
 pub(crate) use atlas_pages::upload_atlas_page;
 use atlas_pages::{AtlasPageGpu, UploadedAtlasPage};
@@ -151,6 +154,9 @@ pub use renderer::*;
 #[cfg(test)]
 #[path = "hud/coverage_tests.rs"]
 mod coverage_tests;
+
+#[cfg(test)]
+mod dynamic_gui_gpu_tests;
 
 #[cfg(test)]
 mod tests;

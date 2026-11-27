@@ -8,11 +8,12 @@ submissions. This compares order, not frustum culling, fire, pixels or GPU draw 
 import json
 import os
 
-try:
-    from . import lab, oracle_harness
-except ImportError:
-    import lab
-    import oracle_harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness
 
 
 def snapshots(path):
@@ -33,7 +34,7 @@ def main():
     oracle = "VanillaEntityDrawOrderOracle"
     classes, dependencies, _ = oracle_harness.compile_oracle(
         build, oracle, {"client": client}, libraries, lock["minecraft"]["java_major"])
-    scene = lab.ROOT / "crates/sunrise-client/src/game/modding/entity-draw-order.txt"
+    scene = lab.ROOT / "crates/sunrise-client-gameplay/src/game/modding/entity-draw-order.txt"
     oracle_harness.java_run(build, classes, dependencies, oracle, [scene], "vanilla")
     env = lab.game_env(
         SUNRISE_TEST_RESOURCES=os.environ.get("SUNRISE_TEST_RESOURCES", lab.RESOURCES),

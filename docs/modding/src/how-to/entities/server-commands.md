@@ -87,6 +87,12 @@ usage with a reason in the log. Registry names have no separate registration bud
 vanilla command-tree string frame applies on the wire. Block positions are resolved and
 floored from the source's world, relative or local coordinates without loading chunks.
 
+`resource_or_tag:<registry>`, such as `<biome:resource_or_tag:minecraft:worldgen/biome>`, takes an id
+or a `#tag` of that registry (vanilla's `ResourceOrTagKeyArgument`, `minecraft:resource_or_tag_key` on
+the wire, so the chat box completes both). It delivers `CommandArgumentValue::ResourceOrTag { tag, id }`:
+`tag` is true for `#namespace:path`, and `id` comes without the `#`. As in vanilla, neither is checked
+against the registry when parsed; look it up when the command runs. It works in client commands too.
+
 `id` is a free identifier: vanilla's `minecraft:resource_location` argument, lowercase letters,
 digits and `_ - . : /`, canonicalised to `namespace:path` with `minecraft` when the namespace is
 left out, and checked against no registry. `Command::new("map fullrender <world:id>")` takes
@@ -105,15 +111,18 @@ as vanilla's parser so `~`, `^` and the dimension list complete as in a vanilla 
 |---|---|---|
 | `vec3` | `minecraft:vec3`, whole `x` and `z` centred on the block | `Vec3([f64; 3])` |
 | `vec3_uncentered` | `minecraft:vec3`, coordinates as written | `Vec3([f64; 3])` |
+| `vec2` | `minecraft:vec2`, whole `x` and `z` centred on the block | `Vec2([f32; 2])` |
+| `vec2_uncentered` | `minecraft:vec2`, coordinates as written | `Vec2([f32; 2])` |
 | `column_pos` | `minecraft:column_pos` | `ColumnPos([i32; 2])`, floored |
 | `rotation` | `minecraft:rotation` | `Rotation([f32; 2])`, yaw then pitch |
 | `dimension` | `minecraft:dimension` | `Dimension(LevelRef)` |
 | `nbt` | `minecraft:nbt_compound_tag` | `Nbt(Compound)` |
 
-`~` and `^` resolve against the command source's position and rotation, as `block_pos` does. A
+`~` and `^` resolve against the command source's position and rotation, as `block_pos` does
+(`vec2` and `vec2_uncentered` take `~` relative coordinates and refuse `^`). A
 `dimension` the world has not loaded is refused with `argument.dimension.invalid` before the
-executor runs. A `vec3` and a `vec3_uncentered` cannot share a position in one command's
-usages, as they look the same to a client.
+executor runs. Neither `vec3`/`vec3_uncentered` nor `vec2`/`vec2_uncentered` can share a
+position in one command's usages, as they look the same to a client.
 A player's source is their position and rotation. The console has no source
 entity and uses the world spawn's block corner, in the level the spawn is in, with zero rotation, so `@s`
 cannot resolve there. Every executor receives the same kind of typed input.
@@ -248,6 +257,29 @@ Temporarily held-out or removed entities cannot be delivered. An unbounded
 selector can reach other loaded dimensions; handle lookup uses the entity's own
 dimension. There is no extra count cap. A very large `@e` is the caller's cost.
 
+## Game profiles, including offline players
+
+Use `Command::new("inspect <targets:game_profile>")` for commands that can reach
+offline players. The executor receives `CommandArgumentValue::GameProfiles`:
+a list of `(uuid, name)` pairs, not player handles. A plain name matches an
+online player or an unexpired user-cache entry, case-insensitively. Selectors
+select online players in vanilla order and use the same permission rules as
+other selectors. The client receives vanilla's `minecraft:game_profile` parser
+for player-name and selector completion. Unknown names report
+`argument.player.unknown`; empty selectors report `argument.entity.notfound.player`.
+
+On the server, `host.players().profile_by_name(name)` and
+`host.players().profile_by_uuid(uuid)` return the same borrowed `GameProfile<'_>`
+as `player.profile(host)`. They check online players first, then the unexpired
+user cache. Cached profiles have no login properties. Neither read contacts
+Mojang or invents an offline identity. For a UUID, use `profile_by_uuid`:
+vanilla's command argument takes a name or a selector, not a UUID literal.
+
+`host.players().profile_permission_level(uuid, name)` works in `player_login`,
+before a `PlayerRef` exists, and for offline profiles. Dedicated servers read
+the op list by UUID. Integrated servers also account for the owner's name and
+world and guest command access. `PermissionLevel::All` is level 0.
+
 ## Custom argument types
 
 Register a value kind once from `Hooks::register`, then use its namespaced id as an
@@ -359,13 +391,23 @@ the diagnostics; the others are kept, and the player's chat is never disconnecte
 `tab_complete` still sees and may change the server's completions. A client that does not know
 the type asks the server (the node carries `minecraft:ask_server`).
 
-`CommandArgumentKind::Word` takes one word of ASCII letters, digits and `_ - . +`; the
-word ends at the first other character, a space included, so a value with `:` or `/`
-needs `Greedy`, which takes the rest of the line, or `Quotable` with the value in quotes.
-`suggest` receives that text as typed so far: one word, or the whole tail of the line up to the
-cursor. Players whose client does not know the type parse and complete the command: the server
-sends the argument as a Brigadier string of that shape with `minecraft:ask_server`, and their
-chat asks the server for the suggestions.
+Choose a `CommandArgumentKind` for how much of the input the type reads:
+
+- `Word` takes one word of ASCII letters, digits and `_ - . +`; the word ends at the first
+  other character, a space included.
+- `Id` reads a vanilla identifier using `a-z 0-9 _ - . : /` and stops at the first other
+  character. For example, `<modifier:mymod:modifier> <level:integer>` can read
+  `mymod:haste 2`. The type's `parse` receives the original spelling: it decides what
+  value to return and whether the identifier belongs to its own list. `#` is not part
+  of an identifier; this kind doesn't read tags.
+- `Greedy` takes the rest of the line and can only be the last argument.
+- `Quotable` takes one word or one quoted phrase (below).
+
+`suggest` receives the text as typed so far: one word, the identifier, or the whole tail of the
+line up to the cursor. Players whose client does not know the type parse and complete the
+command: the server sends `Id` as vanilla's `minecraft:resource_location` and the other kinds as
+Brigadier strings of that shape, all with `minecraft:ask_server`, and their chat asks the server
+for the suggestions.
 
 ### Quoted phrases
 
@@ -555,8 +597,10 @@ event.commands.push(mod_api::Command::new("count").executes_client(move |_, _| {
 ```
 
 The executor receives a `ClientHost` and a typed `CommandInvocation`. Return
-`Some(result)` on success or `None` to report failure locally. Use level zero and
-client-safe argument kinds; player, entity and dimension handles and custom
+`Some(result)` on success or `None` to report failure locally. A usage's level is checked
+against the local player's permission level, the one the server's entity events 24 to 28 set
+(NeoForge's `ClientCommandHandler` source): below it, the usage is neither completed nor run, and
+the line goes to the server as an unknown command would. Use client-safe argument kinds; player, entity and dimension handles and custom
 argument types complete through the same `suggest`. The chat display
 combines local and server branches, but dispatch is separate: only an unknown local
 command or argument goes to the server.

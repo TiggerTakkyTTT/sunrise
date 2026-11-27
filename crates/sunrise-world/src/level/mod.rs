@@ -1109,6 +1109,11 @@ pub trait LevelAccess: BlockEntityNeighbors {
     fn infiniburn(&self) -> Option<&data::BlockSet> {
         None
     }
+    /// The blocks of `sunrise:golem_heads`, resolved once for this level with the mods' and data packs'
+    /// members; None is an empty tag, so only `CarvedPumpkinBlock`'s own class completes a golem on place.
+    fn golem_heads(&self) -> Option<&data::BlockSet> {
+        None
+    }
     /// The level's dimension type.
     fn dimension_type(&self) -> &DimensionFacts {
         DimensionFacts::of_level(self.level_key())
@@ -1575,6 +1580,37 @@ impl Behaviours {
     pub fn data(&self, state: BlockStateId) -> &BlockData {
         self.block_data(self.table.block(state))
     }
+    /// The four physical properties (`Solid`, `Replaceable`, `Liquid`, `SolidRender`) in
+    /// `BlockProperty` order, bound from the loaded behaviour tables.
+    pub fn bound_physical_properties(&self) -> [crate::block_properties::BoundBlockProperty; 4] {
+        use crate::block_properties::{BlockProperty, BoundBlockProperty};
+        let states: Arc<[u8]> = self
+            .facts
+            .iter()
+            .map(|fact| {
+                let mut mask = 0u8;
+                if fact.flags & data::state_flags::SOLID != 0 {
+                    mask |= 1;
+                }
+                if fact.flags & data::state_flags::REPLACEABLE != 0 {
+                    mask |= 2;
+                }
+                if fact.flags & data::state_flags::LIQUID != 0 {
+                    mask |= 4;
+                }
+                if fact.flags & data::state_flags::SOLID_RENDER != 0 {
+                    mask |= 8;
+                }
+                mask
+            })
+            .collect();
+        [
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Solid),
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Replaceable),
+            BoundBlockProperty::from_flags(states.clone(), BlockProperty::Liquid),
+            BoundBlockProperty::from_flags(states, BlockProperty::SolidRender),
+        ]
+    }
     pub fn block(&self, state: BlockStateId) -> BlockId {
         self.table.block(state)
     }
@@ -1868,6 +1904,36 @@ impl Behaviours {
         state: BlockStateId,
     ) -> bool {
         self.sim(level, ticks).can_survive(state, pos)
+    }
+    /// Read `BlockState.canSurvive` without retaining any tick or wire-cache changes. The live
+    /// signal inputs are read from `signal_reads`; effects requested by the evaluator stay in a
+    /// fresh scratch queue that is dropped before returning.
+    pub fn can_survive_read_only<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        signal_reads: &Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+    ) -> bool {
+        let mut ticks = Ticks::default();
+        let mut sim = self.sim(level, &mut ticks);
+        sim.signal_reads = Some(signal_reads);
+        sim.can_survive(state, pos)
+    }
+    /// `FireBlock.getIgniteOdds` and `getBurnOdds` of `state` at `pos`, asked from its side
+    /// `face`, as fire itself reads them: `(ignite, burn)`.
+    pub fn fire_odds_read_only<L: LevelAccess + ?Sized>(
+        &self,
+        level: &mut L,
+        signal_reads: &Ticks,
+        pos: BlockPos,
+        state: BlockStateId,
+        face: Direction,
+    ) -> (i32, i32) {
+        let mut ticks = Ticks::default();
+        let mut sim = self.sim(level, &mut ticks);
+        sim.signal_reads = Some(signal_reads);
+        sim.fire_odds(state, pos, face)
     }
     /// `BlockState.updateShape(level, ticks, pos, direction, neighbourPos,
     /// neighbourState, random)`: the state `state` at `pos` would take after its

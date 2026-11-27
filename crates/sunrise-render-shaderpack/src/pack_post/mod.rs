@@ -18,11 +18,12 @@
 pub mod construction;
 pub mod execution;
 mod image_formats;
+mod mod_link;
 pub mod mod_pack;
 mod packed;
 pub mod types;
 
-pub use image_formats::{image_binding, image_format, rebinds, storage_formats_of};
+pub use image_formats::{image_binding, image_format, rebinds, sampled_image, storage_formats_of};
 
 pub use construction::*;
 pub use execution::*;

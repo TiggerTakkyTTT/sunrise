@@ -6,12 +6,11 @@ from pathlib import Path
 import struct
 import tempfile
 
-try:
-    from . import lab, oracle_harness as h, integration_env
-except ImportError:
-    import lab
-    import oracle_harness as h
-    import integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as h, integration_env
 
 
 def fixtures():
@@ -47,7 +46,7 @@ def main():
     report.unlink(missing_ok=True)
     paths = ['tools/test_entity_sound_packet_parity.py', 'tools/oracle_harness.py', 'tools/lab.py',
              'tools/test_rust_parity.py', 'tools/integration_env.py', 'Cargo.toml', 'Cargo.lock',
-             'crates/sunrise-client-render/src/audio.rs', 'crates/sunrise-client/src/lan/containers.rs',
+             'crates/sunrise-client-render/src/audio.rs', 'crates/sunrise-sim/src/lan/containers.rs',
              'crates/sunrise-protocol/src/packets/play.rs', 'crates/sunrise-protocol/src/packets/mod.rs',
              'crates/sunrise-client/examples/probe/main.rs',
              'crates/sunrise-client/examples/probe/entity_sound_packet_fixture.rs',

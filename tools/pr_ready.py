@@ -14,7 +14,11 @@ mods, plus the server build when sunrise-client is affected); the tests of the t
 CI's workspace-wide run gives them; crates/sunrise-theme/tokens.css against sunrise-theme; Cargo.lock changing
 only with a Cargo.toml; the Python tests (always, as in CI; here one test file per worker, tools/parallel_unittest.py,
 with the same outcome in a fraction of the time, and --serial-python runs them in one process as CI does) and the
-public-tree check; and the vanilla harnesses the changes can affect (tools/parity.py --changed). Locally, the
+public-tree check; the mod API surface report, when the branch changes what it exports (sunrise-stage and the crates
+it depends on, the change notes, the report's own files, and the game files that carry a #[sunrise_loop]:
+tools/ci/surface_report.py against the merge base, which builds sunrise-stage as CI's verify job does; a change note that names an id that did not
+change, or a breaking change without a note, fails here and not only on the gate); and the vanilla harnesses the
+changes can affect (tools/parity.py --changed). Locally, the
 harnesses run only when the branch changes a harness, an oracle, a probe or the runner; otherwise they are listed
 and left to the daily on main. --harnesses runs them anyway.
 Harnesses run where the vanilla data is (a prepared .local/ here, or the Mac mini); elsewhere they are listed for CI.
@@ -84,6 +88,27 @@ DISPATCH_TEST_INPUTS = ("crates/sunrise-mod-api-gen/", "crates/sunrise-mod-api-m
                         "crates/sunrise-mod-api/",
                         "crates/sunrise-mod-vocab/", *MOD_API_INPUTS)
 MOD_REGISTRY = "crates/sunrise-mod-registry/Cargo.toml"
+# What decides the mod API surface report. The crates are sunrise-stage and everything it depends on in the workspace
+# (surface_crates): the generator and the crates whose source it reads. Besides them (crates/sunrise-mod-api-gen/src:
+# surface/mod.rs `export_here`, `OutsideSeam::read`, loops.rs `collect`): the change notes, the workspace manifest
+# (`OutsideSeam::read` reads it for the members), the report's own script and settings, and the game files that
+# hold a `#[sunrise_loop]` (loops.rs `collect` reads every file of sunrise-client's `game` module that mentions it).
+SURFACE_NOTES = "crates/sunrise-mod-vocab/changes/"
+SURFACE_FILES = ("Cargo.toml", "tools/ci/surface_report.py", "tools/ci/surface.toml",
+                 "tools/ci/surface-schema-3-reset.json")
+SURFACE_TOOL = "sunrise-stage"
+GAME_FILES = (
+    "crates/sunrise-client/src/game.rs",
+    "crates/sunrise-gameplay-common/src/game.rs",
+)
+GAME_FOLDERS = (
+    "crates/sunrise-client/src/game/",
+    "crates/sunrise-client/src/cut_layout/game/",
+    "crates/sunrise-gameplay-common/src/game/",
+    "crates/sunrise-gameplay/src/game/",
+    "crates/sunrise-client-gameplay/src/game/",
+)
+LOOP_MARK = "sunrise_loop"
 
 def is_doc(path):
     return path.endswith(".md")
@@ -104,13 +129,17 @@ def touched_crates(paths, packages):
         if is_doc(path):
             continue
         if path.startswith(MOD_API_INPUTS):
-            crates.update({"sunrise-client", "sunrise-client-render", "sunrise-mod-api-gen"})
+            crates.update({
+                "sunrise-client", "sunrise-client-render", "sunrise-mod-api-gen",
+                "sunrise-gameplay-common", "sunrise-gameplay", "sunrise-client-gameplay",
+            })
             continue
         if "sunrise-client-lib" in packages and path.startswith("crates/sunrise-client/"):
             relative = path.removeprefix("crates/sunrise-client/")
             gameplay = relative in {"Cargo.toml", "build.rs", "windows-segment-heap.manifest",
-                                    "src/lib.rs", "src/main.rs", "src/entry.rs", "src/game.rs"} \
-                or relative.startswith(("src/game/", "tests/it/"))
+                                    "src/lib.rs", "src/main.rs", "src/entry.rs", "src/game.rs",
+                                    "src/game_facade.rs", "src/test_game_dir.rs"} \
+                or relative.startswith(("src/game/", "src/cut_layout/", "tests/it/"))
             crates.add("sunrise-client" if gameplay else "sunrise-client-lib")
             continue
         owners = [name for name, directory in packages.items() if path.startswith(directory.rstrip("/") + "/")]
@@ -157,7 +186,9 @@ def suggested_label(paths, exporter_paths=frozenset()):
 # CI runs parity only in the daily on main's head.
 PARITY_SCOPE = re.compile(
     r"^(tools/test_[a-z0-9_]+_parity\.py|tools/(parity[a-z_]*|lab)\.py|tools/parity_hosts\.json|mods/sunrise/src/test/"
-    r"|crates/[^/]+/examples/|crates/sunrise-client/src/game/[a-z_]*(fixture|harness)\.rs"
+    r"|crates/[^/]+/examples/"
+    r"|crates/(?:sunrise-client/src/(?:cut_layout/)?game|sunrise-gameplay-common/src/game"
+    r"|sunrise-gameplay/src/game|sunrise-client-gameplay/src/game)/(?:.*/)?[a-z_]*(fixture|harness)\.rs"
     r"|\.github/workflows/parity[a-z-]*\.yml)")
 
 
@@ -247,6 +278,43 @@ def dependent_crates(crates, dependencies):
         selected.update(consumers)
 
 
+def surface_crates(dependencies):
+    """sunrise-stage and every workspace crate it depends on, directly or not: dependent_crates the other way."""
+    selected = {SURFACE_TOOL}
+    while True:
+        used = set().union(*(dependencies.get(name, ()) for name in selected))
+        if used <= selected:
+            return sorted(selected)
+        selected.update(used)
+
+
+def holds_loop(files, merge_base):
+    """Whether any of these game files mentions `sunrise_loop` now, or did at the merge base (a deleted or moved file
+    counts by its old text). A base that cannot be read counts as a yes: the report is the safe side."""
+    for path in files:
+        file = ROOT / path
+        if file.is_file() and LOOP_MARK in file.read_text(encoding="utf-8", errors="replace"):
+            return True
+    found = subprocess.run(["git", "grep", "-l", "-F", LOOP_MARK, merge_base, "--",
+                            *(f":(literal){path}" for path in files)], cwd=ROOT, capture_output=True)
+    return found.returncode != 1
+
+
+def surface_touched(changed, crates_of, dependencies, merge_base):
+    """Whether the changed files can change what the surface report exports. `crates_of` and `dependencies` are empty
+    when the branch changes no Rust: then only the notes, the manifest and the report's own files count."""
+    folders = (SURFACE_NOTES, *(crates_of[name].rstrip("/") + "/" for name in surface_crates(dependencies)
+                                if name in crates_of))
+    if any(
+        path in SURFACE_FILES or path.endswith(".extension-tags.json") or path.startswith(folders)
+        for path in changed
+    ):
+        return True
+    games = sorted(path for path in changed
+                   if path.endswith(".rs") and (path in GAME_FILES or path.startswith(GAME_FOLDERS)))
+    return bool(games) and holds_loop(games, merge_base)
+
+
 def prepare_key():
     """tools/ci/vanilla-data.sh's preparation key, for a copy without Git history."""
     listing = git("ls-files", "-s", "crates/sunrise-prepare", "mods/sunrise/src/test/java", "research-lock.json",
@@ -270,6 +338,18 @@ def unittest_passed(output):
     outcome = re.search(r"^((?:OK|FAILED) \(.*\))$", output, re.M)
     ran = re.search(r"^Ran (\d+) tests?", output, re.M)
     return f"{ran.group(1) if ran else '?'} run, {outcome.group(1)}" if outcome else f"{ran.group(1)} passed" if ran else ""
+
+
+# The lines of tools/ci/surface_report.py's output that say what it found and why it failed: the report's own verdict,
+# a stale change note, a breaking change no note names, and what stopped the tool (an unreadable note, say)
+# (crates/sunrise-stage/src/main.rs surface_diff and fail).
+SURFACE_LINES = re.compile(r"^(Surface: .*|No surface report: .*|change note .* which did not change.*"
+                           r"|breaking change without a change note: .*|sunrise-stage: .*)$", re.M)
+
+
+def surface_summary(output):
+    """The surface report's verdict line, or why it has none, and on a failure each line that made it fail."""
+    return "; ".join(SURFACE_LINES.findall(output))
 
 
 def parity_summary(output):
@@ -346,7 +426,8 @@ def mod_features(crates):
 
 # What sunrise-client's full content-root tests load (mod_content_tests.rs). They take minutes on prepared data, so
 # they are #[ignore]d and run here only when one of these changes.
-CONTENT_ROOT = ("crates/sunrise-client/src/mod_content", "crates/sunrise-client-render/src/assets.rs", "crates/sunrise-items/",
+CONTENT_ROOT = ("crates/sunrise-sim/src/mod_content", "crates/sunrise-client/src/mod_content",
+                "crates/sunrise-client-render/src/assets.rs", "crates/sunrise-items/",
                 "crates/sunrise-mod-package/", "crates/sunrise-assets/")
 CONTENT_ROOT_TESTS = "cargo test --locked -p sunrise-client-lib --lib mod_content::tests:: -- --ignored"
 
@@ -380,6 +461,12 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
     doc_crates = sorted(libraries if crates is None else libraries.intersection(crates))
     doc_selection = "--workspace" if crates is None else " ".join(f"-p {shlex.quote(c)}" for c in doc_crates)
     no_rust = "no Rust change"
+    if not surface_touched(changed, crates_of, dependencies, merge_base):
+        surface_skip = "mod API surface untouched"
+    elif os.name == "nt":
+        surface_skip = "CI's verify reports it: the base tool build needs POSIX file locking"
+    else:
+        surface_skip = None
     steps = [
         Step("Cargo.lock", where="git"),
         Step("Public tree", "python3 tools/check_public_tree.py", where="here"),
@@ -394,6 +481,8 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
         Step("Export lists", "python3 tools/hotspots/check_lists.py", where="here"),
         # tools/hotspots/check_stand_ins.py: test stand-ins keep up with the hooks and traits they mirror.
         Step("Test stand-ins", "python3 tools/hotspots/check_stand_ins.py", where="here"),
+        # tools/ci/check_gameplay_layers.py: manifest dependency boundary across the three gameplay crates.
+        Step("Gameplay layers", "python3 tools/ci/check_gameplay_layers.py", where="here"),
         # Always, as in CI: some read the crates, the roadmap or the workflows. One file per worker here, with
         # unittest's own summary (#5043); CI and --serial-python run them in one process.
         Step("Python tests", "python3 -m unittest discover -s tests" if getattr(args, "serial_python", False)
@@ -409,6 +498,10 @@ def plan(args, base, changed, crates_of, libraries, dependencies, merge_base=Non
              skip=test_skip, summary=tests_passed),
         Step("doc tests", f"cargo test --locked {doc_selection} --doc",
              skip=test_skip or (None if doc_crates else "no library touched"), summary=tests_passed),
+        # CI's verify job reports it on every pull request: a note naming an id that did not change, or a breaking
+        # change without a note, fails there. Against the merge base, as CI's base is the pull request's first parent.
+        Step("Surface report", f"python3 tools/ci/surface_report.py --base {shlex.quote(merge_base)}",
+             summary=surface_summary, skip=surface_skip),
         Step("content root tests", CONTENT_ROOT_TESTS, summary=tests_passed,
              skip=None if crates is None or any(p.startswith(CONTENT_ROOT) for p in changed)
              else "content root untouched"),

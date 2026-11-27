@@ -191,6 +191,9 @@ fn draw(
             translucent: false,
             oit: false,
             banner_pattern: false,
+            packed_light: None,
+            lightmap_only: false,
+            explicit_alpha_cutoff: false,
         });
     }
     for (child_name, child) in &part.children {
@@ -992,6 +995,8 @@ mod tests {
                     uses_block_light: false,
                     extents: Default::default(),
                     display,
+                    submit_options: mod_api::SpecialModelSubmitOptions::default(),
+                    render_type: None,
                 }],
                 oversized_in_gui: false,
                 animated: false,

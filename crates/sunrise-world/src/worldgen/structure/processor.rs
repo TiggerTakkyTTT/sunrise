@@ -1022,7 +1022,9 @@ pub fn place_in_world<W: FeatureWorld + PlacementContext>(
             None
         };
         let state = resources.transforms.rotate_at(
-            resources.transforms.mirror(info.state, settings.mirror),
+            resources
+                .transforms
+                .mirror_at(info.state, info.pos, settings.mirror),
             info.pos,
             settings.rotation,
         );

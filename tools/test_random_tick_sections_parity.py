@@ -14,10 +14,12 @@ import itertools
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 COUNT = 3000
 SECTIONS = 24
@@ -65,8 +67,8 @@ if __name__ == '__main__':
         'Which sections of a chunk random-tick (block and fluid counts over loads, sets and removals, not the palette) '
         'and the positions tickChunk draws in them, with each position\'s block and fluid random-tick flags. The '
         'blocks\' random-tick behaviour itself is test_random_tick_parity\'s.',
-        sources=[lab.ROOT / 'crates/sunrise-client/src/random_tick_sections.rs',
-                 lab.ROOT / 'crates/sunrise-client-render/src/chunk.rs',
+        sources=[lab.ROOT / 'crates/sunrise-sim/src/random_tick_sections.rs',
+                 lab.ROOT / 'crates/sunrise-level/src/chunk.rs',
                  lab.ROOT / 'crates/sunrise-core/src/paletted.rs',
                  lab.ROOT / 'crates/sunrise-world/src/level/tick.rs',
                  lab.ROOT / 'crates/sunrise-world/src/level/ticks.rs'],

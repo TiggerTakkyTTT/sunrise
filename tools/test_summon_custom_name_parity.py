@@ -16,15 +16,12 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_command_exec_parity as driver, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_command_exec_parity as driver
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_command_exec_parity as driver, test_rust_parity as base
 
 GROUP = 'summon custom name replies'
-TEST = 'game::commands::summon_item_orb_tests::summon_replies_with_the_custom_name_of_every_kind'
+TEST = 'game::server_side::commands::summon_item_orb_tests::summon_replies_with_the_custom_name_of_every_kind'
 ORACLE = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCommandExecOracle.java'
 
 

@@ -5,16 +5,21 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.git_fixture import git_in
+from tests.os_support import needs_runner_shell
+from tests.test_ci_concurrency import ROOT
+from tests.test_release_branches import MAIN, NIGHTLY, RELEASE, repository, run_gate
 from tools import sunrise_mod_binstall
 from tools.ci import daily_summary as summary, parity_verdict
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 COMMIT = "c" * 40
 DAILY = yaml.load((ROOT / ".github/workflows/daily.yml").read_text(), Loader=yaml.BaseLoader)
@@ -486,8 +491,10 @@ class DailySummaryTests(unittest.TestCase):
 
     def test_every_sdk_check_is_a_step_of_the_sdk_build(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/prebuilt-game-build.yml").read_text()
+        # A cross-built macOS or Windows leg repeats the checks in `cross-check`; the `build` job keeps each once.
+        build = workflow.split("\n  build:\n", 1)[1].split("\n  cross-check:\n", 1)[0]
         for step in summary.SDK_CHECKS:
-            self.assertEqual(workflow.count(f"- name: {step}\n"), 1, step)
+            self.assertEqual(build.count(f"- name: {step}\n"), 1, step)
 
     def test_an_sdk_check_issue_closes_only_when_its_step_passed(self):
         title = "Daily: sdk API-source check (linux)"
@@ -921,7 +928,7 @@ class DailySummaryTests(unittest.TestCase):
 
 class DailyWorkflowTests(unittest.TestCase):
     def setUp(self):
-        from tests.test_ci_concurrency import ROOT, yaml
+        from tests.test_ci_concurrency import ROOT
         self.workflow = yaml.load((ROOT / ".github/workflows/daily.yml").read_text(), Loader=yaml.BaseLoader)
 
     def test_the_schedule_only_dispatches_a_real_run_on_main(self):
@@ -954,8 +961,9 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertNotIn("permissions", jobs["sdk"], "the build leg publishes nothing")
         # The SDK is two calls named `sdk`: the Linux legs, which fn-replace-check needs alone, and the others.
         self.assertEqual(jobs["sdk"]["with"]["legs"], "linux")
+        # Only this call runs the C-source test on Windows and macOS; a Dev SDK build never does.
         self.assertEqual(jobs["sdk-windows-macos"]["with"], {"commit": "${{ needs.resolve.outputs.commit }}",
-                                                             "legs": "windows-macos"})
+                                                             "legs": "windows-macos", "c_source_test": "true"})
         self.assertEqual(jobs["sdk-windows-macos"]["name"], "sdk")
         self.assertEqual(summary.PART_OF, {"sdk-windows-macos": "sdk"})
         self.assertEqual(jobs["fn-replace-check"]["needs"], ["resolve", "sdk"])
@@ -992,7 +1000,7 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertTrue(jobs["summary"]["name"].startswith("summary ${{ needs.resolve.outputs.commit }}"))
 
     def test_daily_checks_linkage_on_the_linux_and_windows_client_sdks_before_pack(self):
-        from tests.test_ci_concurrency import ROOT, expression_value, yaml
+        from tests.test_ci_concurrency import ROOT, expression_value
         jobs = self.workflow["jobs"]
         self.assertNotIn("linkage", jobs)
         self.assertNotIn("linkage", jobs["summary"]["needs"])
@@ -1028,7 +1036,7 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertLess(api_commands.index(build), api_commands.index(check))
 
     def test_the_sdk_build_packs_exactly_the_archives_a_release_needs(self):
-        from tests.test_ci_concurrency import ROOT, yaml
+        from tests.test_ci_concurrency import ROOT
         from tools.ci import nightly
         workflow = yaml.load((ROOT / ".github/workflows/prebuilt-game-build.yml").read_text(), Loader=yaml.BaseLoader)
         build = workflow["jobs"]["build"]
@@ -1046,12 +1054,12 @@ class DailyWorkflowTests(unittest.TestCase):
                          "python tools/prebuilt_game.py pack prebuilt dist --stage-tool "
                          "target/prebuilt/tools/release/sunrise-stage${{ runner.os == 'Windows' && '.exe' || '' }}")
         self.assertEqual(steps["actions/upload-artifact@v4"]["with"]["name"], "sdk-leg-${{ matrix.name }}")
-        self.assertNotIn("env", build, "no hand-set archive name")
+        self.assertEqual(set(build.get("env", {})), {"CROSS", "SUNRISE_PREBUILT_TARGET"}, "no hand-set archive name")
 
         self.assertEqual(set(nightly.SDK_ASSETS) - set(nightly.SDK_ARCHIVES), {"sdk.json", "SHA256SUMS", "SHA256SUMS.sig"})
 
     def test_the_sdk_is_signed_and_published_only_on_main(self):
-        from tests.test_ci_concurrency import ROOT, yaml
+        from tests.test_ci_concurrency import ROOT
         workflow = yaml.load((ROOT / ".github/workflows/sdk-publish.yml").read_text(), Loader=yaml.BaseLoader)
         jobs = workflow["jobs"]
         on_main = "needs.authorize.outputs.publish == 'true'"
@@ -1088,7 +1096,7 @@ class DailyWorkflowTests(unittest.TestCase):
     def test_the_windows_report_is_uploaded_even_on_failure_and_downloaded_by_the_summary(self):
         import fnmatch
 
-        from tests.test_ci_concurrency import ROOT, yaml
+        from tests.test_ci_concurrency import ROOT
         daily_job, windows_job = summary.WINDOWS_ROWS_JOB.split(" / ")
         workflow_path = ROOT / self.workflow["jobs"][daily_job]["uses"]
         workflow = yaml.safe_load(workflow_path.read_text())
@@ -1118,40 +1126,76 @@ class DailyWorkflowTests(unittest.TestCase):
         self.assertIn("needs.summary.outputs.sdk_green == 'true'", jobs["sdk-publish"]["if"])
         self.assertNotIn("parity-report", jobs)
 
-    def test_every_writing_run_requires_parity_and_only_a_dry_run_leaves_it_out(self):
+    def test_the_parity_call_runs_when_the_resolve_job_requires_it(self):
         jobs = self.workflow["jobs"]
-        resolve = jobs["resolve"]
-        self.assertEqual(resolve["outputs"]["parity_required"], "${{ steps.commit.outputs.parity_required }}")
+        self.assertEqual(jobs["resolve"]["outputs"]["parity_required"], "${{ steps.commit.outputs.parity_required }}")
         self.assertIn("needs.resolve.outputs.parity_required == 'true'", jobs["parity"]["if"])
+
+    def resolve_commit(self, folder, ref, source, commit, *, dry_input="false", scheduled="false", break_glass="false"):
+        steps = self.workflow["jobs"]["resolve"]["steps"]
+        auth = run_gate(steps[-2]["run"], DRY_INPUT=dry_input, GITHUB_REF=ref)
+        out = Path(folder, "out")
+        out.write_text("")
+        env = {**os.environ, "COMMIT": commit, "DRY_RUN": auth["dry_run"], "SCHEDULED": scheduled,
+               "BREAK_GLASS": break_glass, "GITHUB_SHA": source, "GITHUB_REF": ref, "GITHUB_OUTPUT": str(out),
+               "GITHUB_STEP_SUMMARY": str(Path(folder, "summary")), "GIT_ALLOW_PROTOCOL": "file"}
+        result = subprocess.run(["bash", "-e", "-c", steps[-1]["run"]], cwd=Path(folder, "clone"), env=env,
+                                capture_output=True, text=True)
+        return result, out.read_text()
+
+    @needs_runner_shell
+    def test_every_writing_run_requires_parity_and_only_a_dry_run_leaves_it_out(self):
         with tempfile.TemporaryDirectory() as folder:
-            folder = Path(folder)
-            # A checked-in resolve job body exercised with a substitute git: an older commit of main writes too, so
-            # it runs parity as main's head does.
-            stub = folder / "git"
-            stub.write_text('#!/bin/sh\n[ "$1" != rev-parse ] || printf "%s\\n" "${4%%^*}"\n')
-            stub.chmod(0o755)
-            out = folder / "out"
-            for ref, dry, commit, required in (("main", "false", "head", "true"),
-                                               ("main", "false", "older", "true"),
-                                               ("main", "true", "head", "false"),
-                                               ("release/26.3", "false", "head", "true"),
-                                               ("nightly/26.3", "false", "head", "false"),
-                                               ("topic", "false", "head", "false")):
-                with self.subTest(ref=ref, dry=dry, commit=commit):
-                    out.unlink(missing_ok=True)
-                    env = {**os.environ, "PATH": f"{folder}{os.pathsep}{os.environ['PATH']}", "COMMIT": commit,
-                           "DRY_RUN": dry, "SCHEDULED": "false", "GITHUB_SHA": "head", "GITHUB_REF": f"refs/heads/{ref}",
-                           "GITHUB_OUTPUT": str(out)}
-                    subprocess.run(["bash", "-e", "-c", resolve["steps"][-1]["run"]], env=env, check=True)
-                    self.assertIn(f"parity_required={required}", out.read_text().splitlines())
+            git, (older, source, later) = repository(folder)
+            git("push", "-q", "origin", f"{later}:{RELEASE}")
+            for ref, dispatch, tested, dry_input, writes in (
+                    (MAIN, later, later, "false", True), (MAIN, later, older, "false", True),
+                    (RELEASE, later, later, "false", True), (RELEASE, later, older, "false", True),
+                    (MAIN, source, later, "true", False), (NIGHTLY, later, later, "false", False),
+                    ("refs/heads/topic", later, later, "false", False)):
+                with self.subTest(ref=ref, dispatch=dispatch, tested=tested, dry_input=dry_input):
+                    result, out = self.resolve_commit(folder, ref, dispatch, tested[:12], dry_input=dry_input)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(dict(line.split("=", 1) for line in out.splitlines()),
+                                     {"commit": tested, "skip": "false", "dry_run": str(not writes).lower(),
+                                      "parity_required": str(writes).lower(),
+                                      "branch": ref.removeprefix("refs/heads/") if writes else ""})
+
+    @needs_runner_shell
+    def test_writing_resolution_refuses_commits_outside_the_dispatch_graph(self):
+        with tempfile.TemporaryDirectory() as folder:
+            git, (_, source, later) = repository(folder)
+            git("push", "-q", "origin", f"{later}:{RELEASE}")
+            # The checkout and both live branches contain the later commit; the immutable dispatch SHA does not.
+            # Neither --seen nor break-glass-legs can run here: these helpers aren't in the scratch checkout.
+            for ref, scheduled, break_glass in ((MAIN, "true", "false"), (RELEASE, "false", "true")):
+                with self.subTest(ref=ref):
+                    result, out = self.resolve_commit(folder, ref, source, later, scheduled=scheduled,
+                                                      break_glass=break_glass)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"::error::{later} is not in the dispatched workflow's history ({source})", result.stdout)
+                    self.assertEqual(result.stderr, "")
+                    self.assertEqual(out, "")
+
+    @needs_runner_shell
+    def test_writing_resolution_still_requires_the_live_branch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            git, (older, tested, source) = repository(folder)
+            git("push", "-q", "origin", f"{source}:{RELEASE}")
+            # The clone and the dispatch still contain tested, but the refreshed branch does not.
+            git_in(Path(folder, "origin"))("update-ref", RELEASE, older)
+            result, out = self.resolve_commit(folder, RELEASE, source, tested)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"::error::{tested} is not on release/26.3", result.stdout)
+            self.assertEqual(out, "")
 
     def test_every_leg_is_a_called_workflow_with_the_commit(self):
-        # The summary's needs are the legs (daily_summary.daily_legs): each a called workflow given the resolved
-        # commit, and every called workflow is one of them.
+        # The summary's needs are the legs it judges (daily_summary.daily_legs): each a called workflow given
+        # the resolved commit. Publishing and the independent fuzz report are not legs it judges.
         jobs = self.workflow["jobs"]
         needs = jobs["summary"]["needs"]
         self.assertEqual(set(needs), {"resolve"} | {name for name, job in jobs.items() if "uses" in job
-                                                     and name not in ("sdk-publish", "nightly")})
+                                                     and name not in ("sdk-publish", "nightly", "fuzz")})
         for leg in needs:
             if leg == "resolve":
                 continue

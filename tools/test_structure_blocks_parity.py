@@ -33,11 +33,11 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 
-try:
-    from . import lab, test_structure_layout_parity as layout
-except ImportError:
-    import lab
-    import test_structure_layout_parity as layout
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_structure_layout_parity as layout
 
 # The mod profiles: the layout harness's, and CTOV (its jar and Lithostitched's come from a pack's jar
 # folder, `.local/structure-oracle/pack-jars/`).

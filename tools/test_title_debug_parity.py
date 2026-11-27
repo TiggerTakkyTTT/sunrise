@@ -9,14 +9,13 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-try:
-    from . import lab, test_rust_parity as base, test_model_baking_parity as baking
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_model_baking_parity as baking
+import sys
 
-TEST = 'game::debug_options::tests::title_debug_'
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_model_baking_parity as baking
+
+TEST = 'game::client_side::debug_options::tests::title_debug_'
 
 
 def main():
@@ -37,11 +36,14 @@ def main():
     lock, jars, libraries = base.verify_artifacts()
     source = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaTitleDebugOracle.java'
     sources = [Path(__file__), source, lab.ROOT / 'Cargo.lock',
-               lab.ROOT / 'crates/sunrise-client/src/game.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/interface/debug_options.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/interface/debug_keys.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/interface/ime.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/interface/screen_backgrounds.rs']
+               lab.ROOT / 'crates/sunrise-gameplay-common/src/game.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game.rs',
+               lab.ROOT / 'crates/sunrise-client/src/cut_layout/game/interface/debug_options.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game/interface/debug_options.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game/interface/debug_keys.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game/interface/ime.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game/interface/screen_backgrounds.rs',
+               lab.ROOT / 'crates/sunrise-client-gameplay/src/game/interface/screen_backgrounds_client.rs']
     hashes = base.source_hashes(sources)
 
     def run(command, label, **kwargs):

@@ -102,8 +102,19 @@ layout_fields!("slot" => $width);
         }
     )+};
 }
-// `EntityTypeKey` derives its own `Wire`.
-slot_keys!(u32; crate::GameEventKey, BlockEntityTypeKey, BlockKey, BoolGameRuleKey, IntGameRuleKey, DimensionKey, EffectKey, EnchantmentKey, FluidKey, ItemKey, MenuKey, crate::client::particle_keys::ParticleKey, TagKey);
+// `EntityTypeKey` derives its own `Wire`; `TagKey<K>` encodes its interned slot below.
+slot_keys!(u32; crate::GameEventKey, BlockEntityTypeKey, BlockKey, BoolGameRuleKey, IntGameRuleKey, DimensionKey, EffectKey, EnchantmentKey, FluidKey, ItemKey, MenuKey, crate::client::particle_keys::ParticleKey);
+impl<K: 'static> Wire for TagKey<K> {
+    layout_fields!("slot" => u32);
+    const MIN: usize = <u32 as Wire>::MIN;
+    fn put(&self, out: &mut Writer) {
+        out.put(&self.wire_slot());
+    }
+    fn take(input: &mut Reader<'_>) -> Result<Self, WireError> {
+        let slot = input.take::<u32>()?;
+        Self::from_slot(slot).map_err(WireError::Invalid)
+    }
+}
 // The registry-entry key families: narrowing and host slot resolution share one
 // table. Tags and unresolved fluids are not registry-entry key families.
 slot_keys!(registries;

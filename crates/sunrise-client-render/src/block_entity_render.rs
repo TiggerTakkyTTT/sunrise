@@ -273,25 +273,7 @@ fn around(rotation: Mat4, pivot: Vec3) -> Mat4 {
     Mat4::from_translation(pivot) * rotation * Mat4::from_translation(-pivot)
 }
 
-/// `DyeColor` names and texture diffuse colours, by id.
-pub const DYES: [(&str, u32); 16] = [
-    ("white", 0xF9FFFE),
-    ("orange", 0xF9801D),
-    ("magenta", 0xC74EBD),
-    ("light_blue", 0x3AB3DA),
-    ("yellow", 0xFED83D),
-    ("lime", 0x80C71F),
-    ("pink", 0xF38BAA),
-    ("gray", 0x474F52),
-    ("light_gray", 0x9D9D97),
-    ("cyan", 0x169C9C),
-    ("purple", 0x8932B8),
-    ("blue", 0x3C44AA),
-    ("brown", 0x835432),
-    ("green", 0x5E7C16),
-    ("red", 0xB02E26),
-    ("black", 0x1D1D21),
-];
+pub use sunrise_level::dyes::DYES;
 fn dye_prefix(name: &str) -> Option<(usize, &str)> {
     // Longest names first; this is the same stable order as sorting DYES by
     // descending prefix length, without a Vec allocation or comparison sort.
@@ -743,7 +725,14 @@ fn sign_text_calls(
                     _ => None,
                 }
             });
-            let base_color = if inline_sprite.is_some() {
+            let inline_dynamic = scene.inline_images.as_ref().and_then(|_| {
+                substituted.as_ref()?;
+                match &span.style.inline_object {
+                    Some(InlineObject::Dynamic { handle, .. }) => Some(*handle),
+                    _ => None,
+                }
+            });
+            let base_color = if inline_sprite.is_some() || inline_dynamic.is_some() {
                 0xFFFF_FFFF
             } else {
                 color
@@ -758,6 +747,7 @@ fn sign_text_calls(
                 y,
                 text: span.text.clone(),
                 inline_sprite,
+                inline_dynamic,
                 style: span.style.clone(),
                 color: run,
                 outline,
@@ -778,6 +768,7 @@ fn sign_text_calls(
                 y,
                 text: String::new(),
                 inline_sprite: None,
+                inline_dynamic: None,
                 style: Style::default(),
                 color,
                 outline,
@@ -828,6 +819,11 @@ pub fn push_text(
     out: &mut Vec<Vertex>,
 ) {
     let bold = call.style.is_bold();
+    // A dynamic texture's quads name it in `glint_uv`, which nothing reads of them, for the
+    // renderer to bind it for their run (`DynamicTextureRun`).
+    let glint_uv = call
+        .inline_dynamic
+        .map_or([0.0; 2], crate::gfx::dynamic_texture_bits);
     let mut quad = |corners: [(f32, f32); 4], cell: Rect, z: f32, argb: u32, overlay: u32| {
         let uvs = [
             [cell.u0, cell.v1],
@@ -844,12 +840,25 @@ pub fn push_text(
                 layer: u32::from(call.tier) << 16 | overlay,
                 color,
                 light: call.light,
-                glint_uv: [0.0; 2],
+                glint_uv,
             });
         }
     };
+    let whole = Rect {
+        u0: 0.0,
+        v0: 0.0,
+        u1: 1.0,
+        v1: 1.0,
+        w: 1,
+        h: 1,
+    };
     let mut emit = |dx: f32, dy: f32, argb: u32, outline: bool| {
-        if let Some(sprite) = call.inline_sprite {
+        let inline = match (call.inline_dynamic, call.inline_sprite) {
+            (Some(_), _) => Some((whole, crate::gfx::DYNAMIC_TEXTURE_CUTOUT_OVERLAY)),
+            (None, Some(sprite)) => Some((sprite, crate::gfx::TEXT_POLYGON_OFFSET_SOLID_OVERLAY)),
+            (None, None) => None,
+        };
+        if let Some((sprite, overlay)) = inline {
             // The outline is the text's: an image draws once.
             if outline {
                 return;
@@ -865,7 +874,7 @@ pub fn push_text(
                     sprite,
                     0.0,
                     argb,
-                    crate::gfx::TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
+                    overlay,
                 );
                 x = right;
             }
@@ -983,6 +992,9 @@ pub struct TextCall {
     pub text: String,
     /// When set, this call is one inline image instead of a font glyph run.
     pub inline_sprite: Option<Rect>,
+    /// When set, this call is one inline dynamic texture (its handle in the store) instead of a
+    /// font glyph run; it draws as a quad of that texture's own run.
+    pub inline_dynamic: Option<u64>,
     pub style: Style,
     /// ARGB.
     pub color: u32,
@@ -1003,6 +1015,7 @@ impl TextCall {
             y: self.y,
             text: &self.text,
             inline_sprite: self.inline_sprite,
+            inline_dynamic: self.inline_dynamic,
             style: &self.style,
             color: self.color,
             outline: self.outline,
@@ -1022,6 +1035,8 @@ pub struct TextRun<'a> {
     pub text: &'a str,
     /// Inline atlas glyph in place of the text, with the same tint as the run.
     pub inline_sprite: Option<Rect>,
+    /// Inline dynamic texture glyph in place of the text (the store's handle), tinted as the run.
+    pub inline_dynamic: Option<u64>,
     pub style: &'a Style,
     /// ARGB.
     pub color: u32,
@@ -1097,8 +1112,9 @@ pub struct BlockEntityRenderer {
     /// What draws: `vanilla`, or the packs' custom entity models over it.
     shapes: RwLock<Arc<BlockEntityShapes>>,
     kinds: Vec<Kind>,
-    /// Item id to its `PROVIDES_POTTERY_PATTERN` side texture (`Sheets.DECORATED_POT_MAPPER`).
-    pot_patterns: HashMap<String, String>,
+    /// Item id to its `PROVIDES_POTTERY_PATTERN` side texture (`Sheets.DECORATED_POT_MAPPER`),
+    /// from the world's `decorated_pot_pattern` registry ([`Self::set_pot_patterns`]).
+    pot_patterns: RwLock<HashMap<String, String>>,
     /// `Block.shouldRenderFace` for End gateway faces (its occlusion pair cache needs a lock).
     visibility: Option<Mutex<FaceVisibility>>,
     sign_texts: Mutex<SignTexts>,
@@ -1547,13 +1563,9 @@ const MODELS: [(&str, &str); 27] = [
 ];
 
 impl BlockEntityRenderer {
-    pub fn load(
-        root: &ResourceRoot,
-        registry: &BlockRegistry,
-        defaults: &sunrise_world::item_defaults::ItemDefaults,
-    ) -> Result<Self> {
+    pub fn load(root: &ResourceRoot, registry: &BlockRegistry) -> Result<Self> {
         let visibility = load_visibility(root.prepared(), registry)?;
-        Self::load_with_visibility(root, registry, visibility, defaults)
+        Self::load_with_visibility(root, registry, visibility)
     }
     /// [`BlockEntityRenderer::load`] over the face visibility the meshes use
     /// (`MeshTables::visibility`): a clone shares its shapes and their faces.
@@ -1561,18 +1573,16 @@ impl BlockEntityRenderer {
         root: &ResourceRoot,
         registry: &BlockRegistry,
         visibility: FaceVisibility,
-        defaults: &sunrise_world::item_defaults::ItemDefaults,
     ) -> Result<Self> {
-        Self::load_with_visibility_models_and_defaults(root, registry, visibility, None, defaults)
+        Self::load_with_visibility_and_models(root, registry, visibility, None)
     }
 
-    /// Reuse the startup batch's decoded entity models and shared item defaults.
-    pub fn load_with_visibility_models_and_defaults(
+    /// Reuse the startup batch's decoded entity models.
+    pub fn load_with_visibility_and_models(
         root: &ResourceRoot,
         registry: &BlockRegistry,
         visibility: FaceVisibility,
         models: Option<&Value>,
-        defaults: &sunrise_world::item_defaults::ItemDefaults,
     ) -> Result<Self> {
         let owned_models = if models.is_none() {
             Some(serde_json::from_slice::<Value>(&std::fs::read(
@@ -1590,25 +1600,31 @@ impl BlockEntityRenderer {
         renderer.visibility = Some(Mutex::new(visibility));
         // The packs' custom entity models (`.jem` files), before anything draws.
         renderer.set_shapes(renderer.shapes_for(root.source()));
-        // Sherd items: provides_pottery_pattern -> decorated_pot_pattern asset id.
-        for (item, components) in defaults.entries() {
-            let Some(pattern) = components["minecraft:provides_pottery_pattern"].as_str() else {
-                continue;
-            };
-            let name = pattern.strip_prefix("minecraft:").unwrap_or(pattern);
-            let file = format!("data/minecraft/decorated_pot_pattern/{name}.json");
-            let Ok(def) = root.source().read(&file) else {
-                continue;
-            };
-            let def: Value = serde_json::from_slice(&def)?;
-            if let Some(asset) = def["asset_id"].as_str() {
-                let asset = asset.strip_prefix("minecraft:").unwrap_or(asset);
-                renderer
-                    .pot_patterns
-                    .insert(item.clone(), format!("entity/decorated_pot/{asset}"));
-            }
-        }
         Ok(renderer)
+    }
+
+    /// Replaces the face-visibility table used for culled block-entity faces (for example
+    /// after synced block tags rebuild tag-based face rules).
+    pub fn set_visibility(&self, visibility: FaceVisibility) {
+        if let Some(current) = &self.visibility {
+            *current.lock().unwrap_or_else(|e| e.into_inner()) = visibility;
+        }
+    }
+
+    /// Publish the open world's pot patterns, replacing the last world's
+    /// ([`pot_pattern_textures`]).
+    pub fn set_pot_patterns(&self, patterns: HashMap<String, String>) {
+        *self
+            .pot_patterns
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = patterns;
+    }
+    fn pot_pattern(&self, item: &str) -> Option<String> {
+        self.pot_patterns
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(item)
+            .cloned()
     }
     fn new(models: HashMap<&'static str, ModelPart>, registry: &BlockRegistry) -> Self {
         let vanilla = Arc::new(BlockEntityShapes::new(models, HashMap::new()));
@@ -1627,7 +1643,7 @@ impl BlockEntityRenderer {
             shapes: RwLock::new(vanilla.clone()),
             vanilla,
             kinds,
-            pot_patterns: HashMap::new(),
+            pot_patterns: RwLock::default(),
             visibility: None,
             sign_texts: Mutex::default(),
             static_geometry: Mutex::default(),
@@ -2189,7 +2205,7 @@ impl BlockEntityRenderer {
                         self.render_banner(
                             &shapes,
                             scene,
-                            pos,
+                            Some(pos),
                             kind,
                             Mat4::from_translation(origin),
                             packed,
@@ -2225,7 +2241,7 @@ impl BlockEntityRenderer {
                     } else {
                         self.render_one(
                             scene,
-                            pos,
+                            Some(pos),
                             kind,
                             Mat4::from_translation(origin),
                             packed,
@@ -2285,7 +2301,15 @@ impl BlockEntityRenderer {
                             }
                             let base = Mat4::from_translation(origin);
                             self.render_one(
-                                scene, pos, kind, base, packed, lights, false, true, out,
+                                scene,
+                                Some(pos),
+                                kind,
+                                base,
+                                packed,
+                                lights,
+                                false,
+                                true,
+                                out,
                             );
                             break 'draw;
                         }
@@ -2337,7 +2361,7 @@ impl BlockEntityRenderer {
                         self.render_banner(
                             &shapes,
                             scene,
-                            pos,
+                            Some(pos),
                             kind,
                             Mat4::from_translation(origin),
                             packed,
@@ -2364,7 +2388,17 @@ impl BlockEntityRenderer {
                     break 'draw;
                 }
                 let base = Mat4::from_translation(origin);
-                self.render_one(scene, pos, kind, base, packed, lights, false, true, out);
+                self.render_one(
+                    scene,
+                    Some(pos),
+                    kind,
+                    base,
+                    packed,
+                    lights,
+                    false,
+                    true,
+                    out,
+                );
             }
             after(pos, state, start, out);
             if out.len() > start && !cache_only {
@@ -2407,7 +2441,7 @@ impl BlockEntityRenderer {
         } else {
             self.render_one(
                 scene,
-                pos,
+                Some(pos),
                 kind,
                 Mat4::IDENTITY,
                 packed,
@@ -2506,10 +2540,9 @@ impl BlockEntityRenderer {
                 for item in &anim.sherds {
                     let texture = item
                         .as_ref()
-                        .and_then(|item| self.pot_patterns.get(item))
-                        .map(String::as_str)
-                        .unwrap_or("entity/decorated_pot/decorated_pot_side");
-                    add_sprite(texture);
+                        .and_then(|item| self.pot_pattern(item))
+                        .unwrap_or_else(|| "entity/decorated_pot/decorated_pot_side".to_owned());
+                    add_sprite(&texture);
                 }
             }
             Kind::CopperGolem { texture, .. } if options.copper_golem_statues => {
@@ -2576,7 +2609,7 @@ impl BlockEntityRenderer {
                     entry.vertices.clear();
                     self.render_one(
                         scene,
-                        pos,
+                        Some(pos),
                         self.kind(state),
                         Mat4::IDENTITY,
                         packed,
@@ -2601,7 +2634,7 @@ impl BlockEntityRenderer {
                 let mut vertices = Vec::new();
                 self.render_one(
                     scene,
-                    pos,
+                    Some(pos),
                     self.kind(state),
                     Mat4::IDENTITY,
                     packed,
@@ -2642,7 +2675,17 @@ impl BlockEntityRenderer {
     ) {
         let kind = self.kind(state);
         let lights = diffuse_lights(scene.nether);
-        self.render_one(scene, pos, kind, base, packed, lights, false, false, out);
+        self.render_one(
+            scene,
+            Some(pos),
+            kind,
+            base,
+            packed,
+            lights,
+            false,
+            false,
+            out,
+        );
     }
     /// `TheEndGatewayBlockEntity.shouldRenderFace` for each face of the gateway
     /// at `pos`: the faces its portal is drawn on.
@@ -2706,7 +2749,7 @@ impl BlockEntityRenderer {
         let start = out.len();
         self.render_one(
             scene,
-            pos,
+            Some(pos),
             self.kind(state),
             Mat4::from_translation(origin),
             0xff,
@@ -2789,24 +2832,14 @@ impl BlockEntityRenderer {
         let kind = self.kind(state);
         if !matches!(kind, Kind::None) {
             let lights = diffuse_lights(scene.nether);
-            self.render_one(
-                scene,
-                [i32::MAX; 3],
-                kind,
-                base,
-                packed,
-                lights,
-                false,
-                false,
-                out,
-            );
+            self.render_one(scene, None, kind, base, packed, lights, false, false, out);
         }
     }
     #[allow(clippy::too_many_arguments)]
     fn render_one(
         &self,
         scene: &Scene,
-        pos: [i32; 3],
+        pos: Option<[i32; 3]>,
         kind: &Kind,
         base: Mat4,
         packed: u8,
@@ -2816,6 +2849,9 @@ impl BlockEntityRenderer {
         out: &mut Vec<Vertex>,
     ) {
         let shapes = self.shapes();
+        // A special model (`pos` is `None`) draws in a scene whose closures answer
+        // every position with no data, so any position reads the same.
+        let at = pos.unwrap_or_default();
         let sprite = |name: &str| scene.sprites.get(name).copied();
         let paint = |name: &str, tint: u32, packed: u8| {
             let rect = if crumbling {
@@ -2848,10 +2884,10 @@ impl BlockEntityRenderer {
                 wall,
                 angle,
             } => {
-                let Some(data) = (scene.sign)(pos) else {
+                let Some(data) = (scene.sign)(at) else {
                     return;
                 };
-                let draw_outline = scene.sign_outline.visible(pos);
+                let draw_outline = scene.sign_outline.visible(at);
                 let s = Vec3::new(1.0, -1.0, 1.0);
                 for (front, text) in [(true, &data.front), (false, &data.back)] {
                     if text.is_empty() {
@@ -2938,12 +2974,15 @@ impl BlockEntityRenderer {
                 let Some(model) = shapes.models.get(key) else {
                     return;
                 };
-                let (open, other) = self.chest_openness(
-                    pos,
-                    kind,
-                    &|p| scene.world.block(p[0], p[1], p[2]).0,
-                    scene.lid,
-                );
+                // ChestSpecialRenderer: a special model's chest is closed and alone.
+                let (open, other) = pos.map_or((0.0, None), |pos| {
+                    self.chest_openness(
+                        pos,
+                        kind,
+                        &|p| scene.world.block(p[0], p[1], p[2]).0,
+                        scene.lid,
+                    )
+                });
                 // BrightnessCombiner: the brighter of both halves, per channel.
                 let mut packed = packed;
                 if let Some(other) = other {
@@ -3006,7 +3045,7 @@ impl BlockEntityRenderer {
                     * Mat4::from_scale(Vec3::new(1.0, -1.0, -1.0))
                     * Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0));
                 // ShulkerBoxModel.setupAnim(getProgress(partial)): the lid rises and turns.
-                let (progress, old) = (scene.anim)(pos).shulker;
+                let (progress, old) = (scene.anim)(at).shulker;
                 let progress = old + scene.partial * (progress - old);
                 let lid = move |name: &str, p: &mut [f32; 9]| {
                     if name == "lid" {
@@ -3042,7 +3081,7 @@ impl BlockEntityRenderer {
                 // SkullBlockRenderer.getRenderType: the profile's skin when it
                 // resolves, `SKIN_BY_TYPE` (steve) otherwise.
                 let skin = if *kind == SkullType::Player {
-                    (scene.skull)(pos)
+                    (scene.skull)(at)
                 } else {
                     None
                 };
@@ -3074,7 +3113,7 @@ impl BlockEntityRenderer {
                 };
                 // SkullBlockEntity.getAnimation: the dragon jaw and piglin ears
                 // (DragonHeadModel / PiglinHeadModel use double-precision Math).
-                let (animating, count) = (scene.anim)(pos).skull;
+                let (animating, count) = (scene.anim)(at).skull;
                 let t = count as f32 + if animating { scene.partial } else { 0.0 };
                 let anim = move |name: &str, p: &mut [f32; 9]| match name {
                     "jaw" => p[3] = (f64::from(t * PI * 0.2).sin() + 1.0) as f32 * 0.2,
@@ -3104,7 +3143,7 @@ impl BlockEntityRenderer {
                     return;
                 };
                 // BellModel.setupAnim(State(ticks + partial, shakeDirection)).
-                let a = (scene.anim)(pos);
+                let a = (scene.anim)(at);
                 let ticks = a.bell_ticks as f32 + scene.partial;
                 let (mut x_rot, mut z_rot) = (0.0, 0.0);
                 if let Some(dir) = a.bell_shake {
@@ -3132,7 +3171,7 @@ impl BlockEntityRenderer {
                 ) else {
                     return;
                 };
-                let a = (scene.anim)(pos);
+                let a = (scene.anim)(at);
                 let mut m = base
                     * around(
                         Mat4::from_rotation_y((180.0 - y_rot).to_radians()),
@@ -3166,10 +3205,8 @@ impl BlockEntityRenderer {
                 let blank = "entity/decorated_pot/decorated_pot_side";
                 let blank = shapes.texture("decorated_pot_sides", blank, scene.sprites);
                 for (side, item) in ["back", "left", "right", "front"].iter().zip(&a.sherds) {
-                    let texture = item
-                        .as_ref()
-                        .and_then(|i| self.pot_patterns.get(i))
-                        .map_or(blank, String::as_str);
+                    let texture = item.as_ref().and_then(|i| self.pot_pattern(i));
+                    let texture = texture.as_deref().unwrap_or(blank);
                     if let (Some(part), Some(paint)) =
                         (sides.child(side), paint(texture, 0xFFFFFF, packed))
                     {
@@ -3188,9 +3225,20 @@ impl BlockEntityRenderer {
                 let m = base
                     * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
                     * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0));
-                portal_cube(m, &[Direction::Down, Direction::Up], END_PORTAL_LAYER, out);
+                // EndCubeSpecialRenderer draws every face of the cube.
+                let faces: &[Direction] = if pos.is_some() {
+                    &[Direction::Down, Direction::Up]
+                } else {
+                    &Direction::ALL
+                };
+                portal_cube(m, faces, END_PORTAL_LAYER, out);
             }
             Kind::EndGateway { state } => {
+                // EndCubeSpecialRenderer: every face, and no beam.
+                let Some(pos) = pos else {
+                    portal_cube(base, &Direction::ALL, END_GATEWAY_LAYER, out);
+                    return;
+                };
                 let anim = (scene.anim)(pos);
                 let b = gateway_beam(anim.gateway, scene.partial, scene.max_y, scene.game_time);
                 if b.height > 0
@@ -3225,7 +3273,7 @@ impl BlockEntityRenderer {
                         }
                     }
                 };
-                let (ticks, active, hunting, raw_rotation) = (scene.anim)(pos).conduit;
+                let (ticks, active, hunting, raw_rotation) = (scene.anim)(at).conduit;
                 // ConduitRenderer.extractRenderState.
                 let rotation = (raw_rotation + if active { scene.partial } else { 0.0 }) * -0.0375;
                 let tex = |key: &str, name: &str| {
@@ -3315,8 +3363,17 @@ impl BlockEntityRenderer {
                 ) else {
                     return;
                 };
+                // BuiltInBlockModels.createEnchantingTable: a closed book lying on the table.
+                if pos.is_none() {
+                    let m = base
+                        * Mat4::from_translation(Vec3::new(0.5, 0.8125, 0.5))
+                        * Mat4::from_rotation_z(180f32.to_radians())
+                        * Mat4::from_rotation_x(90f32.to_radians());
+                    draw_part(model, "root", m, &book_pose(0.0, 0.0, 0.0), paint, out);
+                    return;
+                }
                 // EnchantTableRenderer.extractRenderState and submit.
-                let b = (scene.anim)(pos).book.render(scene.partial);
+                let b = (scene.anim)(at).book.render(scene.partial);
                 let m = base
                     * Mat4::from_translation(Vec3::new(0.5, 0.75, 0.5))
                     * Mat4::from_translation(Vec3::new(
@@ -3448,7 +3505,7 @@ impl BlockEntityRenderer {
         &self,
         shapes: &BlockEntityShapes,
         scene: &Scene,
-        pos: [i32; 3],
+        pos: Option<[i32; 3]>,
         kind: &Kind,
         base: Mat4,
         packed: u8,
@@ -3460,18 +3517,22 @@ impl BlockEntityRenderer {
         let Kind::Banner { color, .. } = kind else {
             return;
         };
+        let at = pos.unwrap_or_default();
         let Some((main, flag, transform, main_key, flag_key)) =
             Self::banner_parts(shapes, kind, base)
         else {
             return;
         };
-        let phase = ((i64::from(pos[0]) * 7
-            + i64::from(pos[1]) * 9
-            + i64::from(pos[2]) * 13
-            + scene.game_time)
-            .rem_euclid(100) as f32
-            + scene.partial)
-            / 100.0;
+        // BannerRenderer.submitSpecial waves a special model's flag at phase 0.
+        let phase = pos.map_or(0.0, |pos| {
+            ((i64::from(pos[0]) * 7
+                + i64::from(pos[1]) * 9
+                + i64::from(pos[2]) * 13
+                + scene.game_time)
+                .rem_euclid(100) as f32
+                + scene.partial)
+                / 100.0
+        });
         let wave = move |name: &str, p: &mut [f32; 9]| {
             if name == "flag" {
                 p[3] = (-0.0125 + 0.01 * (2.0 * PI * phase).mcos()) * PI;
@@ -3521,7 +3582,7 @@ impl BlockEntityRenderer {
         if let Some(paint) = paint("entity/banner/base", *color) {
             draw_part(flag, "root", transform, &wave, paint, out);
         }
-        for (texture, tint) in (scene.banner)(pos).iter().take(16) {
+        for (texture, tint) in (scene.banner)(at).iter().take(16) {
             if let Some(paint) = paint(texture, *tint) {
                 draw_part(flag, "root", transform, &wave, paint, out);
             }
@@ -3737,6 +3798,43 @@ fn portal_cube(m: Mat4, faces: &[Direction], layer: u32, out: &mut Vec<Vertex>) 
 
 #[cfg(test)]
 mod tests {
+    /// A sherd item a pack adds gets the side of the pattern the world's registry maps it to;
+    /// a pattern the registry lacks keeps the blank side.
+    #[test]
+    fn a_pack_pot_pattern_is_the_side_of_its_sherd() {
+        let defaults = sunrise_world::item_defaults::ItemDefaults::decode(
+            br#"{
+                "test:flame_sherd": {"minecraft:provides_pottery_pattern": "test:flame"},
+                "minecraft:angler_pottery_sherd": {"minecraft:provides_pottery_pattern": "minecraft:angler"},
+                "minecraft:brick": {}
+            }"#,
+        )
+        .unwrap();
+        let assets = HashMap::from([
+            (
+                "test:flame".to_owned(),
+                "test:flame_pottery_pattern".to_owned(),
+            ),
+            (
+                "minecraft:angler".to_owned(),
+                "minecraft:angler_pottery_pattern".to_owned(),
+            ),
+        ]);
+        let textures = pot_pattern_textures(&defaults, |pattern| assets.get(pattern).cloned());
+        assert_eq!(
+            textures["test:flame_sherd"],
+            "test:entity/decorated_pot/flame_pottery_pattern"
+        );
+        assert_eq!(
+            textures["minecraft:angler_pottery_sherd"],
+            "entity/decorated_pot/angler_pottery_pattern"
+        );
+        assert_eq!(textures.len(), 2);
+        let without = pot_pattern_textures(&defaults, |pattern| {
+            (pattern != "test:flame").then(|| "minecraft:x_pottery_pattern".to_owned())
+        });
+        assert!(!without.contains_key("test:flame_sherd"));
+    }
     use super::*;
     use crate::assets::Assets;
     use sunrise_core::nbt::Tag;
@@ -3888,7 +3986,7 @@ mod tests {
                         for (use_cache, out) in [(true, &mut cached), (false, &mut original)] {
                             renderer.render_one(
                                 &scene,
-                                [0; 3],
+                                Some([0; 3]),
                                 &kind,
                                 base,
                                 packed,
@@ -4268,6 +4366,7 @@ mod tests {
             y: 0.0,
             text: "Hi".into(),
             inline_sprite: None,
+            inline_dynamic: None,
             style: Style::default(),
             color: 0xFFFF_FF00,
             outline: 0xFF33_3300,
@@ -4353,6 +4452,7 @@ mod tests {
             y: 2.0,
             text: "ab".into(),
             inline_sprite: None,
+            inline_dynamic: None,
             style: Style::default(),
             color: 0xFF00_0000,
             outline: 0,
@@ -4402,6 +4502,7 @@ mod tests {
             y: 0.0,
             text: "A ".into(),
             inline_sprite: None,
+            inline_dynamic: None,
             color: 0xff123456,
             outline: 0,
             light: 240,
@@ -4561,6 +4662,7 @@ mod tests {
             y: 0.0,
             text: text.into(),
             inline_sprite,
+            inline_dynamic: None,
             style: Style::default(),
             color: 0xFFFF_FFFF,
             outline,
@@ -4590,6 +4692,39 @@ mod tests {
         assert_eq!(glowing.len(), 36);
         assert_eq!(glowing[..32], [TEXT_NORMAL_SOLID_OVERLAY; 32]);
         assert_eq!(glowing[32..], face);
+    }
+
+    /// A dynamic texture's inline glyph is one quad of that texture, drawn once, even under a
+    /// glowing sign's outline: unit UVs, the cutout dynamic-texture overlay and the handle in
+    /// `glint_uv`.
+    #[test]
+    fn an_inline_dynamic_texture_is_one_quad_naming_its_texture() {
+        use crate::gfx::{DYNAMIC_TEXTURE_CUTOUT_OVERLAY, dynamic_texture_bits};
+
+        let call = TextCall {
+            matrix: Mat4::IDENTITY,
+            x: 0.0,
+            y: 0.0,
+            text: "\u{fffc}".into(),
+            inline_sprite: None,
+            inline_dynamic: Some(7),
+            style: Style::default(),
+            color: 0xFFFF_FFFF,
+            outline: 0xFF00_0000,
+            light: 240,
+            tier: 0,
+        };
+        let glyph = |_| Glyph::default();
+        let mut out = Vec::new();
+        push_text(&glyph, None, &call.run(), &mut out);
+        assert_eq!(out.len(), 4);
+        let uvs: Vec<_> = out.iter().map(|v| v.uv).collect();
+        assert_eq!(uvs, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]);
+        for v in &out {
+            assert_eq!(v.layer, DYNAMIC_TEXTURE_CUTOUT_OVERLAY);
+            assert_eq!(v.glint_uv, dynamic_texture_bits(7));
+            assert_eq!(v.light, 240);
+        }
     }
 
     /// A glowing sign's own colour still wins over its dye, and the outline
@@ -4651,7 +4786,7 @@ mod tests {
                     angle: 90.0,
                 },
             ],
-            pot_patterns: HashMap::new(),
+            pot_patterns: RwLock::default(),
             visibility: None,
             sign_texts: Mutex::default(),
             static_geometry: Mutex::default(),
@@ -4743,7 +4878,7 @@ mod tests {
             let mut original = Vec::new();
             renderer.render_one(
                 scene,
-                pos,
+                Some(pos),
                 renderer.kind(state),
                 Mat4::from_translation((corner - scene.camera).as_vec3()),
                 world.light(pos[0], pos[1], pos[2]),
@@ -4962,11 +5097,9 @@ mod tests {
         }
         let assets = Assets::load(&root).unwrap();
         let registry = assets.registry;
-        let defaults = sunrise_world::item_defaults::read(&root).unwrap();
         let renderer = BlockEntityRenderer::load(
             &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
             registry,
-            &defaults,
         )
         .unwrap();
         let state = registry.default_state("minecraft:decorated_pot").unwrap();
@@ -5043,7 +5176,7 @@ mod tests {
             shapes: RwLock::new(vanilla.clone()),
             vanilla,
             kinds: Vec::new(),
-            pot_patterns: HashMap::new(),
+            pot_patterns: RwLock::default(),
             visibility: None,
             sign_texts: Mutex::default(),
             static_geometry: Mutex::default(),
@@ -5126,7 +5259,7 @@ mod tests {
             let mut out = Vec::new();
             renderer.render_one(
                 &scene,
-                [0; 3],
+                Some([0; 3]),
                 &kind,
                 Mat4::IDENTITY,
                 0xF0,
@@ -5158,7 +5291,7 @@ mod tests {
             shapes: RwLock::new(renderer.vanilla.clone()),
             vanilla: renderer.vanilla.clone(),
             kinds: Vec::new(),
-            pot_patterns: HashMap::new(),
+            pot_patterns: RwLock::default(),
             visibility: None,
             sign_texts: Mutex::default(),
             static_geometry: Mutex::default(),
@@ -5180,3 +5313,33 @@ mod tests {
 #[cfg(test)]
 #[path = "block_entity_render_tests.rs"]
 mod cache_behavior_tests;
+
+/// Each sherd item's side texture: the `provides_pottery_pattern` of its default components,
+/// looked up in the world's `decorated_pot_pattern` registry by `asset_of` (the pattern's
+/// `asset_id`), as `Sheets.DECORATED_POT_MAPPER` maps `DecoratedPotPatterns` to
+/// `<namespace>:entity/decorated_pot/<path>` (the `minecraft` namespace stays implicit). An
+/// item whose pattern the registry does not hold keeps the blank side.
+pub fn pot_pattern_textures(
+    defaults: &sunrise_world::item_defaults::ItemDefaults,
+    asset_of: impl Fn(&str) -> Option<String>,
+) -> HashMap<String, String> {
+    defaults
+        .entries()
+        .iter()
+        .filter_map(|(item, components)| {
+            let pattern = components["minecraft:provides_pottery_pattern"].as_str()?;
+            let pattern = if pattern.contains(':') {
+                pattern.to_owned()
+            } else {
+                format!("minecraft:{pattern}")
+            };
+            let asset = asset_of(&pattern)?;
+            let texture = match asset.split_once(':') {
+                Some(("minecraft", path)) => format!("entity/decorated_pot/{path}"),
+                Some((namespace, path)) => format!("{namespace}:entity/decorated_pot/{path}"),
+                None => format!("entity/decorated_pot/{asset}"),
+            };
+            Some((item.clone(), texture))
+        })
+        .collect()
+}

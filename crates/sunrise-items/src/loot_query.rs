@@ -212,7 +212,7 @@ impl Items {
         state: BlockStateId,
         interacting: Option<crate::items::EntityTarget<'_>>,
         held: Option<&ItemStack>,
-        location: Option<&dyn Fn(&Value) -> Option<bool>>,
+        location: Option<sunrise_world::loot::LootLocation<'_>>,
         random: &mut impl RandomSource,
         sequences: &mut crate::random_sequences::RandomSequences,
         seed: i64,

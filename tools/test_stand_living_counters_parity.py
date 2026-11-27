@@ -4,7 +4,7 @@
 Runs VanillaCommandExecOracle for the `armor stand living counters` group through
 tools/test_command_exec_parity.py (cached by tools/parity_shim.py), writes the witness JSON
 and meta.json into .local/witness/<version>/stand_living_counters/, then runs
-game::commands::data::stand_living_tests::an_armor_stand_ticks_its_living_counters through
+game::server_side::commands::data::stand_living_tests::an_armor_stand_ticks_its_living_counters through
 lab.parity_fixtures() with SUNRISE_STAND_LIVING_COUNTERS_WITNESS.
 """
 import argparse
@@ -14,15 +14,13 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import command_exec_corpus as corpus_module, lab
-except ImportError:
-    import command_exec_corpus as corpus_module
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import command_exec_corpus as corpus_module, lab
 
 WITNESS_ENV = 'SUNRISE_STAND_LIVING_COUNTERS_WITNESS'
 WITNESS_NAME = 'stand_living_counters.json'
-TEST = 'game::commands::data::stand_living_tests::an_armor_stand_ticks_its_living_counters'
+TEST = 'game::server_side::commands::data::stand_living_tests::an_armor_stand_ticks_its_living_counters'
 ORACLE_PATH = 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCommandExecOracle.java'
 
 

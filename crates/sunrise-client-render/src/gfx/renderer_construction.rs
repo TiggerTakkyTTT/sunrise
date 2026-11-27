@@ -479,9 +479,8 @@ impl Renderer {
             &terrain_buffers,
             wgpu::Face::Back,
         );
-        // The water mirror's camera sees the world from the other side of the plane, and a
-        // mirrored world view's picture is flipped (`world_views::Flipped`): each turns the
-        // winding round, so their terrain culls the front.
+        // A mirrored world view's picture is flipped (`world_views::Flipped`), which turns the
+        // winding round, so its terrain culls the front.
         let front = |label, fragment, blend| {
             pipeline(
                 label,
@@ -495,7 +494,6 @@ impl Renderer {
                 blend,
             )
         };
-        let solid_mirror = front("Terrain solid (mirrored)", "fs_solid_mirror", None);
         let flipped = solid_in(
             &layout,
             "Terrain solid (flipped)",
@@ -723,12 +721,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mirror_globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Water mirror globals"),
-            size: std::mem::size_of::<Globals>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let prepared = match prepared {
             Some(prepared) => prepared.resplit(layers, split),
             None => PreparedTextures::with_split(
@@ -931,17 +923,6 @@ impl Renderer {
             &lightmap_sampler,
             &emission_stats.view,
         );
-        let mirror_group = terrain_group(
-            &device,
-            "Water mirror resources",
-            &bindings,
-            &mirror_globals,
-            &sprite_views,
-            &sprite_sampler,
-            &lightmap_view,
-            &lightmap_sampler,
-            &emission_stats.view,
-        );
         let index_quads = 1 << 16;
         let indices = Self::quad_indices(&device, index_quads);
         let instance_capacity = 4096;
@@ -1064,6 +1045,7 @@ impl Renderer {
             &atlas_view,
             &glint_view,
             &glint_armor_view,
+            &lightmap_view,
             &glint_sampler,
             hud_coverage,
             hud_pages.map_or_else(Vec::new, |atlas| {
@@ -1075,6 +1057,10 @@ impl Renderer {
             }),
         )?;
         hud.atlas_texture = Some(atlas.clone());
+        // On the same device the previous renderer's dynamic textures are still valid.
+        if let Some(previous) = previous {
+            hud.share_dynamic(previous.hud.dynamic().clone());
+        }
         let entity_step = crate::spans::startup::step("renderer.entity_pipelines");
         let entity_shader = kept.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Sunrise entities"),
@@ -1152,6 +1138,14 @@ impl Renderer {
             })
         };
         let entity_group = entity_group_for(&atlas_view);
+        let dynamic_entity = dynamic_entity::DynamicEntity::new(
+            &device,
+            entity_bindings.clone(),
+            globals.clone(),
+            (lightmap_view.clone(), lightmap_sampler.clone()),
+            (glint_view.clone(), glint_sampler.clone()),
+            glint_armor_view.clone(),
+        );
         let screen_page_groups = hud
             .atlas_page_views()
             .map(|view| view.map(entity_group_for))
@@ -1612,28 +1606,7 @@ impl Renderer {
                 multiview_mask: None,
                 cache: None,
             });
-        // RenderPipelines.ENERGY_SWIRL: BlendFunction.ADDITIVE (one, one), no culling; no depth
-        // writes either: vanilla sorts the quads far to near, so every face passes the test.
-        let one_one = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let energy_swirl_pipeline = entity_pipeline_with(EntityPipelineOptions {
-            label: "Energy swirls",
-            cull_mode: None,
-            depth_write: false,
-            compare: wgpu::CompareFunction::GreaterEqual,
-            bias: Default::default(),
-            blend: wgpu::BlendState {
-                color: one_one,
-                alpha: one_one,
-            },
-            clouds: false,
-            vertex: "vs_entity",
-            fragment: "fs_energy_swirl",
-            write_mask: wgpu::ColorWrites::ALL,
-        });
+        let energy_swirl_pipeline = entity_pipeline_with(energy_swirl_options(false));
         // HDR output's mark on light-giving particles (entity.wgsl fs_hdr_mark).
         let hdr_mark_pipeline = entity_pipeline_with(EntityPipelineOptions {
             label: "HDR particle mark",
@@ -2133,7 +2106,7 @@ impl Renderer {
         // With flat draws' page groups the per-section solid draws read their vertices from
         // the page too (`Flat::page_group`), in either layout of the solid quads
         // (`mesher::packed`): only the origins stay a vertex buffer, at slot 1.
-        let (solid, solid_opaque, solid_cutout, solid_mirror, flipped) = match &flat {
+        let (solid, solid_opaque, solid_cutout, flipped) = match &flat {
             Some(f) => {
                 let pulled_layout = kept.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("Sunrise terrain layout (pulled)"),
@@ -2159,22 +2132,10 @@ impl Renderer {
                         "fs_solid",
                         back,
                     ),
-                    pipeline_in(
-                        &pulled_layout,
-                        "Terrain solid (mirrored)",
-                        "vs_section",
-                        "fs_solid_mirror",
-                        &origins,
-                        tri,
-                        Some(front),
-                        true,
-                        true,
-                        None,
-                    ),
                     solid("Terrain solid (flipped)", "vs_section", "fs_solid", front),
                 )
             }
-            None => (solid, solid_opaque, solid_cutout, solid_mirror, flipped),
+            None => (solid, solid_opaque, solid_cutout, flipped),
         };
         // The solid quads in the compact layout where every pass reads it; the first world
         // frames settle it for the picked pack (`follow_packed_layout`).
@@ -2320,6 +2281,22 @@ impl Renderer {
         let core_particles =
             core_particles::CoreParticles::new(&device, &queue, (frame_format, linear_light));
         let views = world_views::Kept::new(flipped, translucent_flipped, entity_pipeline_with);
+        let mod_gpu = mod_gpu::ModGpuResources::new(
+            adapter.clone(),
+            device.clone(),
+            queue.clone(),
+            hud.dynamic().clone(),
+            mod_gpu::ModFrameState {
+                entity_atlas: atlas_view.clone(),
+                lightmap: lightmap_view.clone(),
+                world_depth: depth.clone(),
+                entity_quad_capacity: EntityQuadCapacity::from_limits(
+                    &device.limits(),
+                    entity_skin.is_some(),
+                ),
+                pack_iris: false,
+            },
+        );
         Ok(Self {
             display: None,
             reading: display,
@@ -2394,10 +2371,6 @@ impl Renderer {
             debug_line_capacity: 4096,
             crosshair_group,
             crosshair_globals,
-            solid_mirror,
-            mirror_globals,
-            mirror_group,
-            mirror: None,
             world_views: views,
             world_view_side: max_side,
             entity_pipeline,
@@ -2406,6 +2379,7 @@ impl Renderer {
             particle_pipelines,
             explicit_opaque_particles: Default::default(),
             explicit_translucent_particles: Default::default(),
+            explicit_additive_particles: Default::default(),
             static_entity_pipeline,
             hdr_mark_pipeline,
             hdr_entity_mark_pipeline,
@@ -2430,6 +2404,10 @@ impl Renderer {
             lightning: lightning::Renderer::new(),
             see_through_pipeline,
             world_primitives: Some(world_primitives),
+            mod_gpu,
+            transient_targets: std::sync::Mutex::new(
+                mod_frame_graph::TransientTargetPool::default(),
+            ),
             text_polygon_offset_pipeline,
             world_text_pipeline,
             text_mark_pipelines,
@@ -2473,6 +2451,7 @@ impl Renderer {
             static_entity_indices,
             static_entity_index_quads,
             entity_batch: EntityBatch::default(),
+            dynamic_entity,
             entity_order: entity_skin::OrdinaryOrder::default(),
             entity_skin,
             group,
@@ -2568,8 +2547,6 @@ impl Renderer {
             newest_upload: None,
             newest_lod_fade: None,
             block_entity_revision: next_block_entity_revision(),
-            light_blocks: Default::default(),
-            light_revision: 0,
             occlusion: occlusion::Occlusion::new(crate::chunk::MIN_Y, crate::chunk::HEIGHT / 16),
             layout: crate::chunk::ColumnLayout::VANILLA,
             world_post,
@@ -2583,12 +2560,11 @@ impl Renderer {
             auto_off_since: None,
             // Nothing is presented as HDR yet: `update_output` applies the settings.
             output: output::resolve_output(settings, output_caps, display, frame, false),
-            frame_kept_logged: false,
             hdr_marker: None,
             hdr_driver,
             pack_post: None,
             pack_loading: None,
-            native: None,
+            pack_generation: 0,
             pass_timing: false,
             pass_detail: false,
             pass_timing_gap: std::time::Duration::ZERO,
@@ -2637,6 +2613,7 @@ impl Renderer {
             started: Instant::now(),
             screenshot: None,
             screenshot_result: None,
+            pack_hdr: None,
             screenshot_readbacks: screenshot_readback::Readbacks::default(),
             screenshot_quality: 1,
             screenshot_halvings: 0,

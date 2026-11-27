@@ -2,13 +2,12 @@
 """Compare the living model's upright and upside-down Y transform bit-for-bit."""
 from itertools import product
 
-try:
-    from . import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base
-except ImportError:
-    import lab
-    import oracle_harness as harness
-    import test_model_baking_parity as baking
-    import test_rust_parity as base
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base
 
 
 def main():

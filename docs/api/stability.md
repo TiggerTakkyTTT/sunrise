@@ -45,8 +45,8 @@ Every part of an API has one level, shown in its reference and its surface page.
 
 - **Promotion.** Experimental → preview when it has what the table asks. Preview → stable when real users (a published
   mod, a host's script, an agent's tool) used it for a whole line and nothing broke. The maintainers' orchestrator
-  proposes the promotion with the evidence (the compatibility tests, the complete docs, that line of use) and Ludovic
-  approves it.
+  proposes the promotion with the evidence (the compatibility tests, the complete docs, that line of use) and the
+  maintainers approve it.
 - **Sunrise-only by design.** An API is stable only for what Sunrise itself does; a vanilla concept it exposes (a block
   id, a command, a `server.properties` key) changes when vanilla changes it, with a version port
   ([version-ports.md](../version-ports.md)), and the changelog says so.
@@ -92,8 +92,6 @@ Deprecations and breaking changes are in bold. The release notes of the game rel
 | `cargo sunrise-mod` (`new`, `build`, `run`, `check`) | preview | none yet (unversioned) |
 | `cargo sunrise-mod native-build`: the plan, its events and exit codes ([08-native-build.md](../modding/src/reference/sdk/08-native-build.md)) | experimental | `"contract": 1` |
 | `sunrise-port-pack --json` ([port-pack.md](port-pack.md)) | experimental | `"format": 1` |
-| Shader API | experimental | 0.1 |
-| Shader API 0.2 (linear light) | experimental, behind a switch: `sunrise-shader` checks it, the game draws it only with `SUNRISE_HDR_FRAME=float` set, and the registry doesn't list it | 0.2 |
 | `sunrise-ctl` commands and MCP tools | preview | none yet (unversioned) |
 | The game's own control-socket commands outside `sunrise-ctl`'s table (test hooks) | experimental | |
 | `sunrise-server` commands, `server.toml` | stable | `sunrise-server --version` |

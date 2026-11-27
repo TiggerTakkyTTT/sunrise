@@ -55,7 +55,7 @@ fn the_canonical_enum_encoding_has_a_new_negotiated_fingerprint() {
 #[test]
 fn both_codecs_of_a_typed_body_refuse_excess_allocation_before_reserving() {
     // One byte per None in the body, but a Vec entry large enough to cross the
-    // allocation budget. Exactly 4096 entries meets the distinct collection cap.
+    // allocation budget: 4096 entries of 2049 bytes pass 8 MiB.
     type Wide = Vec<Option<[u8; 2048]>>;
     let mut bytes = vec![0, 0x10, 0, 0];
     bytes.resize(4 + 4096, 0);
@@ -64,6 +64,25 @@ fn both_codecs_of_a_typed_body_refuse_excess_allocation_before_reserving() {
         encode_payload(&vec![None::<[u8; 2048]>; 4096], PAYLOAD_DECODE_BUDGET),
         Err(WireError::Budget)
     );
+}
+
+#[test]
+fn a_zero_width_list_counts_each_entry_as_one_byte_in_both_codecs() {
+    // `()` has no encoded bytes, so its count alone could ask for any length; each entry is
+    // charged one byte against the rest of the body, the same rule as every other list.
+    assert_eq!(
+        decode_payload::<Vec<()>>(&[3, 0, 0, 0]),
+        Err(WireError::Length)
+    );
+    assert_eq!(
+        encode_payload(&vec![(); 3], PAYLOAD_DECODE_BUDGET),
+        Err(WireError::Length)
+    );
+    // Followed by three bytes, the same count fits in both codecs.
+    let value = (vec![(); 3], [1u8, 2, 3]);
+    let body = encode_payload(&value, PAYLOAD_DECODE_BUDGET).unwrap();
+    assert_eq!(body, [3, 0, 0, 0, 1, 2, 3]);
+    assert_eq!(decode_payload(&body), Ok(value));
 }
 
 #[test]
@@ -302,26 +321,25 @@ fn writer_resets_do_not_refund_spent_payload_budget() {
 fn arc_counts_are_charged_even_for_zero_width_values() {
     use std::sync::Arc;
 
-    type Rows = Vec<Vec<Arc<()>>>;
+    // The trailing 4096 bytes are what lets each row's count of zero-width entries through.
+    type Rows = (Vec<Vec<Arc<()>>>, [u8; 4096]);
     // Sharing here keeps the fixture cheap; the receiver constructs a new Arc per entry.
     let shared = Arc::new(());
     let row = vec![shared; 4096];
     // Each decoded row retains 4096 handles and two refcounts per handle: 98,304 bytes on
     // 64-bit, although the encoded row is only its 4-byte length.
-    let rows = vec![row; 100];
+    let rows: Rows = (vec![row; 100], [0; 4096]);
     let mut bytes = vec![100, 0, 0, 0];
     bytes.extend([0, 0x10, 0, 0].repeat(100));
+    bytes.extend([0; 4096]);
     assert_eq!(encode_payload(&rows, bytes.len()), Err(WireError::Budget));
     assert_eq!(decode_payload::<Rows>(&bytes), Err(WireError::Budget));
 
-    assert_eq!(
-        encode_payload(&rows[..2].to_vec(), 12).unwrap(),
-        [2, 0, 0, 0, 0, 0x10, 0, 0, 0, 0x10, 0, 0]
-    );
-    assert_eq!(
-        decode_payload::<Rows>(&[2, 0, 0, 0, 0, 0x10, 0, 0, 0, 0x10, 0, 0]).unwrap(),
-        rows[..2]
-    );
+    let two: Rows = (rows.0[..2].to_vec(), [0; 4096]);
+    let mut body = vec![2, 0, 0, 0, 0, 0x10, 0, 0, 0, 0x10, 0, 0];
+    body.extend([0; 4096]);
+    assert_eq!(encode_payload(&two, body.len()).unwrap(), body);
+    assert_eq!(decode_payload::<Rows>(&body).unwrap(), two);
 }
 
 #[test]

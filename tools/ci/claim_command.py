@@ -40,8 +40,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import nightly_set as ns  # noqa: E402  (the same trusted reviewers and owner)
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from tools.ci import nightly_set as ns  # noqa: E402  (the same trusted reviewers and owner)
 
 PREFIX = "🤖 Agent: "
 STALE = timedelta(days=5)

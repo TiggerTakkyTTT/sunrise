@@ -243,7 +243,7 @@ fn valid_and_malformed_wire_bodies_are_handled_in_both_directions() {
             .handler("test:labelled", PayloadProtocol::Play, direction)
             .unwrap();
         for body in [
-            // 4097 labels, one past the list bound.
+            // 4097 labels of at least 4 bytes each, with no bytes left to hold them.
             vec![7, 0, 0, 0, 1, 0x10, 0, 0],
             // Each next link adds an option and a box to the depth.
             nested(33),
@@ -463,4 +463,49 @@ fn call_owned_work_is_disposed_under_the_receiving_registration() {
         assert!(!ran.load(Ordering::Relaxed));
         assert!(attributed_drop.load(Ordering::Relaxed));
     }
+}
+
+#[test]
+fn a_million_byte_list_crosses_clientbound_and_a_count_its_bytes_cannot_hold_is_refused() {
+    // Vanilla bounds a list only by its packet: `ByteBufCodecs.collection` has no count
+    // limit of its own, and this body is under `ClientboundCustomPayloadPacket`'s 1,048,576.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let client = seen.clone();
+    let mut registrar = PartRegistrar::new("test");
+    let _token = (&mut registrar as &mut dyn Registrar)
+        .payload_handlers()
+        .registrar("1")
+        .play_to_client_typed(
+            PayloadId("test:sections".into()),
+            move |value: Vec<u8>, _| {
+                client.lock().unwrap().push(value);
+                Ok(())
+            },
+        );
+    let table = frozen(&registrar);
+    let receiver = table
+        .handler(
+            "test:sections",
+            PayloadProtocol::Play,
+            PayloadDirection::ToClient,
+        )
+        .unwrap();
+    let sent: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+    let body = crate::encode_payload(&sent, 1_048_576).unwrap();
+    assert_eq!(body.len(), 4 + 1_000_000);
+    receiver.handle(PayloadBytes(body), &mut Unreached).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [sent]);
+
+    // A count of 2^32 - 1 one-byte entries with three bytes left: refused before reserving.
+    let CallbackFailure::Refused(refused) = receiver
+        .handle(
+            PayloadBytes(vec![0xff, 0xff, 0xff, 0xff, 1, 2, 3]),
+            &mut Unreached,
+        )
+        .unwrap_err()
+    else {
+        panic!("an impossible count did not produce a codec refusal");
+    };
+    assert!(refused.contains("test:sections"), "{refused}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }

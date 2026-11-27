@@ -25,11 +25,11 @@ from pathlib import Path
 import platform
 import random
 import subprocess
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 REASONS = ['NATURAL', 'CHUNK_GENERATION', 'SPAWNER', 'STRUCTURE', 'BREEDING', 'MOB_SUMMONED', 'JOCKEY', 'EVENT',
            'CONVERSION', 'REINFORCEMENT', 'TRIGGERED', 'BUCKET', 'SPAWN_ITEM_USE', 'COMMAND', 'DISPENSER', 'PATROL',
@@ -119,7 +119,7 @@ def main():
     resources = lab.RESOURCES
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaFinalizeSpawnOracle.java'
     sources = [oracle, Path(__file__), lab.ROOT / 'crates/sunrise-client/examples/probe/finalize_spawn_fixture.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/finalize.rs']
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/finalize.rs']
     tested = base.source_hashes([s for s in sources if s.exists()])
     inputs = build / 'inputs.txt'
     cases = corpus()

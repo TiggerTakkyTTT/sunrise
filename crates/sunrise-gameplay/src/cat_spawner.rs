@@ -1,11 +1,11 @@
 //! `CatSpawner`'s clock and its picks that need no level services: where a cat may try to spawn, and whether a village or a hut takes one.
 use crate::custom_spawner::{CustomSpawnerLevel, section, sections_to_village};
-use sunrise_client::chunk_map::ChunkMap;
-use sunrise_client::mobs::{Mob, Species, spawn_rules::Reason};
 use sunrise_core::{
     geometry::Vec3,
     random::{LevelRandom, RandomSource},
 };
+use sunrise_level::chunk_map::ChunkMap;
+use sunrise_sim::mobs::{Mob, Species, spawn_rules::Reason};
 
 const TICK_DELAY: i32 = 1200;
 

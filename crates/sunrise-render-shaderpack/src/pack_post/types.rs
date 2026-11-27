@@ -439,6 +439,9 @@ pub struct Pass {
     pub groups: HashMap<u64, wgpu::BindGroup>,
     /// The same for End portal draws, with `end_portal.png` bound as the atlas.
     pub portal_groups: HashMap<u64, wgpu::BindGroup>,
+    /// The same for a mod's dynamic textures (`Draw::texture`), by texture handle: the revision
+    /// of the texture the groups were made for, and the groups.
+    pub dynamic_groups: HashMap<u64, (u64, HashMap<u64, wgpu::BindGroup>)>,
     /// The same for native terrain quads (`Draw::block_atlas`), with the block atlas bound as
     /// the atlas (`PackPost::block_atlas_group`).
     pub block_atlas_groups: HashMap<u64, wgpu::BindGroup>,
@@ -477,11 +480,12 @@ impl Pass {
         }
     }
 
-    /// Drops every cached bind group of the pass: the plain ones, the End portal ones and the
-    /// block atlas ones, which all name the same buffers.
+    /// Drops every cached bind group of the pass: the plain ones, the End portal ones, the
+    /// dynamic texture ones and the block atlas ones, which all name the same buffers.
     pub fn forget_groups(&mut self) {
         self.groups.clear();
         self.portal_groups.clear();
+        self.dynamic_groups.clear();
         self.block_atlas_groups.clear();
     }
 

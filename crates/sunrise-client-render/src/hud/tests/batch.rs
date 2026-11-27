@@ -168,11 +168,6 @@ fn draw_scope_rollback_restores_the_prior_batch_tail() {
                 height: 1,
                 rgba: vec![255; 4],
             });
-            batch.image_patches.push(dynamic_textures::ImagePatch {
-                origin: [0, 4],
-                size: [1, 1],
-                rgba: Arc::new([255; 4]),
-            });
             batch
                 .inline_profiles
                 .push(Arc::new(serde_json::json!({"name":"scoped"})));
@@ -207,6 +202,30 @@ fn draw_scope_rollback_restores_the_prior_batch_tail() {
     );
     assert!(batch.pictures.is_empty());
     assert!(batch.patches.is_empty());
-    assert!(batch.image_patches.is_empty());
     assert_eq!(batch.inline_profiles, [profile]);
+}
+
+#[test]
+fn an_inline_dynamic_texture_draws_as_its_own_texture_in_the_glyphs_box() {
+    let atlas = HudAtlas::fonts(&Default::default()).unwrap();
+    let mut span = crate::text::Text::literal("\u{fffc}").spans[0].clone();
+    span.style.inline_object = Some(crate::text::InlineObject::Dynamic {
+        id: "demo:star".into(),
+        handle: 7,
+        size: [16, 16],
+        fallback: ":star:".into(),
+    });
+    let mut batch = HudBatch::scratch([320, 240]);
+    batch.text_styled(
+        &atlas,
+        &crate::text::Text::from_spans(vec![span]),
+        10.0,
+        20.0,
+        u32::MAX,
+        false,
+    );
+    let [_, _, w, h] = batch.visible_vertex_bounds(0).unwrap();
+    let side = crate::font::INLINE_OBJECT_SIZE;
+    assert_eq!((w, h), (side, side), "one glyph box");
+    assert_eq!(batch.blends, [(0..6, Blend::Dynamic(7))]);
 }

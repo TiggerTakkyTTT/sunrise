@@ -4,8 +4,11 @@ use sunrise_render_core::entity::QuadSort;
 #[cfg(test)]
 use sunrise_render_core::entity::quad_distance_sq;
 pub use sunrise_render_core::entity::{
-    TEXT_NORMAL_SOLID_OVERLAY, TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
+    ARMOR_GLINT_ONLY_OVERLAY, DYNAMIC_TEXTURE_CUTOUT_OVERLAY, DYNAMIC_TEXTURE_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY, TEXT_NORMAL_SOLID_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY, dynamic_texture_bits,
 };
+pub use sunrise_render_core::entity::{NAME_TAG_OVERLAY, NAME_TAG_SOLID_OVERLAY};
 
 /// Device-derived vertex and index byte capacities governing the combined entity batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,6 +132,12 @@ impl<'a> EntityQuadScope<'a> {
         }
     }
 
+    /// The vertices appended so far, for a caller that appends a run of its own and then
+    /// finishes it with [`Self::retain_valid_since`].
+    pub fn vertices_mut(&mut self) -> &mut Vec<Vertex> {
+        self.vertices
+    }
+
     /// Whether at least one more complete quad fits in this scope's remaining batch budget.
     pub fn has_room(&self) -> bool {
         self.vertices
@@ -217,19 +226,79 @@ pub(super) struct EntityBatchCounts {
 /// (translucent, emissive, eyes and breeze wind entity models). Off, the tag is
 /// ignored and they stay in the first one, in their order.
 /// Sorted still-fluid geometry follows, then the two native world-canvas text materials,
-/// NORMAL and POLYGON_OFFSET, the four native terrain model materials, banner patterns,
-/// glint-only overlays, and solid `POLYGON_OFFSET` and `NORMAL` text
-/// (`SubmitNodeCollection.canRenderAsSolid`).
+/// NORMAL and POLYGON_OFFSET, the four native terrain model materials, then (stored after them,
+/// materials 21 to 23 by index) the three dynamic-texture materials
+/// (`RenderTypes.entitySolid`, `entityCutout`, `entityTranslucent` of a texture), banner patterns,
+/// glint-only overlays, solid `POLYGON_OFFSET` and `NORMAL` text
+/// (`SubmitNodeCollection.canRenderAsSolid`), then a pack-drawn name tag's solid (57) and
+/// translucent (56) copies (materials 24 and 25, stored last).
 /// Material storage order is independent of their draw stages.
-const MATERIALS: usize = 21;
-const _: () = assert!(
-    TEXT_POLYGON_OFFSET_SOLID_OVERLAY != super::EXPLICIT_PARTICLE_OVERLAY
-        && TEXT_POLYGON_OFFSET_SOLID_OVERLAY != GLINT_ONLY_OVERLAY
-        && TEXT_POLYGON_OFFSET_SOLID_OVERLAY != BANNER_PATTERN_OVERLAY
-        && TEXT_NORMAL_SOLID_OVERLAY != super::EXPLICIT_PARTICLE_OVERLAY
-        && TEXT_NORMAL_SOLID_OVERLAY != GLINT_ONLY_OVERLAY
-        && TEXT_NORMAL_SOLID_OVERLAY != BANNER_PATTERN_OVERLAY
-);
+const MATERIALS: usize = 26;
+// A subrange of the energy swirl pass, also drawn by secondary world views.
+const ARMOR_FOIL: usize = MATERIALS;
+/// The dynamic-texture materials, solid, cutout and translucent (`MATERIALS` order).
+pub(super) const DYNAMIC_MATERIALS: std::ops::Range<usize> = 21..24;
+/// A pack-drawn name tag's materials, solid then translucent.
+const NAME_TAG_MATERIALS: std::ops::Range<usize> = 24..26;
+/// Materials stored in [`EntityBatch::combined`] ahead of the dynamic-texture ones.
+const BEFORE_DYNAMIC: usize = 17;
+
+/// The first quad of the dynamic-texture materials in [`EntityBatch::combined`]: the quads of
+/// every material stored ahead of them, whatever is stored after (text, name tags).
+pub(super) fn dynamic_texture_start(materials: &[u32; MATERIALS]) -> u32 {
+    materials[..BEFORE_DYNAMIC].iter().sum()
+}
+/// Every named overlay id (a constant), each listed once: a new named overlay that reuses one of
+/// them fails to build instead of drawing as the other. The codes `entity.wgsl` reads only as
+/// literals (1, 2, 4 to 12, 36) are not listed.
+const _: () = assert!(distinct(&[
+    WATER_MASK_OVERLAY,
+    SHADOW_OVERLAY,
+    TRANSLUCENT_PARTICLE_OVERLAY,
+    TRANSLUCENT_ITEM_OVERLAY,
+    TRANSLUCENT_GLINT_ITEM_OVERLAY,
+    ENERGY_SWIRL_OVERLAY,
+    TEXT_POLYGON_OFFSET_OVERLAY,
+    DRAGON_RAYS_OVERLAY,
+    DISSOLVE_OVERLAY,
+    WORLD_TEXT_OVERLAY,
+    WORLD_TEXT_POLYGON_OFFSET_OVERLAY,
+    FLUID_OVERLAY,
+    TERRAIN_MODEL_SOLID_OVERLAY,
+    TERRAIN_MODEL_CUTOUT_OVERLAY,
+    TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY,
+    ADDITIVE_PARTICLE_OVERLAY,
+    TERRAIN_MODEL_TRANSLUCENT_OVERLAY,
+    super::EXPLICIT_PARTICLE_OVERLAY,
+    GLINT_ONLY_OVERLAY,
+    BANNER_PATTERN_OVERLAY,
+    TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
+    TEXT_NORMAL_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_SOLID_OVERLAY,
+    DYNAMIC_TEXTURE_CUTOUT_OVERLAY,
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY,
+    ARMOR_GLINT_ONLY_OVERLAY,
+    NAME_TAG_OVERLAY,
+    NAME_TAG_SOLID_OVERLAY,
+]));
+/// Whether no two of `ids` are equal, and none is a white-flash code (`WHITE_OVERLAY`, 16, to 31).
+const fn distinct(ids: &[u32]) -> bool {
+    let mut i = 0;
+    while i < ids.len() {
+        if ids[i] >= 16 && ids[i] < 32 {
+            return false;
+        }
+        let mut j = i + 1;
+        while j < ids.len() {
+            if ids[i] == ids[j] {
+                return false;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    true
+}
 pub const TERRAIN_MODEL_SOLID_OVERLAY: u32 = 42;
 pub const TERRAIN_MODEL_CUTOUT_OVERLAY: u32 = 43;
 pub const TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY: u32 = 44;
@@ -353,6 +422,12 @@ fn material(layer: u32, oit: bool) -> usize {
         GLINT_ONLY_OVERLAY => return 18,
         TEXT_POLYGON_OFFSET_SOLID_OVERLAY => return 19,
         TEXT_NORMAL_SOLID_OVERLAY => return 20,
+        DYNAMIC_TEXTURE_SOLID_OVERLAY => return DYNAMIC_MATERIALS.start,
+        DYNAMIC_TEXTURE_CUTOUT_OVERLAY => return DYNAMIC_MATERIALS.start + 1,
+        DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY => return DYNAMIC_MATERIALS.start + 2,
+        NAME_TAG_SOLID_OVERLAY => return NAME_TAG_MATERIALS.start,
+        NAME_TAG_OVERLAY => return NAME_TAG_MATERIALS.start + 1,
+        ARMOR_GLINT_ONLY_OVERLAY => return ARMOR_FOIL,
         _ => {}
     }
     if layer & 0xffff == FLUID_OVERLAY {
@@ -381,8 +456,10 @@ pub(crate) struct EntityBatch {
     // Runs of consecutive quads of one material (first quad, quad count): a
     // model's quads share one, so whole runs are copied at once. Cleared each
     // frame, keeping their storage.
-    runs: [Vec<(usize, usize)>; MATERIALS],
+    runs: [Vec<(usize, usize)>; MATERIALS + 1],
     pub(super) combined: Vec<Vertex>,
+    /// Foil-only quads in `combined`, immediately after the energy swirls.
+    pub(super) armor_foil: std::ops::Range<u32>,
     sort: QuadSort,
     /// Additive quads tagged `OIT_ENTITY` that the last `update` moved into the
     /// last material (improved transparency on): the dragon's eyes, which share
@@ -484,7 +561,7 @@ impl EntityBatch {
         for runs in &mut self.runs {
             runs.clear();
         }
-        let mut counts = [0usize; MATERIALS];
+        let mut counts = [0usize; MATERIALS + 1];
         let mut start = 0;
         while start < quads.len() {
             let key = run_key(quads[start][0].layer, oit);
@@ -518,7 +595,16 @@ impl EntityBatch {
                         .extend_from_slice(&entities[first * 4..(first + count) * 4]);
                 }
             }
+            if kind == 5 {
+                let start = self.combined.len() as u32 / 4;
+                for &(first, count) in &self.runs[ARMOR_FOIL] {
+                    self.combined
+                        .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+                }
+                self.armor_foil = start..self.combined.len() as u32 / 4;
+            }
         }
+        counts[5] += counts[ARMOR_FOIL];
         // `RenderTypes.eyes` is blended like the other entities, not added: with
         // improved transparency on, tagged additive quads join the last
         // material, drawn without the additive overlay and the baked shading.
@@ -551,9 +637,21 @@ impl EntityBatch {
         }
         // Native translucent models sort their quads far to near, as `sortOnUpload` does.
         append_sorted(&mut self.sort, &mut self.combined, entities, &self.runs[16]);
-        // Classic `RenderTypes.textPolygonOffset` sorts on upload. `RenderTypes.text`,
-        // banner patterns and glint keep their submission order in either mode.
-        for (kind, runs) in self.runs.iter().enumerate().skip(17) {
+        // Dynamic-texture quads follow the terrain models, before banner patterns: solid and
+        // cutout keep their submission order, translucent ones sort far to near
+        // (`RenderTypes.entityTranslucent` sorts on upload).
+        for runs in &self.runs[DYNAMIC_MATERIALS.start..DYNAMIC_MATERIALS.end - 1] {
+            for &(first, count) in runs {
+                self.combined
+                    .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+            }
+        }
+        let translucent = &self.runs[DYNAMIC_MATERIALS.end - 1];
+        append_sorted(&mut self.sort, &mut self.combined, entities, translucent);
+        // Classic `RenderTypes.textPolygonOffset` sorts on upload. `RenderTypes.text` (solid and
+        // translucent), banner patterns and glint keep their submission order in either mode.
+        let text = BEFORE_DYNAMIC..DYNAMIC_MATERIALS.start;
+        for (kind, runs) in self.runs.iter().enumerate().take(text.end).skip(text.start) {
             if kind == 19 && !oit {
                 append_sorted(&mut self.sort, &mut self.combined, entities, runs);
             } else {
@@ -561,6 +659,13 @@ impl EntityBatch {
                     self.combined
                         .extend_from_slice(&entities[first * 4..(first + count) * 4]);
                 }
+            }
+        }
+        // A pack-drawn name tag's solid then translucent copies, last, in submission order.
+        for runs in &self.runs[NAME_TAG_MATERIALS] {
+            for &(first, count) in runs {
+                self.combined
+                    .extend_from_slice(&entities[first * 4..(first + count) * 4]);
             }
         }
         if self.moved_additive == 0 {
@@ -580,7 +685,7 @@ impl EntityBatch {
         self.combined
             .extend_from_slice(&shadow_only[..shadow_only_admitted.len() * 4]);
         EntityBatchCounts {
-            materials: counts.map(|count| count as u32),
+            materials: std::array::from_fn(|i| counts[i] as u32),
             admitted_entity_vertices,
             additive: additive_admitted.len() as u32 - self.moved_additive,
             hand: hand_admitted.len() as u32,
@@ -664,6 +769,8 @@ mod tests {
             TEXT_POLYGON_OFFSET_OVERLAY,
             TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
             TEXT_NORMAL_SOLID_OVERLAY,
+            NAME_TAG_OVERLAY,
+            NAME_TAG_SOLID_OVERLAY,
             11,
             12,
             OIT_ENTITY,
@@ -820,7 +927,7 @@ mod tests {
         assert_eq!(
             counts,
             [
-                1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 2, 1, 1, 0, 0, 0, 0, 0
+                1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
         let xs: Vec<_> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
@@ -896,7 +1003,7 @@ mod tests {
         assert_eq!(
             batch.update(&entities, &additive, &quad(0, 9.0), &quad(0, 10.0), true),
             [
-                1, 1, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0
+                1, 1, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
         let positions: Vec<_> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
@@ -944,6 +1051,50 @@ mod tests {
         combined.extend_from_slice(&additive[..additive.len() / 4 * 4]);
         combined.extend_from_slice(&hand[..hand.len() / 4 * 4]);
         (combined, counts)
+    }
+
+    #[test]
+    fn dynamic_textures_start_where_they_are_stored_with_name_tags_after_them() {
+        // One quad per layer, in an order that stores differently: each quad's colour names it.
+        let layers = [
+            NAME_TAG_OVERLAY,
+            DYNAMIC_TEXTURE_SOLID_OVERLAY,
+            TEXT_NORMAL_SOLID_OVERLAY,
+            0,
+            NAME_TAG_SOLID_OVERLAY,
+            DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY,
+            BANNER_PATTERN_OVERLAY,
+            TERRAIN_MODEL_SOLID_OVERLAY,
+            DYNAMIC_TEXTURE_CUTOUT_OVERLAY,
+            GLINT_ONLY_OVERLAY,
+            SHADOW_OVERLAY,
+            NAME_TAG_OVERLAY,
+        ];
+        let entities: Vec<Vertex> = layers
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &layer)| {
+                std::iter::repeat_n(
+                    Vertex {
+                        layer,
+                        color: i as u32,
+                        ..geometry(1, false)[0]
+                    },
+                    4,
+                )
+            })
+            .collect();
+        let mut batch = EntityBatch::default();
+        for oit in [false, true] {
+            let counts = batch.update(&entities, &[], &[], &[], oit);
+            let ids: Vec<u32> = batch.combined.iter().step_by(4).map(|v| v.color).collect();
+            // Stored: ordinary (3), shadow (10), terrain model (7), then the dynamic textures
+            // solid (1), cutout (8), translucent (5), then banner (6), glint (9), solid text (2)
+            // and the name tags, solid (4) then translucent (0, 11).
+            assert_eq!(ids, [3, 10, 7, 1, 8, 5, 6, 9, 2, 4, 0, 11]);
+            assert_eq!(dynamic_texture_start(&counts), 3);
+            assert_eq!(counts[DYNAMIC_MATERIALS], [1, 1, 1]);
+        }
     }
 
     fn geometry(quads: usize, mixed: bool) -> Vec<Vertex> {
@@ -1023,7 +1174,7 @@ mod tests {
         let mut batch = EntityBatch::default();
         for (oit, want) in [(false, [2, 3, 1, 4, 5]), (true, [1, 2, 3, 4, 5])] {
             let counts = batch.update(&entities, &[], &[], &[], oit);
-            assert_eq!(counts[19..], [3, 2]);
+            assert_eq!(counts[19..21], [3, 2]);
             assert_eq!(counts[9], 0);
             let ids: Vec<u32> = batch.combined.iter().step_by(4).map(|v| v.color).collect();
             assert_eq!(ids, want);
@@ -1141,7 +1292,7 @@ mod tests {
         assert_eq!(
             counts,
             [
-                4, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                4, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
         let xs: Vec<f32> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();
@@ -1151,7 +1302,7 @@ mod tests {
         assert_eq!(
             counts,
             [
-                2, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                2, 0, 0, 0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
         let xs: Vec<f32> = batch.combined.iter().step_by(4).map(|v| v.pos[0]).collect();

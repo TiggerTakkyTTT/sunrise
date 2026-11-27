@@ -566,6 +566,12 @@ impl StatusBarHeights {
     pub fn heights(&self) -> [i32; 2] {
         [self.left.height, self.right.height]
     }
+    /// Assigns both columns, as a NeoForge layer assigns `Hud.leftHeight` and `rightHeight`:
+    /// rows that draw afterwards start from these heights.
+    pub fn set(&mut self, [left, right]: [i32; 2]) {
+        self.left.height = left;
+        self.right.height = right;
+    }
 }
 
 struct StatusColumn {
@@ -1057,13 +1063,13 @@ pub fn paint_player_face(
     flip: bool,
     color: u32,
 ) -> bool {
-    let Some(&rect) = atlas.blit_rect(skin) else {
+    let Some(&rect) = atlas.texture_rect(skin) else {
         return false;
     };
     for (uv, src) in crate::tab_list::face_blits(hat, flip) {
         ResolvedGuiQuad { rect, dst, color }.paint_blit(
             batch,
-            atlas.blit_atlas_page(skin),
+            atlas.texture_atlas_page(skin),
             uv,
             src,
             crate::tab_list::SKIN_TEX,
@@ -1153,7 +1159,7 @@ fn paint_with<'a>(
                 tex,
                 color,
             } => {
-                let Some(rect) = atlas.blit_rect(texture.as_ref()).copied() else {
+                let Some(rect) = atlas.texture_rect(texture.as_ref()).copied() else {
                     continue;
                 };
                 ResolvedGuiQuad {
@@ -1163,7 +1169,7 @@ fn paint_with<'a>(
                 }
                 .paint_blit(
                     batch,
-                    atlas.blit_atlas_page(texture.as_ref()),
+                    atlas.texture_atlas_page(texture.as_ref()),
                     *uv,
                     *src,
                     *tex,

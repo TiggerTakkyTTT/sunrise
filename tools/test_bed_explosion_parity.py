@@ -18,14 +18,10 @@ import subprocess
 import sys
 import difflib
 
-try:
-    from . import lab, test_rust_parity as base, test_server_knockback_parity as kb
-    from .test_locator_bar_parity import generate_world
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_server_knockback_parity as kb
-    from test_locator_bar_parity import generate_world
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_server_knockback_parity as kb
+from tools.test_locator_bar_parity import generate_world
 
 NAME = 'bed-explosion-parity'
 FACINGS = {'north': (0, -1), 'south': (0, 1), 'west': (-1, 0), 'east': (1, 0)}

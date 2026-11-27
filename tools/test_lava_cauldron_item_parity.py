@@ -9,11 +9,11 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 
 CASES = [
@@ -54,7 +54,7 @@ def main():
     lock, jars, libraries = base.verify_artifacts()
     java = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity'
     sources = [Path(__file__), java / 'VanillaLavaCauldronItemOracle.java', java / 'ParityData.java',
-               lab.ROOT / 'crates/sunrise-client/src/entities.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/entities.rs',
                lab.ROOT / 'crates/sunrise-client/examples/probe/main.rs',
                lab.ROOT / 'crates/sunrise-client/examples/probe/lava_cauldron_item_fixture.rs',
                lab.ROOT / 'Cargo.lock']

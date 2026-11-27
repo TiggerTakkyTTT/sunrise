@@ -9,12 +9,15 @@ pub(crate) mod client_executor;
 pub mod camera;
 pub(crate) mod client_reload;
 pub(crate) mod client_session;
+pub(crate) mod compute_pipeline;
 pub(crate) mod debug_entries;
 pub(crate) mod dynamic_texture;
 pub(crate) mod entity_layers;
 pub(crate) mod entity_render_attachments;
 pub(crate) mod entity_renderers;
 pub(crate) mod item_extensions;
+pub(crate) mod stock_layers;
+pub(crate) mod storage_buffer;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod first_person;
@@ -22,6 +25,7 @@ pub(crate) mod fluid_draw;
 // hidden: a module of game-side types; mods use their re-exports
 #[doc(hidden)]
 pub mod fog;
+pub(crate) mod frame_graph;
 pub(crate) mod gui_canvas;
 pub(crate) mod gui_clip;
 pub(crate) mod gui_entity;
@@ -33,6 +37,7 @@ pub mod hud_layout;
 // hidden: module of API-owned HUD values; mods use the re-export
 #[doc(hidden)]
 pub mod hud_mode;
+pub(crate) mod indirect_draw;
 pub(crate) mod key_mapping;
 pub(crate) mod keyframe_animation;
 pub(crate) mod menu_screen;

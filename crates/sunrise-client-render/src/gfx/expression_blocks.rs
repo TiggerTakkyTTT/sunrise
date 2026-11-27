@@ -4,7 +4,7 @@
 //! (`shader_modifiers`, wiki "Expression Uniforms on Any Shader"), resolved when the shader
 //! loaded (`polytone_post::ShaderModifiers::resolve`), each a block of one float holding its
 //! program's value this frame. The lightmap, sky, stars and block outline pipelines lay theirs out
-//! with this, and the GUI's, the world's and the see-through text pipelines too, through
+//! with this, and the text pipelines too, through
 //! [`bindings`] and [`sampler_bindings`]; any other pack core shader pipeline can.
 
 use crate::polytone_post::ExpressionUniform;
@@ -15,9 +15,9 @@ pub const LINES: [&str; 1] = ["minecraft:core/rendertype_lines"];
 /// The sky disc's and the stars' shaders.
 pub const SKY: [&str; 1] = ["minecraft:core/sky"];
 pub const STARS: [&str; 1] = ["minecraft:core/stars"];
-/// The text's shader, one for the GUI's, the world's and the see-through text
-/// (`polytone/shader_modifiers/core/text.json`). Each of those three pipelines binds its blocks
-/// with [`bindings`] and its samplers with [`sampler_bindings`].
+/// The text's shader, one for the GUI's, the world's, the see-through text and Improved
+/// Transparency's stages (`polytone/shader_modifiers/core/text.json`). Each of those pipelines
+/// binds its blocks with [`bindings`] and its samplers with [`sampler_bindings`].
 pub(crate) const TEXT: [&str; 1] = ["minecraft:core/text"];
 
 /// An expression uniform's block: one float, as std140 rounds a block.
@@ -101,7 +101,64 @@ pub(crate) fn sampler_bindings<'a>(
     (layout, group)
 }
 
-/// Vanilla's blocks a stage of `program` reads: binding, offset, size and the stages reading it.
+/// The bytes each vanilla block has in a pipeline's buffer: from its [`VANILLA_OFFSETS`] to the
+/// next.
+pub(crate) const VANILLA_SLOT: u64 = 256;
+
+/// Vanilla's block `index` (`core_shader::BLOCKS`' order) as `program` binds it: vanilla's size,
+/// or the size its stages declare when larger (an older vanilla's block with more members, which
+/// vanilla's builder takes: it checks a descriptor's name, type and dimension, not a block's
+/// size). The bytes past vanilla's members read zero; [`oversized_block`] tells one that doesn't
+/// fit its slot.
+pub(crate) fn vanilla_block_size(program: &Translated, index: usize) -> u64 {
+    block_size(program, index as u32, VANILLA_SIZES[index])
+}
+
+/// The block at `binding` as `program` binds it: `size` (what the pass writes), or the size its
+/// stages declare when larger, the bytes past the pass's reading zero ([`vanilla_block_size`]).
+pub(crate) fn block_size(program: &Translated, binding: u32, size: u64) -> u64 {
+    size.max(program.declared_size(binding))
+}
+
+/// A vanilla block a program declares larger than its slot ([`VANILLA_SLOT`]): binding it would
+/// reach the next block, so the program draws natively and the pack stays, as before such a
+/// block failed the load (a whole buffer laid out from the program's sizes would fit it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OversizedBlock {
+    pub block: &'static str,
+    pub size: u64,
+}
+
+impl std::fmt::Display for OversizedBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "its {} block is {} bytes, past the {VANILLA_SLOT} Sunrise binds it in",
+            self.block, self.size
+        )
+    }
+}
+
+/// The first of vanilla's blocks, then of the pass's `own` (`LightmapInfo`, `CloudInfo`, each in
+/// a slot as wide), that `program` declares larger than its slot.
+pub(crate) fn oversized_block(
+    program: &Translated,
+    own: &[&'static str],
+) -> Option<OversizedBlock> {
+    let own = own.iter().filter_map(|&block| {
+        let i = program.other.iter().position(|n| n == block)?;
+        Some((block, program.other_binding(i)))
+    });
+    (crate::core_shader::BLOCKS.iter().copied())
+        .chain(own)
+        .find_map(|(block, binding)| {
+            let size = program.declared_size(binding);
+            (size > VANILLA_SLOT).then_some(OversizedBlock { block, size })
+        })
+}
+
+/// Vanilla's blocks a stage of `program` reads: binding, offset, size ([`vanilla_block_size`])
+/// and the stages reading it.
 pub(crate) fn vanilla_blocks(program: &Translated) -> Vec<(u32, u64, u64, wgpu::ShaderStages)> {
     (0..4u32)
         .map(|b| {
@@ -109,7 +166,7 @@ pub(crate) fn vanilla_blocks(program: &Translated) -> Vec<(u32, u64, u64, wgpu::
             (
                 b,
                 VANILLA_OFFSETS[i],
-                VANILLA_SIZES[i],
+                vanilla_block_size(program, i),
                 program.stages_reading(b),
             )
         })

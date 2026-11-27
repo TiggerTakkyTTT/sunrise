@@ -4,10 +4,12 @@ import json
 import random
 import struct
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 
 def corpus():
@@ -68,7 +70,7 @@ def main():
         "relative-delta/rotate-delta combination. World simulation, connection "
         "scheduling and live anticheat behaviour are outside this harness.",
         sources=[lab.ROOT / "crates/sunrise-client/src/player_sync.rs",
-                 lab.ROOT / "crates/sunrise-client/src/game/network/remote/mod.rs",
+                 lab.ROOT / "crates/sunrise-gameplay-common/src/game/network/remote/mod.rs",
                  lab.ROOT / "crates/sunrise-client/src/net.rs"])
 
 

@@ -18,6 +18,16 @@ pub trait ClientViewClientHost {
     /// that is hidden, canceled or replaced adds nothing. None outside the HUD layer pass.
     fn gui_status_heights(&self) -> Option<[i32; 2]>;
     /// Side: client.
+    /// Sets the HUD status columns' heights, left and right in GUI pixels above the bottom
+    /// edge, as assigning NeoForge's `Hud.leftHeight` and `rightHeight` does: the vanilla rows
+    /// that draw after the current layer start from them, and add their own height on top. A
+    /// layer placed `Below` `minecraft:vehicle_health` that raises the right column moves the
+    /// mount's hearts and the air row up; a wrapper that sets them before `draw_previous` moves
+    /// the row it wraps. Rows already drawn stay where they are, and both columns go back to 39
+    /// at the start of each HUD pass. `gui_status_heights` reads the new heights at once. False,
+    /// setting nothing, outside the HUD layer pass.
+    fn set_gui_status_heights(&self, heights: [i32; 2]) -> bool;
+    /// Side: client.
     /// Read effective HUD visibility independently of first-person hands.
     fn hud_mode(&self) -> HudMode;
     /// Side: client.
@@ -131,9 +141,26 @@ pub trait ClientViewClientHost {
     /// controls no such vehicle (a second passenger included), or outside a client world.
     fn jumpable_vehicle(&self) -> Option<EntityRef>;
     /// Side: client.
+    /// How far the local player has charged its mount's jump (`LocalPlayer.getJumpRidingScale`),
+    /// 0.0 to 1.0: the value the HUD's jump bar draws and `Hud.willPrioritizeJumpInfo` tests
+    /// (`> 0`). It rises while the jump key is held on a [`Self::jumpable_vehicle`] and drops
+    /// back to 0.0 when the jump is released and its cooldown runs out. 0.0 once a client tick
+    /// has run with the player controlling no mount that can jump (that tick resets it), and
+    /// outside a client world. Read-only: the jump key
+    /// drives it, and the server checks the jump it is sent.
+    fn jump_riding_scale(&self) -> f32;
+    /// Side: client.
     /// Whether the server tracks any waypoint for this client
     /// (`ClientWaypointManager.hasWaypoints`), the waypoints the locator bar draws. The HUD's
     /// contextual bar reads the same fact. Which bar the HUD shows is not exposed: vanilla's
     /// `Hud.nextContextualInfoState` is private.
     fn has_waypoints(&self) -> bool;
+    /// Side: client.
+    /// The ticks left before the local player's next block starts breaking
+    /// (`MultiPlayerGameMode.destroyDelay`): 5 after a block breaks or creative's instant break
+    /// starts, then one less for each tick the attack key keeps continuing the destroy
+    /// (`continueDestroyBlock`), until 0 lets the next block start. While it is above 0 a
+    /// held attack starts no break. Read-only: vanilla has no public setter. 0 outside a
+    /// client world.
+    fn mining_destroy_delay(&self) -> u32;
 }

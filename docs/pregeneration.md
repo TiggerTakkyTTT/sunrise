@@ -9,7 +9,7 @@ It is off until you turn it on, so `/help` and the command tree stay vanilla's:
 
 - a server: `sunrise-pregen = true` under `[properties]` in `server.toml` (or `sunrise-pregen=true` in a
   vanilla folder's `server.properties`), then restart it;
-- single player and LAN: turn on **Options → Sunrise Settings... → Extras... → Chunk pregeneration**.
+- single player and LAN: turn on **Options → Sunrise Settings... → Gameplay → Chunk pregeneration**.
   The choice is saved in `sunrise-extras.txt` and applies immediately, including in an open world.
   Cheats must still be enabled. `--pregen` also works and keeps the command enabled for that run,
   even when the saved switch is off.
@@ -35,7 +35,7 @@ start it again and the chunks already saved load instead of generating.
 
 ## How it works
 
-- `sunrise_client::pregen::Pregen` cuts the area into strips at most 256 chunks wide and sweeps each
+- `sunrise_sim::pregen::Pregen` cuts the area into strips at most 256 chunks wide and sweeps each
   north to south with a band of rows (`streaming::Band`) holding about a thousand chunks.
 - Streaming treats the band like a player's area: it generates its chunks and the rings around them that
   decoration and light need, and lights its own chunks. Once every chunk of the band's first row is lit

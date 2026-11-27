@@ -65,10 +65,20 @@ trees, including ingredients and recipe slot displays.
 
 Typed payloads use the same encoding with their own limits. They count lists, present
 options, boxes, shared pointers, NBT containers and explicit recursion, not derived record
-frames, against `PAYLOAD_MAX_DEPTH`. String and list lengths are bounded by
-`PAYLOAD_MAX_STRING_BYTES` and `PAYLOAD_MAX_LIST_ENTRIES`. The reader and writer both
+frames, against `PAYLOAD_MAX_DEPTH`. String lengths are bounded by `PAYLOAD_MAX_STRING_BYTES`.
+A list has no count limit of its own, as in vanilla (`ByteBufCodecs.collection`): its count is
+refused when its entries, at `Wire::MIN` bytes each and never less than one, could not fit in
+the rest of the body, so a hostile count never forces a large allocation. The reader and writer both
 charge `PAYLOAD_DECODE_BUDGET` for decoded storage, separately from the 8 MiB body cap.
 A failed encode is never queued.
+
+A typed payload is a registered payload, so like vanilla's registered payloads it is bounded by
+the connection's frames: 2,097,151 bytes per frame (`Varint21FrameDecoder`) and 8,388,608
+bytes uncompressed (`CompressionDecoder.MAXIMUM_UNCOMPRESSED_LENGTH`), with its body within the
+8 MiB `PAYLOAD_DECODE_BUDGET`. A raw channel keeps vanilla's limit for a channel the receiver
+does not know, the `MAX_PAYLOAD_SIZE` that `DiscardedPayload.codec` is given: 1,048,576 bytes
+clientbound (`ClientboundCustomPayloadPacket`) and 32,767 bytes serverbound
+(`ServerboundCustomPayloadPacket`).
 
 Ordinary Wire keeps the NBT `Tag` limit of **512** containers and the `Text` limit of
 **512** nested components. Both use stack-independent iterative codecs directly over

@@ -1,9 +1,20 @@
 //! LivingEntity walking, climbing and airborne velocity integration.
 use crate::move_gate::MoveGate;
+use crate::travel::TravelMode;
 use sunrise_core::{
     geometry::{Vec3, trig},
     position::BlockPos,
 };
+
+/// What a travel branch's own `Entity.move(SELF)` made, as `living_travel_moved` reports it
+/// (#5074).
+#[derive(Clone, Copy, Debug)]
+pub struct SelfMove {
+    /// The displacement the move made; zero when `entity_move` vetoed it.
+    pub moved: Vec3,
+    /// The ground flag the body entered the move with.
+    pub on_ground_before: bool,
+}
 
 pub trait LivingAirWorld {
     type Error;
@@ -25,7 +36,11 @@ pub trait LivingAirWorld {
     /// Bind to Entity.move(SELF, movement), including collision and landing.
     /// The `gate` is the invocation's move gate (#2414): the caller received
     /// it armed with the decision, and the mover applies what it decided.
-    fn move_self(&mut self, gate: &mut MoveGate, movement: Vec3) -> Result<(), Self::Error>;
+    fn move_self(&mut self, gate: &mut MoveGate, movement: Vec3) -> Result<SelfMove, Self::Error>;
+    /// Movement phase 4 (#5074): the branch in `mode` has just run its own
+    /// `Entity.move(SELF)`, which made `made`, and has not yet applied its drag
+    /// and gravity. The `living_travel_moved` moment.
+    fn travel_moved(&mut self, mode: TravelMode, made: SelfMove) -> Result<(), Self::Error>;
     fn horizontal_collision(&self) -> bool;
     fn jumping(&self) -> bool;
     fn was_in_powder_snow(&self) -> bool;
@@ -169,7 +184,8 @@ pub fn relative_friction_movement<W: LivingAirWorld>(
     let input_changed = move_relative(world, input, speed)?;
     let velocity = handle_on_climbable(world, world.velocity())?;
     world.set_velocity(velocity)?;
-    world.move_self(gate, world.velocity())?;
+    let made = world.move_self(gate, world.velocity())?;
+    world.travel_moved(TravelMode::Air, made)?;
     let mut velocity = world.velocity();
     if (world.horizontal_collision() || world.jumping())
         && (world.on_climbable()?

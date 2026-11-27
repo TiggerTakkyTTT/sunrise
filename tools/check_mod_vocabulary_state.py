@@ -11,10 +11,12 @@ import argparse
 import json
 from pathlib import Path
 import re
-
-from layering.rust_text import blank, item_end
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.layering.rust_text import blank, item_end
+
 SOURCE = ROOT / "crates/sunrise-mod-vocab/src"
 INVENTORY = ROOT / "tools/layering/mod_vocab_state.json"
 DOCUMENT = ROOT / "docs/layering/mod-vocab-state.md"

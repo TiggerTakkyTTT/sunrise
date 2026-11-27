@@ -14,11 +14,9 @@ before it.
 import json
 import sys
 from pathlib import Path
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab
-    import oracle_harness as harness
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 KINDS = ['furnace', 'blast_furnace', 'smoker']
 KIND_RECIPE = {'furnace': 'minecraft:smelting', 'blast_furnace': 'minecraft:blasting',
@@ -204,7 +202,7 @@ def make_cases(build):
                            new=stack('minecraft:gold_ore')))
 
     path = build / 'cases.txt'
-    hopper = lab.ROOT / 'crates/sunrise-client/src/game/blocks/machines/furnace_hopper.tsv'
+    hopper = lab.ROOT / 'crates/sunrise-client/src/cut_layout/game/blocks/machines/furnace_hopper.tsv'
     path.write_text(f'#resources {resources}\n#hopper {hopper}\n' + ''.join(c + '\n' for c in cases))
     return path, len(cases)
 
@@ -215,11 +213,11 @@ if __name__ == '__main__':
         'Furnace block entity tick: default and patched cooking_fuel, 200/100/100 '
         'cook times, fuel stack and LIT state, RecipesUsed experience, full output and '
         'timer decay, and input changed mid-cook. --no-change leaves out the change family.',
-        sources=[lab.ROOT / 'crates/sunrise-client-render/src/chunk/block_entity.rs',
-                 lab.ROOT / 'crates/sunrise-client-render/src/providers.rs',
-                 lab.ROOT / 'crates/sunrise-client-render/src/providers/evaluation.rs',
-                 lab.ROOT / 'crates/sunrise-client/src/game/blocks/machines/furnace_hopper.tsv',
+        sources=[lab.ROOT / 'crates/sunrise-level/src/chunk/block_entity.rs',
+                 lab.ROOT / 'crates/sunrise-level/src/providers.rs',
+                 lab.ROOT / 'crates/sunrise-level/src/providers/evaluation.rs',
+                 lab.ROOT / 'crates/sunrise-client/src/cut_layout/game/blocks/machines/furnace_hopper.tsv',
                  lab.ROOT / 'crates/sunrise-items/src/item_data/cooking_fuel.rs',
                  lab.ROOT / 'crates/sunrise-items/src/properties/resolvable.rs',
-                 lab.ROOT / 'crates/sunrise-client/src/furnace.rs',
-                 lab.ROOT / 'crates/sunrise-client/src/crafting.rs'])
+                 lab.ROOT / 'crates/sunrise-sim/src/furnace.rs',
+                 lab.ROOT / 'crates/sunrise-sim/src/crafting.rs'])

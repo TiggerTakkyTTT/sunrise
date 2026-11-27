@@ -12,10 +12,11 @@ import argparse
 import os
 from pathlib import Path
 import tempfile
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, integration_env
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, integration_env
 
 
 def main():
@@ -36,10 +37,10 @@ def main():
     sources = [Path(__file__), oracle, lab.ROOT / 'tools/lab.py',
                lab.ROOT / 'tools/oracle_harness.py', lab.ROOT / 'tools/test_rust_parity.py',
                lab.ROOT / 'tools/integration_env.py', lab.ROOT / 'Cargo.toml', lab.ROOT / 'Cargo.lock',
-               lab.ROOT / 'crates/sunrise-client/src/mobs.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/ai.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/living.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/world.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/ai.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/living.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/world.rs',
                java_root / 'dev/sunriselab/parity/ParityData.java',
                java_root / 'dev/sunriselab/parity/VanillaBlockUpdateOracle.java']
     hashes = base.source_hashes(sources)

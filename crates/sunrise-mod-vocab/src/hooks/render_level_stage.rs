@@ -65,6 +65,11 @@ deferred according to the pack's feature schedule) against the pack's color and 
 On an incompatible (integer or unblendable) `colortex0`, those pack-owned stages are omitted
 rather than firing early on a mismatched target.
 
+`PrepareRenderBuffersContext::lines`, `quads`, and `pipeline_quads` prepare batches for any
+pass-bearing stage (including `OitTranslucent`). At `OitTranslucent`, a mod pipeline must be
+registered with `.order_independent()` and a non-`Opaque` blend mode; others are refused with
+`PipelineDrawError::Pipeline(RenderPipelineError::Invalid)` and logged once per mod and pipeline.
+
 A panic disables that mod's listener for this hook for the session, with an error log and toast.
 Draws already accepted are not rolled back."#]
     #[hook(

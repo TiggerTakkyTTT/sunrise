@@ -15,9 +15,10 @@ of it, so its box still reaches the wall either way.
 from pathlib import Path
 import sys
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import test_command_exec_parity as driver  # noqa: E402
-from command_exec_corpus import cmd  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import test_command_exec_parity as driver
+from tools.command_exec_corpus import cmd  # noqa: E402
 
 # name, z, frame data
 FRAMES = [

@@ -96,6 +96,37 @@ pub trait ItemsHost {
     /// component patch, and an unknown item return `None` and log the failure reason.
     #[forward_api_output]
     fn item_from_snbt(&self, snbt: &str) -> Option<ItemStack>;
+    /// Side: both.
+    /// Encode an optional item stack as JSON with vanilla's `ItemStack.OPTIONAL_CODEC`
+    /// (`ItemStack.CODEC` wrapped in `ExtraCodecs.optionalEmptyMap`) over `JsonOps`:
+    /// `None` (an empty stack) encodes as `{}`, and `Some(stack)` encodes as
+    /// `{"id":"...","count":N}` with `"components":{...}` when the stack carries non-default
+    /// persistent components or explicit removals (`"!minecraft:damage":{}`), resolved against
+    /// this side's item and component registries.
+    ///
+    /// Each component uses its codec's JSON form: real JSON booleans, integers versus floats,
+    /// `ComponentSerialization.CODEC` text components, canonical identifiers, and nested
+    /// `ItemStackTemplate` objects. Transient components are omitted and prototype-equal
+    /// components are elided. Returns [`ItemJsonError`] naming the failing field when the item
+    /// is unknown or air, `count` is outside `1..=99`, or a component cannot be encoded.
+    #[forward_api_inputs]
+    fn item_to_json(&self, stack: Option<&ItemStack>) -> Result<String, ItemJsonError>;
+    /// Side: both.
+    /// Decode one complete JSON value as an optional item stack with vanilla's
+    /// `ItemStack.OPTIONAL_CODEC` (`ItemStack.CODEC` wrapped in `ExtraCodecs.optionalEmptyMap`)
+    /// over `JsonOps`: `{}` decodes as `Ok(None)`, and
+    /// `{"id":"...","count":N,"components":{...}}` decodes as `Ok(Some(stack))`, resolving
+    /// item identifiers (outer and nested) and persistent component types against this side's
+    /// registries. `count` defaults to 1 and must be in `1..=99` after Java's `Number.intValue`;
+    /// bare identifiers default to `minecraft:`; component removals use `"!id":{}`.
+    ///
+    /// Follows `JsonOps` type rules: booleans require JSON booleans, numbers require JSON
+    /// numbers, `Unit` and removal payloads require JSON objects, and JSON `null` in optional
+    /// record fields is treated as absent. Returns [`ItemJsonError`] naming the failing field on
+    /// bad JSON, an unknown item or component, or a malformed value. Does not enforce resident
+    /// `max_stack_size` limits beyond `1..=99`; write boundaries check those separately.
+    #[forward_api_output]
+    fn item_from_json(&self, json: &str) -> Result<Option<ItemStack>, ItemJsonError>;
     /// Side: both. Read the creative catalog against this world's active holders and flags.
     /// On a cache miss, build it with explicit `permissions` and dispatch
     /// `build_creative_mode_tab_contents`. It does not require an open creative screen.
@@ -211,6 +242,16 @@ pub trait ItemsBackend {
         slot: usize,
         read: &mut dyn for<'a> FnMut(ItemStackView<'a>),
     );
+    /// Side: server.
+    /// The backing slot of slot `slot` of those `at`'s side reaches (`container_size`):
+    /// `WorldlyContainer.getSlotsForFace` picks the slot and `ChestBlock.getContainer` joins a
+    /// double chest's halves, and each slot reports the half or block entity that owns it
+    /// (matching `View::locate`, `CompoundContainer` and `MenuRef::slot_backing`), with that
+    /// block entity's own unsided slot index. A furnace's sides that reach one slot report the
+    /// same `StorageSlot`. A composter has no backing container: vanilla builds one per access
+    /// (`ComposterBlock.getContainer`), so it returns `None` on every face. `None` as well where
+    /// `container_size` is `None` or `slot` is past it.
+    fn container_slot_backing(&self, at: BlockSide, slot: usize) -> Option<StorageSlot>;
     /// Side: server.
     /// How many of `stack` slot `slot` of those `at`'s side reaches holds when empty, as
     /// NeoForge's `isValid` and `getCapacityAsLong` answer: none where it may not go in (a

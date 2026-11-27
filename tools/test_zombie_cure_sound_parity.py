@@ -12,10 +12,11 @@ import platform
 import random
 import subprocess
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base
 
 
 def main():
@@ -36,7 +37,7 @@ def main():
                lab.ROOT / 'tools/oracle_harness.py', lab.ROOT / 'tools/test_rust_parity.py',
                lab.ROOT / 'Cargo.toml', lab.ROOT / 'Cargo.lock',
                lab.ROOT / 'crates/sunrise-client-lib/Cargo.toml',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/zombie_villager.rs']
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/zombie_villager.rs']
     tested = base.source_hashes(sources)
     rng = random.Random(0x43555245)
     seeds = [0, 1, -1, 42, -(2**63), 2**63 - 1] + [rng.randrange(-2**63, 2**63) for _ in range(128)]

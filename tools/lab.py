@@ -7,6 +7,7 @@ generated files stay in .local/. Also the small helpers the harnesses share
 import argparse
 import atexit
 from collections import Counter
+import getpass
 import hashlib
 import json
 import os
@@ -24,6 +25,9 @@ import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import file_lock
+
 LOCAL = ROOT / ".local"
 LOCK = ROOT / "research-lock.json"
 
@@ -71,22 +75,23 @@ def parity_fixtures(default_features=True):
     variant's own hard link to its build, taken under a lock that covers the build, so another harness building the
     other variant never changes it."""
     if default_features not in _PARITY_FIXTURES:
-        import fcntl  # POSIX only, like the parity runner
         features = 'fixtures,client-defaults' if default_features else 'fixtures'
         command = ['cargo', 'build', '--locked', '--profile', 'test', '-p', 'sunrise-parity-fixtures',
                    '--features', features, '--bin', 'sunrise-parity-fixtures',
                    '--message-format=json-render-diagnostics']
         cargo_target().mkdir(parents=True, exist_ok=True)
-        with open(cargo_target() / 'sunrise-parity-fixtures.lock', 'w') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(cargo_target() / 'sunrise-parity-fixtures.lock', 'a') as lock:
+            file_lock.lock(lock)
             built = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
             executables = [row['executable'] for row in map(json.loads, filter(None, built.stdout.splitlines()))
                            if row.get('reason') == 'compiler-artifact' and row.get('executable')
                            and row['target']['name'] == 'sunrise-parity-fixtures']
             if len(executables) != 1:
                 raise RuntimeError(f'cargo reported {len(executables)} sunrise-parity-fixtures executables')
-            variant = Path(executables[0]).with_name(
-                'sunrise-parity-fixtures-' + ('client-defaults' if default_features else 'no-default-features'))
+            executable = Path(executables[0])
+            variant = executable.with_name('sunrise-parity-fixtures-'
+                                           + ('client-defaults' if default_features else 'no-default-features')
+                                           + executable.suffix)
             variant.unlink(missing_ok=True)
             os.link(executables[0], variant)
         _PARITY_FIXTURES[default_features] = variant
@@ -168,22 +173,17 @@ def free_port():
     The OS hands out a port when we bind to 0, but we close it before the server binds it, and a harness running
     beside this one (another worktree, the parallel job queue) can be handed the same number in that gap. So each port
     is also claimed with a lock file in the temp dir, held until this process exits; a port another harness has
-    claimed is skipped. Windows has no flock (nor os.getuid): there the port is the OS's answer alone, as before."""
-    if sys.platform == "win32":
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-    import fcntl
-    locks = Path(tempfile.gettempdir()) / f"sunrise-harness-ports-{os.getuid()}"
+    claimed is skipped. The lock is tools/file_lock.py's; the folder is per user (the uid, or the user name where
+    the OS has no uid)."""
+    user = os.getuid() if hasattr(os, "getuid") else getpass.getuser()
+    locks = Path(tempfile.gettempdir()) / f"sunrise-harness-ports-{user}"
     locks.mkdir(exist_ok=True)
     for _ in range(100):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        handle = open(locks / str(port), "w")
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        handle = open(locks / str(port), "a")  # not "w": truncating a file another process has locked fails on Windows
+        if not file_lock.lock(handle, wait=False):
             handle.close()
             continue
         _PORT_LOCKS.append(handle)

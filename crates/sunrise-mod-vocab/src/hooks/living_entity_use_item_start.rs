@@ -3,9 +3,9 @@
 pub trait Hooks {
     /// NeoForge's `LivingEntityUseItemEvent.Start`: `entity` starts using
     /// `stack` in `hand` (`LivingEntity.startUsingItem`), for `duration`
-    /// ticks (`use_duration`'s answer). `entity` is a mob's
-    /// `Entity.getId`, None for a player (`host.players().acting_player()` says who);
-    /// a mob fires it only for `LivingRef::start_using_item`. Change `duration` (consumables, potions,
+    /// ticks (`use_duration`'s answer). `entity` is the user's
+    /// `Entity.getId`: a player's (the acting one, `host.players().acting_player()`,
+    /// on the server; the local player on a server's client) or a mob's; a mob fires it only for `LivingRef::start_using_item`. Change `duration` (consumables, potions,
     /// spyglasses and mods' items count to it; below 0 refuses the use, and
     /// 0 runs it out on its first tick, as `living_entity_use_item_tick`
     /// running it out, unless the item's own is 0 already), or set
@@ -15,13 +15,14 @@ pub trait Hooks {
     /// and change the world only on the server (`native_window` is false
     /// there), not on a server's client.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_living_entity_use_item_start",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_living_entity_use_item_start",
         dispatch = "flat",
         side = "both",
         contract = "cancel",
         out = "canceled",
         neoforge = "LivingEntityUseItemEvent.Start",
-        cancellable = true
+        cancellable = true,
+        version = 2
     )]
     fn living_entity_use_item_start(
         stack: &ItemStack,

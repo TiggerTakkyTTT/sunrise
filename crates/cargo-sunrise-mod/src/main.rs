@@ -20,7 +20,7 @@
 //! - `check [--uses] [--release <tag>]` in a mod folder: the package rules, page and render pipeline
 //!   shaders; for a native mod, Rust and what the mod uses of its pinned build (`sdk_cmds.rs`).
 //! - `check <file> [--kind <kind>] [--attestation <bundle>] [--repository <id>] [--json]`: check a release package
-//!   (`.smod`, `.spack`, resource pack `.zip`, `.sshader`).
+//!   (`.smod`, `.spack`, resource pack `.zip`).
 //! - `hooks <text> [--all]`: search the pinned build's hooks (or every item) offline.
 //! - `sdk diff <build> <build>`: what changed in the surface between two builds.
 //! - `check [<file.smod>] --build <name> [--build <name>]…`: whether the mod fits each build; exit 0 when all
@@ -46,6 +46,7 @@ mod page;
 mod registry_source;
 mod sdk_cmds;
 mod sdk_fetch;
+mod sdk_notes;
 mod self_update;
 mod uses_table;
 
@@ -62,7 +63,7 @@ const RUN_DIR: &str = "target/sunrise-mod/run";
 fn version_line() -> String {
     format!(
         "cargo-sunrise-mod commit {} native-contract {}",
-        env!("SUNRISE_TOOL_BUILT_FROM"),
+        sunrise_native_build::contract::TOOL_COMMIT,
         sunrise_native_build::contract::CONTRACT
     )
 }

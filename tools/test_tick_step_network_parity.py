@@ -9,14 +9,13 @@ receives the remaining count instead of replaying a completed step command.
 import platform
 import time
 
-try:
-    from . import lab, test_rust_parity as base, test_locator_bar_parity as net
-    from .test_dedicated_server_parity import Server, game_time
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_locator_bar_parity as net
-    from test_dedicated_server_parity import Server, game_time
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_locator_bar_parity as net
+from tools.test_dedicated_server_parity import Server, game_time
 
 
 def run_side(label, command, client_command, build, world):
@@ -94,8 +93,8 @@ def run_side(label, command, client_command, build, world):
 
 def main():
     lock, build, vanilla, sunrise, client = net.sides('tick-step-network-parity')
-    sources = [lab.ROOT / 'crates/sunrise-client/src/clock.rs',
-               lab.ROOT / 'crates/sunrise-client/src/lan/hub.rs',
+    sources = [lab.ROOT / 'crates/sunrise-sim/src/clock.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/lan/hub.rs',
                lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/LocatorBarClient.java',
                lab.ROOT / 'tools/test_locator_bar_parity.py',
                lab.ROOT / 'tools/test_dedicated_server_parity.py', lab.ROOT / __file__]

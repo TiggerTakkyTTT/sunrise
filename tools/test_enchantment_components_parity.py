@@ -5,11 +5,11 @@ import os
 from pathlib import Path
 import subprocess
 
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 
 def registry():
@@ -72,7 +72,7 @@ def main():
                lab.ROOT / 'crates/sunrise-items/src/item_nbt.rs',
                lab.ROOT / 'crates/sunrise-core/src/nbt.rs',
                lab.ROOT / 'crates/sunrise-world/src/datafix/dynamic.rs',
-               lab.ROOT / 'crates/sunrise-client-core/src/lang.rs',
+               lab.ROOT / 'crates/sunrise-game-data/src/lang.rs',
                lab.ROOT / 'crates/sunrise-items/src/item_data.rs',
                lab.ROOT / 'crates/sunrise-items/src/enchant.rs']
     tested = base.source_hashes(sources)

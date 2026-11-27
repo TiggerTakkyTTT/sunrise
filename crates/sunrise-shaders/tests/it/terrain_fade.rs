@@ -16,10 +16,7 @@ fn requested_fade_feature_loads() {
 
 #[test]
 fn terrain_vertex_reads_renderer_fade_without_a_pack_declaration() {
-    let pp = |code: &str| Preprocessed {
-        code: code.into(),
-        ..Default::default()
-    };
+    let pp = |code: &str| Preprocessed::from_source("", code);
     let vertex =
         pp("varying float seen;\nvoid main() { seen = mc_chunkFade; gl_Position = gl_Vertex; }");
     let fragment =
@@ -44,14 +41,8 @@ fn terrain_vertex_reads_renderer_fade_without_a_pack_declaration() {
 
 #[test]
 fn missing_terrain_value_is_an_error_instead_of_an_invented_fade() {
-    let vertex = Preprocessed {
-        code: "void main() { gl_Position = vec4(mc_chunkFade); }".into(),
-        ..Default::default()
-    };
-    let fragment = Preprocessed {
-        code: "void main() { gl_FragColor = vec4(1.0); }".into(),
-        ..Default::default()
-    };
+    let vertex = Preprocessed::from_source("", "void main() { gl_Position = vec4(mc_chunkFade); }");
+    let fragment = Preprocessed::from_source("", "void main() { gl_FragColor = vec4(1.0); }");
     assert!(
         translate_gbuffers(
             &vertex,
@@ -75,14 +66,9 @@ fn missing_terrain_value_is_an_error_instead_of_an_invented_fade() {
         attributes: vec![("mc_chunkFade".into(), "0.25".into())],
         ..Default::default()
     };
-    let fragment = Preprocessed {
-        code: "void main() { gl_FragColor = vec4(mc_chunkFade); }".into(),
-        ..Default::default()
-    };
-    let vertex = Preprocessed {
-        code: "void main() { gl_Position = gl_Vertex; }".into(),
-        ..Default::default()
-    };
+    let fragment =
+        Preprocessed::from_source("", "void main() { gl_FragColor = vec4(mc_chunkFade); }");
+    let vertex = Preprocessed::from_source("", "void main() { gl_Position = gl_Vertex; }");
     assert!(
         translate_gbuffers(
             &vertex,
@@ -101,18 +87,15 @@ fn authored_fade_globals_keep_their_own_meaning() {
         attributes: vec![("mc_chunkFade".into(), "0.25".into())],
         ..Default::default()
     };
-    let fragment = Preprocessed {
-        code: "void main() { gl_FragColor = vec4(1.0); }".into(),
-        ..Default::default()
-    };
+    let fragment = Preprocessed::from_source("", "void main() { gl_FragColor = vec4(1.0); }");
     for declaration in [
         "const float mc_chunkFade = 0.75;",
         "uniform float mc_chunkFade;",
     ] {
-        let vertex = Preprocessed {
-            code: format!("{declaration}\nvoid main() {{ gl_Position = vec4(mc_chunkFade); }}"),
-            ..Default::default()
-        };
+        let vertex = Preprocessed::from_source(
+            "",
+            &format!("{declaration}\nvoid main() {{ gl_Position = vec4(mc_chunkFade); }}"),
+        );
         let program = translate_gbuffers(
             &vertex,
             &fragment,
@@ -158,7 +141,7 @@ fn geometry_probe(vertex_declaration: &str) -> [Preprocessed; 3] {
         format!("{vertex_declaration}\nout float terrain_weight; void main() {{ terrain_weight = mc_chunkFade; gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }}"),
         "layout(triangles) in; layout(triangle_strip, max_vertices=3) out; in float terrain_weight[]; out float seen; const float mc_chunkFade = 0.8125; void main() { for (int k=0; k<3; ++k) { seen=terrain_weight[k] + mc_chunkFade; gl_Position=gl_in[k].gl_Position; EmitVertex(); } EndPrimitive(); }".into(),
         "in float seen; void main() { gl_FragColor = vec4(seen); }".into(),
-    ].map(|code| Preprocessed { code, ..Default::default() })
+    ].map(|code| Preprocessed::from_source("", &code))
 }
 
 #[test]
@@ -183,7 +166,8 @@ fn geometry_vertex_reads_the_provided_fade_and_requires_its_provider() {
     .unwrap();
     assert_eq!(count, 1);
     inputs.inputs.attributes.clear();
-    geometry.code = geometry.code.replace("mc_chunkFade", "stage_bias");
+    geometry =
+        Preprocessed::from_source("", &geometry.code().replace("mc_chunkFade", "stage_bias"));
     assert!(
         translate_geometry(
             &vertex,
@@ -211,7 +195,8 @@ fn geometry_vertex_keeps_authored_fade_globals() {
         "uniform float mc_chunkFade;",
     ] {
         let [vertex, mut geometry, fragment] = geometry_probe(declaration);
-        geometry.code = geometry.code.replace("mc_chunkFade", "stage_bias");
+        geometry =
+            Preprocessed::from_source("", &geometry.code().replace("mc_chunkFade", "stage_bias"));
         let (program, _) = translate_geometry(
             &vertex,
             &geometry,

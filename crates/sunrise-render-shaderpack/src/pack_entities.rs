@@ -8,11 +8,14 @@
 
 use std::ops::Range;
 
-use sunrise_render_core::entity::{QuadSort, TEXT_POLYGON_OFFSET_SOLID_OVERLAY};
+use sunrise_render_core::entity::{
+    DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY, QuadSort, TEXT_POLYGON_OFFSET_SOLID_OVERLAY,
+    dynamic_texture_handle, is_dynamic_texture,
+};
 use sunrise_shaders::render_stage;
 
 use sunrise_render_core::{
-    EntitySpan, EntityVertex as Vertex, FLUID_OVERLAY, OIT_ENTITY,
+    ARMOR_GLINT_ONLY_OVERLAY, EntitySpan, EntityVertex as Vertex, FLUID_OVERLAY, OIT_ENTITY,
     TERRAIN_MODEL_CUTOUT_MIPPED_OVERLAY, TERRAIN_MODEL_CUTOUT_OVERLAY, TERRAIN_MODEL_SOLID_OVERLAY,
     TERRAIN_MODEL_TRANSLUCENT_OVERLAY, TRANSLUCENT_GLINT_ITEM_OVERLAY, TRANSLUCENT_ITEM_OVERLAY,
     TRANSLUCENT_PARTICLE_OVERLAY, WATER_MASK_OVERLAY, is_native_terrain, skin_runs,
@@ -249,6 +252,9 @@ pub struct Draw {
     /// A block entity's or an entity's native terrain quads, placed in the block atlas
     /// ([`BlockAtlas`]): drawn with that atlas bound in place of the shared one.
     pub block_atlas: bool,
+    /// A mod's dynamic texture (`BlockEntityDrawContext::textured_quad`): the handle of the
+    /// texture bound as the atlas for this draw ([`PackEntities::texture_view`]).
+    pub texture: Option<u64>,
 }
 
 /// Which entity runs a pack's shadow pass draws (2.4, 3.2).
@@ -301,6 +307,9 @@ pub struct PackEntities {
     /// Where the pack's block atlas holds each terrain sprite: none leaves native terrain quads
     /// to Sunrise.
     block_atlas: Option<BlockAtlas>,
+    /// The view and revision of each dynamic texture this frame's draws bind
+    /// ([`Self::resolve_textures`]).
+    texture_views: std::collections::HashMap<u64, (wgpu::TextureView, u64)>,
     /// Sorts translucent native terrain quads, kept between frames.
     sort: QuadSort,
     /// A run's translucent native terrain quads (`MaterialRun::sorted`) waiting for its end:
@@ -353,6 +362,7 @@ impl PackEntities {
             uniforms: Vec::new(),
             draws: Vec::new(),
             block_atlas: None,
+            texture_views: std::collections::HashMap::new(),
             sort: QuadSort::default(),
             gathered: None,
             gather: Vec::new(),
@@ -361,6 +371,23 @@ impl PackEntities {
     }
 
     /// The block atlas the pack's terrain samples, set with it ([`BlockAtlas`]).
+    /// Resolves each dynamic texture this frame's draws bind (`Draw::texture`) to its view and
+    /// revision, after [`Self::prepare`]. The resolver answers every handle, a missing texture's
+    /// view for one that no longer exists.
+    pub fn resolve_textures(&mut self, mut resolve: impl FnMut(u64) -> (wgpu::TextureView, u64)) {
+        self.texture_views.clear();
+        for handle in self.draws.iter().filter_map(|d| d.texture) {
+            self.texture_views
+                .entry(handle)
+                .or_insert_with(|| resolve(handle));
+        }
+    }
+
+    /// The view and revision of the dynamic texture `handle` ([`Self::resolve_textures`]).
+    pub fn texture_view(&self, handle: u64) -> Option<&(wgpu::TextureView, u64)> {
+        self.texture_views.get(&handle)
+    }
+
     pub fn set_block_atlas(&mut self, atlas: Option<BlockAtlas>) {
         self.block_atlas = atlas;
     }
@@ -503,6 +530,7 @@ impl PackEntities {
                     false,
                     false,
                     false,
+                    None,
                 );
             }
         }
@@ -521,6 +549,7 @@ impl PackEntities {
             polygon_offset: offset,
             block_atlas,
             sorted,
+            texture,
         } in material_runs(entities, spans, drawn, atlas)
         {
             let run_start = range.start as u32;
@@ -543,12 +572,15 @@ impl PackEntities {
             // A native terrain quad carries sprite-array UVs, not shared-atlas UVs. A run of them
             // the block atlas holds is placed in that atlas below; any other goes to Sunrise,
             // even when a shader pack draws the model in the same run. Do not corrupt either UV
-            // space.
+            // space. Standalone armor glint also needs its native material: exposing it to
+            // gbuffers would draw the hidden armor texture.
+            let native_material =
+                |layer| is_native_terrain(layer) || (layer & 0xffff) == ARMOR_GLINT_ONLY_OVERLAY;
             let whole: &[Vertex] =
-                if !block_atlas && whole.chunks(4).any(|q| is_native_terrain(q[0].layer)) {
+                if !block_atlas && whole.chunks(4).any(|q| native_material(q[0].layer)) {
                     without_fluids.clear();
                     for quad in whole.chunks(4) {
-                        if is_native_terrain(quad[0].layer) {
+                        if native_material(quad[0].layer) {
                             if !span.hidden {
                                 rest.extend_from_slice(quad);
                             }
@@ -663,6 +695,7 @@ impl PackEntities {
                     part == Part::WaterMask,
                     offset && part == Part::Plain,
                     block_atlas,
+                    texture.filter(|_| part == Part::Plain),
                 );
             }
         }
@@ -769,6 +802,7 @@ impl PackEntities {
             false,
             false,
             true,
+            None,
         );
     }
 
@@ -785,6 +819,7 @@ impl PackEntities {
         water_mask: bool,
         polygon_offset: bool,
         block_atlas: bool,
+        texture: Option<u64>,
     ) {
         let (entity_id, block_id) = match program {
             BLOCK | BLOCK_TRANSLUCENT => (0, span.id),
@@ -812,6 +847,7 @@ impl PackEntities {
             water_mask,
             polygon_offset,
             block_atlas,
+            texture,
         });
     }
 }
@@ -964,12 +1000,19 @@ fn material_program(span: &EntitySpan, layer: u32, drawn: [bool; PROGRAMS]) -> O
                         layer & 0xffff,
                         TRANSLUCENT_ITEM_OVERLAY | TRANSLUCENT_GLINT_ITEM_OVERLAY
                     )
-                    || native_translucent(layer)) =>
+                    || native_translucent(layer)
+                    || layer & 0xffff == DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY) =>
         {
             BLOCK_TRANSLUCENT
         }
         // An entity's translucent native terrain quads, the translucent entity program's.
-        ENTITY if drawn[TRANSLUCENT] && native_translucent(layer) => TRANSLUCENT,
+        ENTITY
+            if drawn[TRANSLUCENT]
+                && (native_translucent(layer)
+                    || layer & 0xffff == DYNAMIC_TEXTURE_TRANSLUCENT_OVERLAY) =>
+        {
+            TRANSLUCENT
+        }
         PARTICLE
             if drawn[PARTICLE_TRANSLUCENT] && layer & 0xffff == TRANSLUCENT_PARTICLE_OVERLAY =>
         {
@@ -1013,6 +1056,8 @@ struct MaterialRun {
     block_atlas: bool,
     /// Translucent ones of them (a still fluid's, a translucent model's), drawn far to near.
     sorted: bool,
+    /// A mod's dynamic texture the run's quads sample (`Draw::texture`); a run is one texture's.
+    texture: Option<u64>,
 }
 
 /// Split where a quad's program, depth mode or atlas changes, keeping contiguous runs in vertex
@@ -1037,8 +1082,17 @@ fn material_runs<'a>(
         let program_at = move |i: usize| {
             let layer = vertices[i].layer;
             let material = material_program(&span, layer, drawn);
+            // A mod's own texture: the program draws it with that texture bound as the atlas.
+            let texture =
+                is_dynamic_texture(layer).then(|| dynamic_texture_handle(vertices[i].glint_uv));
             if !is_native_terrain(layer) {
-                return (material, polygon_offset(material, layer), false, false);
+                return (
+                    material,
+                    polygon_offset(material, layer),
+                    false,
+                    false,
+                    texture,
+                );
             }
             // Only while the pack draws them (`drawn`): a pack with a shadow program but no
             // program for the run leaves them to Sunrise, uncast, as before.
@@ -1048,11 +1102,11 @@ fn material_runs<'a>(
                 .get(i..i + 4)
                 .is_some_and(|quad| atlas.is_some_and(|a| a.holds(quad)));
             if held {
-                (material, false, true, native_translucent(layer))
+                (material, false, true, native_translucent(layer), None)
             } else {
                 // Sunrise's (the run's other quads may still be the pack's: `prepare` keeps
                 // native terrain quads out of a run it does not place).
-                (material.filter(|_| !split), false, false, false)
+                (material.filter(|_| !split), false, false, false, None)
             }
         };
         let mut start = range.start;
@@ -1079,6 +1133,7 @@ fn material_runs<'a>(
                 polygon_offset: key.1,
                 block_atlas: key.2,
                 sorted: key.3,
+                texture: key.4,
             })
         })
     })

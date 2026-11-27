@@ -103,10 +103,49 @@ mat2 mat2_rotate_z(float radians) {
 const OIT_GLSL: &str = "\
 #ifndef SUNRISE_STUB_OIT_GLSL
 #define SUNRISE_STUB_OIT_GLSL
+#if defined(OIT) && defined(OIT_DEPTH_BOUNDS)
+layout(location = 0) out vec4 sunriseOitDepthBounds;
+void executeAlphaOnlyPhase(float deviceDepth, float alpha) {
+    if (alpha < 0.01) {
+        discard;
+    }
+    sunriseOitDepthBounds = vec4(-deviceDepth, deviceDepth, deviceDepth, alpha);
+}
+#elif defined(OIT) && defined(OIT_TRANSMITTANCE)
+uniform sampler2D DepthBoundsSampler;
+layout(location = 0) out vec4 sunriseOitCoeff0;
+layout(location = 1) out vec4 sunriseOitCoeff1;
+void executeAlphaOnlyPhase(float deviceDepth, float alpha) {
+#ifdef OIT_ADDITIVE
+    discard;
+#else
+    vec4 b = texelFetch(DepthBoundsSampler, ivec2(gl_FragCoord.xy), 0);
+    sunriseOitCoeff0 = vec4(alpha, deviceDepth, b.r, b.g);
+    sunriseOitCoeff1 = vec4(0.0);
+#endif
+}
+#elif defined(OIT) && defined(OIT_ACCUMULATE)
+uniform sampler2D DepthBoundsSampler;
+uniform sampler2D Coeff0;
+uniform sampler2D Coeff1;
+vec4 sampleColorForAccumulation(vec4 color) {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    float d = texelFetch(DepthBoundsSampler, p, 0).r;
+    float c0 = texelFetch(Coeff0, p, 0).r;
+    float c1 = texelFetch(Coeff1, p, 0).r;
+    float t = clamp(exp(-max(c0 + c1 + d * 0.0, 0.0)), 0.0001, 1.0);
+#ifdef OIT_ADDITIVE
+    return vec4(color.rgb * color.a, 0.0) * t;
+#else
+    return vec4(color.rgb * color.a, color.a) * t;
+#endif
+}
+#else
 void executeAlphaOnlyPhase(float deviceDepth, float alpha) {}
 vec4 sampleColorForAccumulation(vec4 color) {
     return color;
 }
+#endif
 #endif
 ";
 

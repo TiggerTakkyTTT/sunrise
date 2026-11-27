@@ -24,10 +24,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import lab  # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import lab  # noqa: E402
+
 RESOURCES = lab.RESOURCES
 RUN = ROOT / '.local' / 'world-reopen'
 CYCLES = 3

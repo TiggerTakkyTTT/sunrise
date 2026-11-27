@@ -11,6 +11,27 @@ Keep `event.progress.clone()` if it is needed later: the owned `AdvancementProgr
 cannot change the player's progress and is not updated by subsequent events. No-op grants and
 revokes do not fire.
 
+To read a server player's live progress on demand, call `player.advancement_progress(host, &id)`.
+It takes `&dyn Host` and returns the same `Option<AdvancementProgress>` snapshot, mirroring
+`ServerPlayer.getAdvancements().getOrStartProgress(holder)`: a loaded advancement the player has
+not touched returns all criteria with `obtained_at: None` and `done == false`, and reads inside
+`player_advancement_progress` or `player_advancement_done` observe the post-grant live state.
+Unknown ids, stale or offline players, and client hosts return `None`.
+
+To award or revoke an advancement (or one criterion of it) on the server, call
+`player.award_advancement(host, &id, criterion)` and `player.revoke_advancement(host, &id, criterion)`.
+Both take `&mut dyn ServerHost` and `criterion: Option<&str>`, mirroring
+`PlayerAdvancements.award`/`revoke` and `AdvancementCommands.Action.GRANT`/`REVOKE`: pass
+`Some(name)` for one criterion or `None` for every remaining (or obtained) criterion. They route
+through the same engine path as triggers and `/advancement`, so completion grants rewards,
+announces in chat per the display and `show_advancement_messages`, shows the toast, fires
+`player_advancement_progress` and `player_advancement_done`, and queues the client progress
+update. `Ok(bool)` reports whether progress changed; `Err(AdvancementError)` distinguishes
+`NotServer`, `PlayerUnavailable`, `UnknownAdvancement`, `UnknownCriterion`, and `NoBackend`.
+Inside a transaction, validation runs immediately and `Ok(bool)` reports whether the change
+would alter current progress; the change itself, along with its rewards, messages, hooks and
+client updates, happens at the root commit and is dropped on abort.
+
 ## Display icons
 
 An advancement's `display.icon` is an item stack, including its count, damage and
@@ -52,7 +73,7 @@ To replay the toast, revoke that advancement and grant it again:
 ```
 
 The native regression
-`game::advancements::icons::tests::advancement_icons_reach_local_and_remote_ui_surfaces`
+`game::client_side::advancements_client::icons::tests::advancement_icons_reach_local_and_remote_ui_surfaces`
 checks actual GUI draw submissions at 640×480 with GUI scale 1, including the
 two permission-failure cases in isolated child processes. The resource-free
 `lan::advancements::tests::advancement_icons_roundtrip_count_damage_and_opposite_glint_overrides`

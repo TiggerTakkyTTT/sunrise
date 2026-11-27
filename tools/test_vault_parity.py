@@ -29,12 +29,11 @@ from pathlib import Path
 import platform
 import random
 import subprocess
-try:
-    from . import lab, test_rust_parity as base, test_natural_spawn_parity as natural
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_natural_spawn_parity as natural
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_natural_spawn_parity as natural
 
 box = natural.box
 STATES = ['inactive', 'active', 'unlocking', 'ejecting']
@@ -174,10 +173,10 @@ def main():
     resources = lab.RESOURCES
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaNaturalSpawnOracle.java'
     sources = [oracle, Path(__file__), lab.ROOT / 'crates/sunrise-client/examples/probe/natural_spawn_fixture.rs',
-               lab.ROOT / 'crates/sunrise-client-render/src/vault.rs',
-               lab.ROOT / 'crates/sunrise-client-render/src/chunk/block_entity.rs',
-               lab.ROOT / 'crates/sunrise-client-core/src/identifier.rs',
-               lab.ROOT / 'crates/sunrise-client-core/src/nbt_value.rs']
+               lab.ROOT / 'crates/sunrise-level/src/vault.rs',
+               lab.ROOT / 'crates/sunrise-level/src/chunk/block_entity.rs',
+               lab.ROOT / 'crates/sunrise-game-data/src/identifier.rs',
+               lab.ROOT / 'crates/sunrise-game-data/src/nbt_value.rs']
     tested = base.source_hashes(sources)
     inputs = build / 'inputs.txt'
     cases = corpus()

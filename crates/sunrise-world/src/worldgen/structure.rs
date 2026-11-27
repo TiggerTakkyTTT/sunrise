@@ -225,6 +225,13 @@ impl StateTransforms {
                 .map_or(state, |t| BlockStateId(t[m as usize - 1])),
         }
     }
+    /// `BlockState.mirror(mirror)` as a template places `state` at `pos` (vanilla's
+    /// `BlockBehaviour.mirror`, which a block overrides): this table's mirrored state, or another
+    /// state of the block its parts answer (`mirror`). Every template placement that mirrors
+    /// its states does it here, before [`rotate_at`](Self::rotate_at).
+    pub fn mirror_at(&self, state: BlockStateId, pos: [i32; 3], mirror: Mirror) -> BlockStateId {
+        crate::native_worldgen_hooks::mirror(state, pos, mirror, self.mirror(state, mirror))
+    }
     pub fn full_block(&self, state: BlockStateId) -> bool {
         self.full.get(state.0 as usize).copied().unwrap_or(false)
     }

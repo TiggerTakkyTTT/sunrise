@@ -249,6 +249,51 @@ impl InstanceGroupRef {
     }
 }
 
+/// A prepared item render state resolved through
+/// [`ClientRenderClientHost::prepare_item`](crate::prelude::ClientRenderClientHost::prepare_item)
+/// (vanilla's `ItemStackRenderState`).
+///
+/// Retain it between frames and draw it under a pose with
+/// [`BlockEntityDrawContext::prepared_item`](crate::BlockEntityDrawContext::prepared_item).
+/// Retired on a successful resource reload, world close, owner mod disable, or [`Self::destroy`];
+/// a stale handle draws nothing and returns [`ModelError::StaleModel`](crate::ModelError::StaleModel).
+// no wire: local in-process client render-state handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// exhaustive: private fields; only the engine creates prepared-item handles
+pub struct PreparedItemRef(pub(crate) u64, pub(crate) u32);
+
+impl PreparedItemRef {
+    pub(crate) fn from_parts(generation: u64, slot: u32) -> Result<Self, &'static str> {
+        if generation == 0 {
+            return Err("unpublished prepared item generation");
+        }
+        Ok(Self(generation, slot))
+    }
+
+    /// Retire this handle and release its cached item render state immediately.
+    /// Later draws or another destroy return [`ModelError::StaleModel`](crate::ModelError::StaleModel);
+    /// slot reuse never revives a retired handle.
+    pub fn destroy(
+        self,
+        host: &(impl InstanceGroupContext + ?Sized),
+    ) -> Result<(), crate::ModelError> {
+        host.instance_group_backend()
+            .ok_or(crate::ModelError::StaleModel)?
+            .0
+            .prepared_item_destroy(self)
+    }
+}
+
+impl crate::__private::game::Fields for PreparedItemRef {
+    type Fields<'a> = crate::__private::game::ModelRefFields;
+    fn fields(&self) -> Self::Fields<'_> {
+        crate::__private::game::ModelRefFields {
+            generation: self.0,
+            slot: self.1,
+        }
+    }
+}
+
 /// Why a persistent group operation was refused. Errors leave storage and view unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -368,7 +413,14 @@ mod tests {
                 self.calls.borrow_mut().push("destroy");
                 Ok(())
             }
+            fn prepared_item_destroy(&self, _: PreparedItemRef) -> Result<(), crate::ModelError> {
+                self.calls.borrow_mut().push("prepared_item_destroy");
+                Ok(())
+            }
         }
+
+        let item = PreparedItemRef::from_parts(2, 0).unwrap();
+        assert_eq!(item.destroy(&Bare), Err(crate::ModelError::StaleModel));
 
         let host = Recording {
             calls: std::cell::RefCell::new(Vec::new()),
@@ -379,9 +431,16 @@ mod tests {
             .set_group_transform(&host, IDENTITY_TRANSFORM)
             .unwrap();
         group.destroy(&host).unwrap();
+        item.destroy(&host).unwrap();
         assert_eq!(
             *host.calls.borrow(),
-            vec!["write", "set_len", "set_transform", "destroy"]
+            vec![
+                "write",
+                "set_len",
+                "set_transform",
+                "destroy",
+                "prepared_item_destroy"
+            ]
         );
     }
 }

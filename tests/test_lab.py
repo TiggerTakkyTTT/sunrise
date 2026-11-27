@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 import zipfile
 
+from tests.git_fixture import isolated_git_env
 from tools import agent_control_e2e, check_public_tree, lab
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,7 +202,7 @@ class PublicationTests(unittest.TestCase):
     def test_copied_data_fixer_tables_are_rejected_in_the_tree_only(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
-            env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+            env = isolated_git_env()
             def git(*args):
                 subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
                                cwd=directory, env=env, check=True, capture_output=True)
@@ -237,7 +238,8 @@ class PublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             def git(*args):
-                return subprocess.check_output(["git", *args], cwd=directory, stderr=subprocess.DEVNULL)
+                return subprocess.check_output(["git", *args], cwd=directory, stderr=subprocess.DEVNULL,
+                                               env=isolated_git_env())
             git("init", "-b", "main")
             (directory / ".gitignore").write_text("/.local/\n")
             (directory / ".local").mkdir()
@@ -390,6 +392,29 @@ class GameEnvScreenTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertEqual(env["SUNRISE_HOME"], home)
                 self.assertNotIn("VSCREEN", env)
+
+
+class FreePortTests(unittest.TestCase):
+    def test_a_port_another_process_has_claimed_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(lab.tempfile, "gettempdir", return_value=temp), \
+                mock.patch.object(lab, "_PORT_LOCKS", []) as held:
+            first = lab.free_port()
+            claimed = Path(temp).glob("sunrise-harness-ports-*/" + str(first))
+            self.assertEqual(len(list(claimed)), 1)
+            # The OS hands out the claimed number again, then another one: the claimed number is not returned.
+            real = lab.socket.socket
+            answers = iter([first, first])
+
+            class Sock(real):
+                def bind(self, address):
+                    return super().bind(("127.0.0.1", next(answers, 0)))
+
+            with mock.patch.object(lab.socket, "socket", Sock):
+                second = lab.free_port()
+            self.assertNotEqual(second, first)
+            self.assertEqual(len(held), 2)
+            for handle in held:
+                handle.close()
 
 
 if __name__ == "__main__":

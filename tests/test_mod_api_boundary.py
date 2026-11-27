@@ -75,18 +75,18 @@ def domain_export_collisions(src):
         for domain in re.findall(r"pub use (\w+)::types::\*;", text):
             types = src / domain / "types.rs"
             for name in pub_items(types):
-                domains.setdefault(name, []).append(str(types))
+                domains.setdefault(name, []).append(types.as_posix())
         text = re.sub(r"pub use \w+::types::\*;", "", text)
         text = re.sub(r"pub use (\w+)::types::(\w+);",
                       lambda m: "" if m[1] in glob_domains and m[2] in pub_items(src / m[1] / "types.rs") else m[0], text)
         names = use_names(text, src) - {"*"}
         names |= set(re.findall(r"^pub (?:unsafe )?(?:struct|enum|union|trait|type|fn|const|static|mod) (\w+)", text, re.M))
         for name in names:
-            explicit.setdefault(name, []).append(str(path))
+            explicit.setdefault(name, []).append(path.as_posix())
     for path in sorted((src / "hooks").glob("*.rs")):
         for name in re.findall(r"^    fn (\w+)\(", path.read_text(), re.M):
             event = "".join(word[:1].upper() + word[1:] for word in name.split("_")) + "Event"
-            explicit.setdefault(event, []).append(str(path) + " (generated event)")
+            explicit.setdefault(event, []).append(path.as_posix() + " (generated event)")
     problems = []
     for name, locations in sorted(domains.items()):
         locations = locations + explicit.get(name, [])
@@ -189,7 +189,7 @@ class ModApiBoundaryTests(unittest.TestCase):
         self.assertRegex(api_text(), r"pub struct WorldFluid\b")
 
     def test_fluid_model_collection_uses_api_owned_values(self):
-        source = (ROOT / "crates/sunrise-client/src/game/native_hooks/register_fluid_models.rs").read_text()
+        source = (ROOT / "crates/sunrise-gameplay-common/src/game/native_hooks/register_fluid_models.rs").read_text()
         signature = source.split("fn native_register_fluid_models(", 1)[1].split(") {", 1)[0]
         # Collected hook fields are generated directly from this signature.
         self.assertNotIn("sunrise_mod_package::", signature)
@@ -204,13 +204,14 @@ class ModApiBoundaryTests(unittest.TestCase):
 
     def test_unhandled_arms_name_a_non_exhaustive_enum(self):
         text = api_text()
-        for path in ROOT.glob("crates/sunrise-client*/src/**/*.rs"):
-            for name in re.findall(r'unreachable!\("(\w+): unhandled variant"\)', path.read_text()):
-                self.assertRegex(
-                    text,
-                    rf"#\[non_exhaustive\]\s*(?:#\[[^\n]*\]\s*)*pub enum {name}\b",
-                    f"{path.relative_to(ROOT)}: `{name}` is not a #[non_exhaustive] pub enum of the API",
-                )
+        for pattern in ("crates/sunrise-client*/src/**/*.rs", "crates/sunrise-gameplay*/src/**/*.rs"):
+            for path in ROOT.glob(pattern):
+                for name in re.findall(r'unreachable!\("(\w+): unhandled variant"\)', path.read_text()):
+                    self.assertRegex(
+                        text,
+                        rf"#\[non_exhaustive\]\s*(?:#\[[^\n]*\]\s*)*pub enum {name}\b",
+                        f"{path.relative_to(ROOT)}: `{name}` is not a #[non_exhaustive] pub enum of the API",
+                    )
 
 
 if __name__ == "__main__":

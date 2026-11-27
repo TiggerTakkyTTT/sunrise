@@ -82,6 +82,29 @@ fn strict_block_predicates_refuse_unknown_properties_even_if_custom_metadata_acc
         fn of(&self, _: BlockKey, _: &[StateConstraint]) -> Result<BlockState, BlockStateError> {
             Ok(self.0)
         }
+
+        fn visit_properties(
+            &self,
+            _: BlockState,
+            _: &mut dyn FnMut(&str, &str),
+        ) -> Result<(), BlockStateError> {
+            Ok(())
+        }
+
+        fn key(&self, _: &str) -> Option<BlockKey> {
+            Some(self.0.block())
+        }
+
+        fn default_state(&self, _: BlockKey) -> Result<BlockState, BlockStateError> {
+            Ok(self.0)
+        }
+
+        fn state_definition(
+            &self,
+            _: BlockKey,
+        ) -> Result<crate::StateProperties<'_>, BlockStateError> {
+            Ok(crate::StateProperties::of(&[]))
+        }
     }
 
     let key = register_block();
@@ -102,7 +125,7 @@ fn strict_block_predicates_refuse_unknown_properties_even_if_custom_metadata_acc
 #[test]
 fn tag_predicates_keep_vague_properties_and_refuse_duplicates() {
     let vague = StatePredicate::tag(
-        TagKey(0),
+        TagKey::slot_unchecked(0),
         &[StateConstraint::new(
             "property_no_member_has",
             "arbitrary_value",
@@ -111,10 +134,10 @@ fn tag_predicates_keep_vague_properties_and_refuse_duplicates() {
     .unwrap();
     assert_eq!(vague.constraints()[0].name, "property_no_member_has");
     assert_eq!(vague.constraints()[0].value, "arbitrary_value");
-    assert_eq!(vague.tag_key(), Some(TagKey(0)));
+    assert_eq!(vague.tag_key(), Some(TagKey::slot_unchecked(0)));
     assert_eq!(
         StatePredicate::tag(
-            TagKey(0),
+            TagKey::slot_unchecked(0),
             &[
                 StateConstraint::new("unknown", "a"),
                 StateConstraint::new("unknown", "b"),

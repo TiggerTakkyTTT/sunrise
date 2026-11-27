@@ -162,6 +162,18 @@ mod crate_root {
                     Ok(())
                 }
             }
+            pub(crate) fn refused_velocity_output(
+                accepted: &[f64; 3],
+                velocity: &[f64; 3],
+            ) -> Result<(), &'static str> {
+                if accepted.map(f64::to_bits) != velocity.map(f64::to_bits)
+                    && velocity.iter().any(|v| !v.is_finite())
+                {
+                    Err("velocity")
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }

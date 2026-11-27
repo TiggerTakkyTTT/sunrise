@@ -42,6 +42,10 @@ pub fn fresh_case_command(name: &str, flag: &str, case: &str) -> std::process::C
     command
 }
 
+// hidden: only the engine's test platform installs these fixture callbacks.
+#[doc(hidden)]
+#[path = "testing/engine_platform.rs"]
+pub mod engine_platform;
 #[path = "testing/journal.rs"]
 mod journal;
 #[path = "testing/level.rs"]
@@ -835,6 +839,14 @@ impl crate::prelude::ItemsBackend for FakeHost {
         if let Some(stack) = self.container_slot(at, slot) {
             read(ItemStackView::from_stack(stack));
         }
+    }
+    fn container_slot_backing(&self, at: BlockSide, slot: usize) -> Option<crate::StorageSlot> {
+        let items = self.level.standing(at.level, at.pos)?.items.as_ref()?;
+        (slot < items.slots.len()).then_some(crate::StorageSlot {
+            level: at.level,
+            pos: at.pos,
+            slot,
+        })
     }
     fn container_capacity(&self, at: BlockSide, slot: usize, stack: Option<&ItemStack>) -> u32 {
         let items = self

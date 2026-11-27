@@ -13,7 +13,7 @@ report and a Markdown table under .local/build-times/reports/:
   before it, that ends last.
 - no-op: the same build again with nothing changed (the floor of every incremental build).
 - incremental: after a one-line change in one file of each large crate (by default sunrise-world,
-  sunrise-client-render, sunrise-client's game.rs and sunrise-items), the build that follows, and which
+  sunrise-client-render, sunrise-gameplay-common's game.rs and sunrise-items), the build that follows, and which
   crates it recompiled.
 
 The change is a comment line (--edit): it cannot change behaviour, yet cargo and rustc see a changed file.
@@ -42,24 +42,22 @@ import sys
 import time
 from pathlib import Path
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
-ROOT = lab.ROOT
 REPORT_FORMAT, REPORT_VERSION = "sunrise-build-times", 1
 WORK = Path(".local") / "build-times"
 MARKER = ".sunrise-build-times"
 PACKAGE = "sunrise-game"
 PROFILES = ["dev", "fast"]
-# The files an edit goes to by default: large, often changed, and each in a different layer. sunrise-client's
-# game.rs belongs to the gameplay library, which the platform binary links. Any other crate in the
+# The files an edit goes to by default: large, often changed, and each in a different layer. sunrise-gameplay-common's
+# game.rs belongs to the shared gameplay library, which the gameplay crates and platform binary link. Any other crate in the
 # workspace gets its lib.rs; --file crate=path picks another file.
 EDIT_FILES = {
     "sunrise-world": "crates/sunrise-world/src/level/mod.rs",
     "sunrise-client-render": "crates/sunrise-client-render/src/gfx.rs",
-    "sunrise-client": "crates/sunrise-client/src/game.rs",
+    "sunrise-gameplay-common": "crates/sunrise-gameplay-common/src/game.rs",
     "sunrise-items": "crates/sunrise-items/src/items.rs",
 }
 EDIT_MODES = ["middle", "top", "append", "touch"]
@@ -178,10 +176,7 @@ def summarize_timings(units, top=TOP_CRATES):
 
 def machine_info():
     try:
-        try:
-            from . import perf_bench
-        except ImportError:
-            import perf_bench
+        from tools import perf_bench
         info = perf_bench.hardware()
     except Exception:
         info = {"os": sys.platform, "arch": platform.machine(), "cpu_threads": os.cpu_count(),

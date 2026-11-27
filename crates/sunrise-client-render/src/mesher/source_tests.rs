@@ -246,6 +246,7 @@ fn assemble(
         emissive_layers: vec![],
         translucent_layers: vec![false],
         sprite_mips: vec![],
+        oversized_sprites: Default::default(),
         pbr_normals: vec![],
         pbr_specular: vec![],
         pbr_size: 1,

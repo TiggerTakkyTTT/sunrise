@@ -4,12 +4,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import sys
 import unittest
+from tools.ci import vendored_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
-import yaml
+yaml = vendored_yaml.load()
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "requires POSIX Bash")

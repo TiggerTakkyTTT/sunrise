@@ -51,6 +51,44 @@ pub trait LevelDatapacksBackend {
         entry: &str,
         visit: &mut dyn FnMut(&DatapackEntry),
     ) -> Result<(), DatapackReadError>;
+    /// Side: both.
+    /// Sample a decoded `IntProvider` handle from the active datapack load (`IntProvider.sample`).
+    #[manual_handle]
+    fn datapack_int_provider_sample(
+        &self,
+        value: IntProviderValue,
+        random: &mut dyn RandomSource,
+    ) -> Result<i32, DatapackValueError>;
+    /// Side: both.
+    /// Evaluate a decoded `BlockStateProvider` handle against `level` at `pos`
+    /// (`BlockStateProvider.getState`).
+    #[manual_handle]
+    #[forward_api_output]
+    fn datapack_block_state_provider_state(
+        &self,
+        value: BlockStateProviderValue,
+        level: LevelRef,
+        random: &mut dyn RandomSource,
+        pos: [i32; 3],
+    ) -> Result<BlockState, DatapackValueError>;
+    /// Side: both.
+    /// Evaluate a decoded `BlockPredicate` handle against `level` at `pos` (`BlockPredicate.test`).
+    #[manual_handle]
+    fn datapack_block_predicate_test(
+        &self,
+        value: BlockPredicateValue,
+        level: LevelRef,
+        pos: [i32; 3],
+    ) -> Result<bool, DatapackValueError>;
+    /// Side: both.
+    /// Test whether `block` belongs to a decoded `HolderSet` handle from the active datapack load
+    /// (`HolderSet.contains`).
+    #[manual_handle]
+    fn datapack_holder_set_contains(
+        &self,
+        value: HolderSetValue,
+        block: BlockKey,
+    ) -> Result<bool, DatapackValueError>;
     /// Side: server.
     /// Match and assemble through the engine's recipe matcher, without consuming inputs.
     /// Covers minecraft:crafting, smelting, blasting, smoking, campfire_cooking,
@@ -81,6 +119,10 @@ pub trait LevelDatapacksBackendMut {
     /// the context `/loot … fish <table> <pos> <tool>` gives. The roll draws from the table's
     /// random sequence, else the level random, as vanilla's does, so it moves later draws: that
     /// is why this is a write. The stacks come split to their stack sizes, empties left out.
+    /// A `minecraft:location_check` tests this level at `origin` moved by its offsets
+    /// (`LocationCheck.test`): its biome, structure, smoke, light, block and fluid tests fail
+    /// where that position isn't loaded (`LocationPredicate.matches`). There is no
+    /// BLOCK_STATE or BLOCK_ENTITY, so a `minecraft:match_block` fails.
     /// Mods' loot kinds see `origin` and this level; no `loot_drops` event, since nothing
     /// drops. None for a table that isn't there, a stale or parked handle, a client, and a
     /// stale `entity`.

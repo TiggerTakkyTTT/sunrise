@@ -5,7 +5,7 @@
     python3 tools/hot_paths.py record run.json HISTORY     # validate, keep only known fields, add to HISTORY/runs
     python3 tools/hot_paths.py page HISTORY                # write HISTORY/index.html and HISTORY/README.md
 
-`measure` runs the game's built-in benchmark (`SUNRISE_HOT_PATHS`, crates/sunrise-client/src/game/runtime/
+`measure` runs the game's built-in benchmark (`SUNRISE_HOT_PATHS`, crates/sunrise-gameplay/src/game/runtime/
 hot_paths/; the executable is crates/sunrise-hot-paths-game) on fixed, seeded workloads. Each workload is one measured region, and three numbers come out of it,
 each divided by the workload's operations:
 
@@ -35,6 +35,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 SCHEMA = 1
 # Callgrind names the allocator's entry points; the game allocates through mimalloc's aligned ones.
 ALLOCATOR_ENTRIES = re.compile(r'^(mi_(m|z|c|re)alloc(_aligned)?|mi_(heap_)?(m|z|c|re)alloc\w*|malloc|calloc|realloc)$')
@@ -52,7 +55,7 @@ NOISY = 0.01
 
 def scratch_env(root, **extra):
     """The game's environment for one run: lab.game_env with its homes under `root`, and no telemetry."""
-    import lab  # here, so the record and page commands need nothing beside this file
+    from tools import lab  # here, so the record and page commands need nothing beside this file
     homes = {}
     for key in ('SUNRISE_HOME', 'SUNRISE_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME'):
         folder = Path(root) / key.lower()

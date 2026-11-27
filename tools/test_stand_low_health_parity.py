@@ -19,13 +19,10 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_rust_parity as base
-    from .stand_command_hurt_corpus import LOW_HEALTH_CASES, stand_low_health
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from stand_command_hurt_corpus import LOW_HEALTH_CASES, stand_low_health
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.stand_command_hurt_corpus import LOW_HEALTH_CASES, stand_low_health
 
 SEED = 1
 TEST_NAME = 'game::stand_low_health_tests::a_stand_breaks_on_low_health_only_through_damage_and_a_dead_one_goes_at_twenty'

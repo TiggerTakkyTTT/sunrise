@@ -17,7 +17,8 @@ pub trait Hooks {
     /// Hurt writes apply to players, mobs, dropped items and experience orbs.
     /// Use `LevelHost::entity_type_is_living(event.kind)` when the block only affects living
     /// bodies, as magma does.
-    /// Boats, minecarts, armor stands and projectiles ignore contact hurt.
+    /// Boats and minecarts take `Hurt` from this contact; their `entity_inside`
+    /// contact does not deal it yet (#4177). Armor stands and projectiles ignore contact hurt.
     /// `event.request(LandingWrite::…)` queues a change at `pos` through the `fall_on`
     /// drain: requests apply at the batch end if `pos` still holds `state`.
     /// A Part's invalid block state or non-finite movement or damage discards only its
@@ -33,7 +34,7 @@ pub trait Hooks {
         key = "state",
         host = "level_random_side",
         dispatch = "direct",
-        target = "sunrise_client::game::native_hooks::bounce_restitution::StepOnView<'_>::native_step_on",
+        target = "sunrise_gameplay_common::game::native_hooks::bounce_restitution::StepOnView<'_>::native_step_on",
         neoforge = "none (vanilla Block.stepOn)"
     )]
     fn step_on(

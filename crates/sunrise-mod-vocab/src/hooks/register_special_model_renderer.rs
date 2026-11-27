@@ -18,9 +18,13 @@ replacements; a panic or phase refusal discards that listener's whole batch.
 
 On each draw, `SpecialModelRenderer::extract_argument` reads a borrowed `SpecialModelStack`
 and returns the argument for `submit`. Submit geometry or nested stacks through
-`SpecialModelCollector`, using `with_pose` to scope local transforms. The game applies the
-`base` model's display transforms, particle and GUI light, and handles foil, packed light,
-overlay and outline through the normal item draw path.
+`SpecialModelCollector::submit_model` and `submit_stack`, using `with_pose` to scope local
+transforms. `SpecialModelSubmitOptions` lets each submission choose explicit `packed_light`
+(vanilla `LightCoordsUtil` layout; `None` inherits draw light and baked `light_emission`),
+`render_type` (`Baked`, `ItemCutout`, `ItemTranslucent`, or `Custom(RenderTypeRef)`), and
+`lighting` (`Diffuse` or `LightmapOnly`). The game applies the `base` model's display
+transforms, particle and GUI light, and handles foil, overlay and outline through the normal
+item draw path.
 
 An unknown type, a disabled winning factory, or a decode or bake error or panic refuses that
 item definition. The game does not retry a built-in decoder or a lower pack. Decode, bake,
@@ -30,6 +34,7 @@ disabling the callback. A panic logs and shows an error toast naming the mod, an
 that registration's affected callback for the session, including after resource reloads.
 Only the outermost refused layer draws the missing model."#]
     #[hook(
+        target = "sunrise_gameplay_common::game::native_hooks::register_special_model_renderer::native_register_special_model_renderer",
         receiver = "associated",
         dispatch = "flat",
         side = "client",

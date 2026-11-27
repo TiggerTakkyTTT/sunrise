@@ -12,10 +12,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-try:
-    from . import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base
-except ImportError:
-    import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_model_baking_parity as baking, test_rust_parity as base
 
 STYLE_TEST = (
     'game::native_hooks::render_tooltip_texture::render_tooltip_texture_tests::'
@@ -159,7 +158,7 @@ def main():
         'tooltip-display-parity', 'VanillaTooltipDisplayOracle', 'tooltip_display_fixture', cases,
         'Tooltip visibility, styled custom-name inheritance, and 26.3 tooltip_style sprite selection',
         sources=[
-            lab.ROOT / 'crates/sunrise-client/src/game/blocks/stations.rs',
+            lab.ROOT / 'crates/sunrise-client-gameplay/src/game/blocks/stations.rs',
             lab.ROOT / 'crates/sunrise-client/src/item_tooltip.rs',
             lab.ROOT / 'crates/sunrise-client-render/src/ui.rs',
             lab.ROOT / 'crates/sunrise-items/src/item_data.rs',

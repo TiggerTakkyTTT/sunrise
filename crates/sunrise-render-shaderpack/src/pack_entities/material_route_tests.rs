@@ -311,3 +311,39 @@ fn the_block_atlas_places_native_terrain_quads() {
     assert!(quads[4..].iter().all(|v| v.normal == [0; 4]));
     assert!(quads.iter().all(|v| v.layer == 0 && v.glint_uv == [0.0; 2]));
 }
+
+#[test]
+fn dynamic_texture_quads_run_in_the_pack_program_one_texture_a_run() {
+    use sunrise_render_core::entity::{
+        DYNAMIC_TEXTURE_CUTOUT_OVERLAY, DYNAMIC_TEXTURE_SOLID_OVERLAY, dynamic_texture_bits,
+    };
+    let mut vertices = Vec::new();
+    for (layer, handle) in [
+        (DYNAMIC_TEXTURE_SOLID_OVERLAY, 5),
+        (DYNAMIC_TEXTURE_CUTOUT_OVERLAY, 5),
+        (DYNAMIC_TEXTURE_CUTOUT_OVERLAY, 9),
+    ] {
+        vertices.extend(
+            [Vertex {
+                layer,
+                glint_uv: dynamic_texture_bits(handle),
+                ..bytemuck::Zeroable::zeroed()
+            }; 4],
+        );
+    }
+    let spans = [EntitySpan {
+        stage: render_stage("ENTITIES"),
+        id: 3,
+        ..Default::default()
+    }];
+    let runs = material_runs(&vertices, &spans, [true; PROGRAMS], None)
+        .map(|r| (r.range, r.program, r.texture))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        runs,
+        [
+            (0..8, Some(ENTITY), Some(5)),
+            (8..12, Some(ENTITY), Some(9)),
+        ]
+    );
+}

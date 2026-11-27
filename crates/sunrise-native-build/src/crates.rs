@@ -269,13 +269,20 @@ mod tests {
     use super::*;
 
     fn fixture(dir: &Path, body: &str) -> super::super::Bundle {
+        write_fixture(dir, body);
+        super::super::bundle_in(dir).unwrap().unwrap()
+    }
+
+    fn write_fixture(dir: &Path, body: &str) {
         super::super::tests::write_bundle(dir, "bake", "");
         fs::write(
             dir.join("Cargo.toml"),
             format!("[package]\nname='bake-engine'\nversion='0.1.0'\n[dependencies]\nsunrise-mod-api={{path='.sunrise/sdk/api/crates/sunrise-mod-api'}}\n{body}"),
         )
         .unwrap();
-        super::super::bundle_in(dir).unwrap().unwrap()
+        // A path dependency's folder must be in the package, so the helper the bodies name exists
+        // before the bundle is read; each test then writes the manifest it wants into it.
+        write_manifest(&dir.join("src/helper"), "helper", "");
     }
 
     fn write_manifest(dir: &Path, package: &str, body: &str) {
@@ -337,13 +344,10 @@ mod tests {
     #[test]
     fn authored_paths_cannot_escape_or_name_a_different_local_package() {
         for (body, expected) in [
-            ("bad={path='../other'}", "path outside the mod is refused"),
-            ("bad={path='/absolute'}", "path outside the mod is refused"),
+            ("bad={path='../other'}", "leaves the package"),
+            ("bad={path='/absolute'}", "leaves the package"),
             ("bad={path=7}", "dependency path must be a string"),
-            (
-                "bad={path='src/not_a_crate'}",
-                "dependency manifest must be an ordinary file",
-            ),
+            ("bad={path='src/not_a_crate'}", "Is a directory"),
             (
                 "bad={path='src/helper',package='different'}\n[target.'cfg(unix)'.dependencies]\nhelper={path='src/helper'}",
                 "path dependency bad has the wrong package name",
@@ -351,13 +355,17 @@ mod tests {
         ] {
             let temp = tempfile::tempdir().unwrap();
             let input = temp.path().join("bake");
-            let bundle = fixture(&input, body);
+            write_fixture(&input, body);
             write_manifest(&temp.path().join("other"), "bad", "");
             write_manifest(&input.join("src/helper"), "helper", "");
             fs::create_dir_all(input.join("src/not_a_crate/Cargo.toml")).unwrap();
-            let result = api::Project::read(&bundle)
-                .map_err(|e| e.to_string())
-                .and_then(|project| rewrite_closure(&project, &input, |_, _| Ok(())));
+            // Reading the package refuses a path that leaves it or names a folder it lacks.
+            let result = super::super::bundle_in(&input)
+                .map(|bundle| bundle.unwrap())
+                .and_then(|bundle| {
+                    let project = api::Project::read(&bundle).map_err(|e| e.to_string())?;
+                    rewrite_closure(&project, &input, |_, _| Ok(()))
+                });
             let error = result.unwrap_err();
             assert!(error.contains(expected), "{body}: {error}");
         }

@@ -7,8 +7,6 @@ use sunrise_core::identifier::IDENTIFIER_DATA_LAYOUT;
 pub const PAYLOAD_MAX_DEPTH: u16 = 64;
 /// The largest UTF-8 string in a typed payload, in bytes.
 pub const PAYLOAD_MAX_STRING_BYTES: usize = 4096;
-/// The largest variable-length collection in a typed payload, in entries.
-pub const PAYLOAD_MAX_LIST_ENTRIES: usize = 4096;
 /// The allocation budget for a typed payload value, and its maximum encoded body size.
 /// Owned collection storage is charged at 64-bit sizes, even on a 32-bit target.
 pub const PAYLOAD_DECODE_BUDGET: usize = 8_388_608;

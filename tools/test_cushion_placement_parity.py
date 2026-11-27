@@ -3,10 +3,12 @@
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 
 def make_input(build):
@@ -44,7 +46,7 @@ def main():
         'and suffocation queries. Includes partial supports, burial, complete coverage, '
         'overhanging outlines, negative coordinates and boundary heights. Item use, '
         'entity tracking, interaction and persistence are checked separately.',
-        sources=[lab.ROOT / 'crates/sunrise-client/src/cushion.rs'])
+        sources=[lab.ROOT / 'crates/sunrise-sim/src/cushion.rs'])
 
 
 if __name__ == '__main__':

@@ -2,12 +2,12 @@
 """Stop-sound packet bytes and selections against the native Java codec."""
 import json
 import os
-try:
-    from . import lab, test_rust_parity as base, oracle_harness as harness
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, oracle_harness as harness
 
 
 def main():
@@ -16,7 +16,7 @@ def main():
     lock,jars,libraries=base.verify_artifacts()
     cp=os.pathsep.join(map(str,[jars['server'],*libraries])); classes=build/'classes';classes.mkdir(exist_ok=True)
     source=lab.ROOT/'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaStopSoundWireOracle.java'
-    sources=[source,lab.ROOT/'crates/sunrise-protocol/src/packets/play.rs',lab.ROOT/'crates/sunrise-client/src/game/network/remote/mod.rs']
+    sources=[source,lab.ROOT/'crates/sunrise-protocol/src/packets/play.rs',lab.ROOT/'crates/sunrise-gameplay-common/src/game/network/remote/mod.rs']
     tested=base.source_hashes(sources)
     run=lambda cmd,name:harness.run_logged(cmd,build,name)
     run(['javac','--release',lock['minecraft']['java_major'],'-proc:none','-cp',cp,'-d',classes,source],'compile-java')

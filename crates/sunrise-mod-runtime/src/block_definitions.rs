@@ -83,6 +83,17 @@ impl BlockDefinition {
         self.states.len() as u32
     }
 
+    /// The default state's local ordinal (`Block.defaultBlockState`).
+    pub fn default_state(&self) -> u16 {
+        self.default
+    }
+
+    /// Each property's name and legal values, in property-name order; the values in the order
+    /// the imported states first take them (`StateDefinition.getProperties`).
+    pub fn properties(&self) -> &[(String, Vec<String>)] {
+        &self.properties
+    }
+
     /// Read a borrowed property value without allocation, locks or mutable state.
     pub fn property(&self, state: u16, name: &str) -> Result<Option<&str>, StateError> {
         let values = self
@@ -95,6 +106,23 @@ impl BlockDefinition {
             .enumerate()
             .find(|(_, (key, _))| key == name)
             .map(|(index, (_, legal))| legal[usize::from(values[index])].as_str()))
+    }
+
+    /// Visit each property of `state` with its serialized value, in name order (as vanilla's
+    /// `StateDefinition` keeps them), without allocation, locks or mutable state.
+    pub fn visit_properties(
+        &self,
+        state: u16,
+        mut visit: impl FnMut(&str, &str),
+    ) -> Result<(), StateError> {
+        let values = self
+            .states
+            .get(usize::from(state))
+            .ok_or(StateError::UnknownState)?;
+        for ((name, legal), &value) in self.properties.iter().zip(values.iter()) {
+            visit(name, &legal[usize::from(value)]);
+        }
+        Ok(())
     }
 
     /// Build a state from the default and partial property constraints.

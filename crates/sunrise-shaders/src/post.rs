@@ -979,7 +979,8 @@ fn load_post_inner(
         config: Config::default(),
         notes: Vec::new(),
     };
-    let options = crate::with_options(pack, macros);
+    // One file's work for every size's options, as for the file itself.
+    let options = crate::with_options(pack, macros).for_file();
     for e in &properties.entries {
         if let Some(n) = e.key.strip_prefix("bufferObject.") {
             match (n.parse(), BufferObject::parse(&e.value)) {
@@ -994,9 +995,13 @@ fn load_post_inner(
         if let Some(name) = e.key.strip_prefix("image.") {
             // `Properties::parse` expanded the file's own macros at the line; the options again
             // here, for a file read without them.
-            match CustomImage::parse(name, &options.expand(&e.value)) {
-                Some(i) => post.images.push(i),
-                None => post.notes.push(format!("`{}`: not an image", e.key)),
+            match options
+                .try_expand(&e.value)
+                .map(|v| CustomImage::parse(name, &v))
+            {
+                Ok(Some(i)) => post.images.push(i),
+                Ok(None) => post.notes.push(format!("`{}`: not an image", e.key)),
+                Err(why) => post.notes.push(format!("`{}`: {why}", e.key)),
             }
             continue;
         }
@@ -1004,10 +1009,14 @@ fn load_post_inner(
             continue;
         };
         // As for `image.*`: the options again, for a file read without them.
-        match (
-            crate::buffer_index(name),
-            BufferSize::parse(&options.expand(&e.value)),
-        ) {
+        let value = match options.try_expand(&e.value) {
+            Ok(value) => value,
+            Err(why) => {
+                post.notes.push(format!("`{}`: {why}", e.key));
+                continue;
+            }
+        };
+        match (crate::buffer_index(name), BufferSize::parse(&value)) {
             (Some(b), Some(size)) => post.sizes[b] = Some(size),
             _ => post
                 .notes
@@ -1633,7 +1642,7 @@ impl Loader<'_> {
     }
 
     /// The program `name` translated by `translate`, or `None` when it is missing, disabled or
-    /// fails (with a note).
+    /// fails (with a note naming the authored position and stage when known).
     fn load(
         &mut self,
         name: String,
@@ -1744,21 +1753,16 @@ impl Loader<'_> {
                 self.post
                     .loader_refusals
                     .push(LoaderRefusal::Program(name.clone()));
-                self.post.notes.extend(
-                    errors
-                        .iter()
-                        .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                );
+                self.post
+                    .notes
+                    .extend(errors.iter().map(ToString::to_string));
                 self.post.notes.push(format!("{name}: skipped"));
                 return None;
             }
         };
-        self.post.notes.extend(
-            program
-                .notes
-                .iter()
-                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-        );
+        self.post
+            .notes
+            .extend(program.notes.iter().map(ToString::to_string));
         self.post.config.read_vertex(&vertex);
         self.post.config.read(&fragment);
         let mut buffers =
@@ -1837,9 +1841,11 @@ impl Loader<'_> {
     /// Stage file `path` through the preprocessor; the pack's images declared without a format
     /// (GLSL lets a write-only image omit it) get the one `image.*` gives them.
     fn preprocess(&self, path: &str) -> Preprocessed {
-        let mut pp = preprocess(self.pack, path, self.macros);
-        if !self.post.images.is_empty() && pp.code.contains("image") {
-            let source: Vec<&str> = pp.code.split('\n').collect();
+        let pp = preprocess(self.pack, path, self.macros);
+        let pp = if self.post.images.is_empty() || !pp.code().contains("image") {
+            pp
+        } else {
+            let source: Vec<&str> = pp.code().split('\n').collect();
             let lines: Vec<String> = source
                 .iter()
                 .enumerate()
@@ -1877,10 +1883,10 @@ impl Loader<'_> {
                     }
                 })
                 .collect();
-            pp.code = lines.join("\n");
-        }
+            pp.with_code(lines.join("\n"))
+        };
         if self.audit_sizes {
-            let size = pp.code.len();
+            let size = pp.code().len();
             self.stage_sizes
                 .borrow_mut()
                 .entry(path.to_owned())
@@ -1890,7 +1896,8 @@ impl Loader<'_> {
         pp
     }
 
-    /// A program with a geometry stage, folded into its vertex stage.
+    /// A program with a geometry stage, folded into its vertex stage. A refusal notes the
+    /// authored position and stage when known.
     fn load_geometry(
         &mut self,
         name: String,
@@ -1910,6 +1917,8 @@ impl Loader<'_> {
             self.post.notes.push(format!("{name}: skipped"));
             return None;
         }
+        // Conditions read as false, as the other programs' (`load`).
+        self.post.notes.extend(stages.iter().flat_map(warnings));
         let [vertex, geometry, fragment] = &stages;
         let (program, triangles) =
             match crate::translate_geometry(vertex, geometry, fragment, inputs, self.limits) {
@@ -1918,21 +1927,16 @@ impl Loader<'_> {
                     self.post
                         .loader_refusals
                         .push(LoaderRefusal::Program(name.clone()));
-                    self.post.notes.extend(
-                        errors
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    self.post
+                        .notes
+                        .extend(errors.iter().map(ToString::to_string));
                     self.post.notes.push(format!("{name}: skipped"));
                     return None;
                 }
             };
-        self.post.notes.extend(
-            program
-                .notes
-                .iter()
-                .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-        );
+        self.post
+            .notes
+            .extend(program.notes.iter().map(ToString::to_string));
         self.post.config.read_vertex(vertex);
         self.post.config.read(fragment);
         let mut buffers =
@@ -1970,6 +1974,7 @@ impl Loader<'_> {
     }
 
     /// The compute programs of composite-style program `name` that are on and translate.
+    /// Translation refusals are noted with their authored position and stage when known.
     fn compute(&mut self, name: &str) -> Vec<(String, ComputeProgram)> {
         let owner = name.to_owned();
         let mut out = Vec::new();
@@ -2006,25 +2011,22 @@ impl Loader<'_> {
                 self.post.notes.push(format!("{name}: skipped"));
                 continue;
             }
+            // Conditions read as false, as the other programs' (`load`).
+            self.post.notes.extend(warnings(&pp));
             match translate_compute(&pp) {
                 Ok(program) => {
-                    self.post.notes.extend(
-                        program
-                            .notes
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    self.post
+                        .notes
+                        .extend(program.notes.iter().map(ToString::to_string));
                     out.push((name, program));
                 }
                 Err(errors) => {
                     self.post
                         .loader_refusals
                         .push(LoaderRefusal::ComputeStage(path.clone()));
-                    self.post.notes.extend(
-                        errors
-                            .iter()
-                            .map(|e| format!("{}:{}: {}", e.file, e.line, e.message)),
-                    );
+                    self.post
+                        .notes
+                        .extend(errors.iter().map(ToString::to_string));
                     self.post.notes.push(format!("{name}: skipped"));
                 }
             }
@@ -2053,13 +2055,7 @@ fn warnings(pp: &Preprocessed) -> Vec<String> {
 
 fn located(pp: &Preprocessed, list: &[crate::preprocess::Diagnostic]) -> Vec<String> {
     list.iter()
-        .map(|d| {
-            let file = pp
-                .files
-                .get(d.origin.file as usize)
-                .map_or("?", String::as_str);
-            format!("{file}:{}: {}", d.origin.line, d.message)
-        })
+        .map(|d| format!("{}:{}: {}", pp.file_of(d.origin), d.origin.line, d.message))
         .collect()
 }
 
@@ -3146,7 +3142,10 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             notes.contains("composite6: uses a tessellation stage (unsupported); skipped"),
             "{notes}"
         );
-        assert!(notes.contains("composite5.fsh:2:"), "{notes}");
+        assert!(
+            notes.contains("composite5.fsh:2: fragment shader: "),
+            "{notes}"
+        );
         assert!(notes.contains("composite5: skipped"), "{notes}");
 
         let mut macros = Macros::standard();
@@ -3947,6 +3946,208 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
             terrain_names(&[terrain, solid], on, true),
             [some(solid), some(terrain)]
         );
+    }
+
+    /// A `program.<name>.enabled` expression nested past `MAX_CONDITION_DEPTH` is read on a
+    /// thread of half the 2 MiB Rust gives a spawned thread, as one nested to it is; like any
+    /// expression that can't be evaluated, it leaves the program on.
+    #[test]
+    fn an_enabled_expression_nested_past_the_bound_leaves_the_program_on() {
+        use sunrise_glsl::condition::MAX_CONDITION_DEPTH;
+        let key = |depth: usize| {
+            let value = format!("{}false{}", "(".repeat(depth), ")".repeat(depth));
+            format!("program.final.enabled = {value}\n")
+        };
+        let read = |text: String| {
+            std::thread::Builder::new()
+                .stack_size(1 << 20)
+                .spawn(move || {
+                    let properties = Properties::parse(&text, &Macros::standard());
+                    enabled(
+                        &properties,
+                        "",
+                        "final",
+                        &Macros::standard(),
+                        &BTreeSet::new(),
+                    )
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        assert!(!read(key(MAX_CONDITION_DEPTH)));
+        assert!(read(key(MAX_CONDITION_DEPTH + 1)));
+        // Names read as `defined(name)`: 400 calls are 400 parentheses, refused the same way.
+        let calls = format!("{}false{}", "F(".repeat(400), ")".repeat(400));
+        assert!(read(format!("program.final.enabled = {calls}\n")));
+    }
+
+    /// The options' second expansion of an `image.*` or `size.buffer.*` value stops at
+    /// `MAX_ARGUMENT_DEPTH` on a thread of half the 2 MiB Rust gives a spawned thread: 400 nested
+    /// calls of a macro are noted by key and dropped, the other entries read.
+    #[test]
+    fn sizes_nested_past_the_depth_are_noted_by_key() {
+        use sunrise_glsl::macros::{MAX_ARGUMENT_DEPTH, calls_too_deep};
+        let nested = |depth: usize, value: &str| {
+            format!("{}{value}{}", "F(".repeat(depth), ")".repeat(depth))
+        };
+        let entry = |key: &str, value: String, line: u32| crate::properties::Entry {
+            key: key.into(),
+            value,
+            line,
+        };
+        let properties = Properties {
+            entries: vec![
+                entry(
+                    "size.buffer.colortex4",
+                    format!("{} 4", nested(MAX_ARGUMENT_DEPTH, "8")),
+                    1,
+                ),
+                entry(
+                    "size.buffer.colortex5",
+                    format!("{} 4", nested(400, "8")),
+                    2,
+                ),
+                entry(
+                    "image.deep",
+                    format!("deep_sampler {} RGBA8 BYTE false false 4", nested(400, "R")),
+                    3,
+                ),
+            ],
+            notes: Vec::new(),
+        };
+        let post = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let pack = Pack::from_zip_bytes("deep.zip", zip(&[("shaders/x.txt", "")])).unwrap();
+                let mut macros = Macros::standard();
+                macros.define_line("F(x) x").unwrap();
+                load_post(&pack, "", &properties, &macros, &GameInputs::default())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(post.sizes[4], Some(BufferSize::Absolute([8, 4])));
+        assert_eq!(post.sizes[5], None);
+        assert!(post.images.is_empty());
+        let notes: Vec<&str> = post.notes.iter().map(String::as_str).collect();
+        let size = format!("`size.buffer.colortex5`: {}", calls_too_deep());
+        let image = format!("`image.deep`: {}", calls_too_deep());
+        assert!(
+            notes.contains(&size.as_str()) && notes.contains(&image.as_str()),
+            "{notes:?}"
+        );
+    }
+
+    /// The options' second expansion of the `image.*` and `size.buffer.*` values spends one
+    /// file's `MAX_EXPANSION_WORK` (#4135): a doubling call is noted by key and dropped, the size
+    /// before it read.
+    #[test]
+    fn sizes_past_the_work_are_noted_by_key() {
+        let entry = |key: &str, value: String, line: u32| crate::properties::Entry {
+            key: key.into(),
+            value,
+            line,
+        };
+        let properties = Properties {
+            entries: vec![
+                entry("size.buffer.colortex4", "F(8) 4".into(), 1),
+                entry("size.buffer.colortex5", "D23(8) 4".into(), 2),
+                entry(
+                    "image.bomb",
+                    "bomb_sampler D23(R) RGBA8 BYTE false false 4".into(),
+                    3,
+                ),
+            ],
+            notes: Vec::new(),
+        };
+        let pack = Pack::from_zip_bytes("bomb.zip", zip(&[("shaders/x.txt", "")])).unwrap();
+        let mut macros = Macros::standard();
+        macros.define_line("F(x) x").unwrap();
+        for n in 4..=23 {
+            macros
+                .define_line(&format!("D{n}(x) D{m}(x) D{m}(x)", m = n - 1))
+                .unwrap();
+        }
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert_eq!(post.sizes[4], Some(BufferSize::Absolute([8, 4])));
+        assert_eq!(post.sizes[5], None);
+        assert!(post.images.is_empty());
+        let why = sunrise_glsl::macros::work_ran_out(crate::macros::MAX_EXPANSION_WORK);
+        let notes: Vec<&str> = post.notes.iter().map(String::as_str).collect();
+        let size = format!("`size.buffer.colortex5`: {why}");
+        let image = format!("`image.bomb`: {why}");
+        assert!(
+            notes.contains(&size.as_str()) && notes.contains(&image.as_str()),
+            "{notes:?}"
+        );
+    }
+
+    /// A geometry program and a compute program note their conditions read as false, as the
+    /// other programs do: an `#elif` past the file's `MAX_EXPANSION_WORK` (#4135) is a note at
+    /// its file and line, and the program loads with the branch skipped.
+    #[test]
+    fn geometry_and_compute_programs_note_conditions_past_the_work() {
+        let mut doubling = "#define FZ_E0 1\n".to_owned();
+        for n in 1..=39 {
+            doubling += &format!("#define FZ_E{n} (FZ_E{m} + FZ_E{m})\n", m = n - 1);
+        }
+        // Lines 42 to 45, after `#version` and the 40 definitions.
+        let elif = "#if 0\n#elif FZ_E39 > 0\nfloat never;\n#endif\n";
+        let gsh = format!(
+            "#version 330\n{doubling}{elif}layout(triangles) in;\n\
+             layout(triangle_strip, max_vertices = 3) out;\n\
+             in vec2 vUv[];\nout vec2 gUv;\nvoid main() {{\n    for (int i = 0; i < 3; i++) {{\n        \
+             gl_Position = gl_in[i].gl_Position;\n        gUv = vUv[i];\n        EmitVertex();\n    }}\n    \
+             EndPrimitive();\n}}\n"
+        );
+        let vsh = "#version 330\nout vec2 vUv;\nvoid main() { gl_Position = ftransform(); vUv = vec2(0.0); }\n";
+        let fsh = "#version 330\nin vec2 gUv;\nlayout(location = 0) out vec4 c;\nvoid main() { c = vec4(gUv, 0.0, 1.0); }\n";
+        let reads = "#version 120\nuniform sampler2D shadowtex0;\nvarying vec2 uv;\n\
+                     void main() { gl_FragColor = texture2D(shadowtex0, uv); }\n";
+        let csh = format!(
+            "#version 430\n{doubling}{elif}layout(local_size_x = 1) in;\n\
+             layout(std430, binding = 0) buffer Sums {{ vec4 a; }} sums;\n\
+             void main() {{ sums.a = vec4(1.0); }}\n"
+        );
+        let files = [
+            ("shaders/composite.vsh", VSH),
+            ("shaders/composite.fsh", reads),
+            ("shaders/composite.csh", csh.as_str()),
+            ("shaders/shadow.vsh", vsh),
+            ("shaders/shadow.gsh", gsh.as_str()),
+            ("shaders/shadow.fsh", fsh),
+        ];
+        let pack = Pack::from_zip_bytes("t", zip(&files)).unwrap();
+        let game = crate::GbuffersInputs {
+            declarations: "layout(location = 0) in vec3 hz_v_pos;\n\
+                           layout(set = 1, binding = 0) readonly buffer V { uint v[]; };\n"
+                .into(),
+            body: "    hz_Vertex = vec4(hz_v_pos, 1.0);\n".into(),
+            ..Default::default()
+        };
+        let geometry = crate::GeometryInputs {
+            inputs: game.clone(),
+            pull: "        hz_v_pos = uintBitsToFloat(uvec3(v[hz_vertex_index], v[hz_vertex_index], v[hz_vertex_index]));\n"
+                .into(),
+            index: "uint(@)".into(),
+        };
+        let inputs = GameInputs {
+            terrain: Some(game),
+            terrain_geometry: Some(geometry),
+            ..Default::default()
+        };
+        let macros = Macros::standard();
+        let properties = Properties::parse("bufferObject.0 = 16\n", &macros);
+        let post = load_post(&pack, "", &properties, &macros, &inputs);
+        let triangles = post.shadow.as_ref().map(|p| p.geometry_triangles);
+        assert_eq!(triangles, Some(1), "{:?}", post.notes);
+        assert_eq!(post.programs[0].compute.len(), 1, "{:?}", post.notes);
+        let why = sunrise_glsl::macros::work_ran_out(crate::macros::MAX_EXPANSION_WORK);
+        let note = |file: &str| format!("{file}:43: `#if FZ_E39 > 0`: {why}; read as false");
+        for file in ["shadow.gsh", "composite.csh"] {
+            assert!(post.notes.contains(&note(file)), "{file}: {:?}", post.notes);
+        }
     }
 
     /// The cutout part's storage blocks count towards the buffers' sizes, like every other

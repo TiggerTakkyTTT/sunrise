@@ -86,6 +86,15 @@ impl TryFrom<u32> for DamageTypeKey {
 // exhaustive: incoming scalar slots are checked against the host's registry
 pub struct EntityTypeKey(pub(crate) u32);
 
+impl EntityTypeKey {
+    /// `EntityType.getCategory()` of this registered type, on either side and with no entity
+    /// spawned: `minecraft:zombie` is `Monster`, a mod mob its declared category. See
+    /// `KeysHost::entity_type_category`; a live entity's is `EntityRef::classification`.
+    pub fn category(self, host: &dyn crate::Host) -> Option<crate::MobCategory> {
+        crate::backend_of(host)?.entity_type_category(self)
+    }
+}
+
 impl From<&EntityTypeKey> for u32 {
     fn from(key: &EntityTypeKey) -> Self {
         key.0
@@ -121,6 +130,54 @@ pub struct VirtualHost {
     pub port: u16,
 }
 
+/// An armor stand's six pose rotations (`ArmorStand.DATA_HEAD_POSE` to `DATA_RIGHT_LEG_POSE`,
+/// vanilla's `Rotations`): x, y and z in degrees, as `getHeadPose` ... `getRightLegPose` give them.
+#[derive(Clone, Copy, Debug, PartialEq, sunrise_mod_api_macros::Wire)]
+// exhaustive: the game builds it with a literal; mods only read it
+pub struct ArmorStandPose {
+    /// `ArmorStand.headPose`: x, y and z rotation in degrees.
+    pub head: [f32; 3],
+    /// `ArmorStand.bodyPose`: x, y and z rotation in degrees.
+    pub body: [f32; 3],
+    /// `ArmorStand.leftArmPose`: x, y and z rotation in degrees.
+    pub left_arm: [f32; 3],
+    /// `ArmorStand.rightArmPose`: x, y and z rotation in degrees.
+    pub right_arm: [f32; 3],
+    /// `ArmorStand.leftLegPose`: x, y and z rotation in degrees.
+    pub left_leg: [f32; 3],
+    /// `ArmorStand.rightLegPose`: x, y and z rotation in degrees.
+    pub right_leg: [f32; 3],
+}
+
+/// A new armor stand's pose (`ArmorStand.DEFAULT_HEAD_POSE` to `DEFAULT_RIGHT_LEG_POSE`).
+impl Default for ArmorStandPose {
+    fn default() -> Self {
+        Self {
+            head: [0.0, 0.0, 0.0],
+            body: [0.0, 0.0, 0.0],
+            left_arm: [-10.0, 0.0, -10.0],
+            right_arm: [-15.0, 0.0, 10.0],
+            left_leg: [-1.0, 0.0, -1.0],
+            right_leg: [1.0, 0.0, 1.0],
+        }
+    }
+}
+
+/// An armor stand's client flags (`ArmorStand.DATA_CLIENT_FLAGS`).
+/// The default is vanilla's: no flag set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+// exhaustive: the game builds it with a literal; mods only read it
+pub struct ArmorStandFlags {
+    /// `ArmorStand.isSmall`.
+    pub small: bool,
+    /// `ArmorStand.showArms`.
+    pub show_arms: bool,
+    /// `ArmorStand.showBasePlate`.
+    pub show_base_plate: bool,
+    /// `ArmorStand.isMarker`.
+    pub marker: bool,
+}
+
 /// A persistent entity UUID in the same bit order as the value from `EntityRef::uuid`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, sunrise_mod_api_macros::Wire)]
 // exhaustive: a UUID is exactly one public 128-bit value
@@ -138,6 +195,15 @@ pub struct EntityUuid(pub u128);
 /// of an entity that is gone, or used on a client. `Host::entity` makes a server
 /// handle from an event's entity id; `ClientHost::crosshair_target` supplies a
 /// client handle for an entity hit.
+///
+/// The base state vanilla gives every `Entity` is read and written through one rule for
+/// every kind: the remaining fire ticks and `isOnFire`, `fireImmune`, `isSilent`,
+/// `hasGlowingTag`, `isNoGravity` and `isInvulnerable`, saved as `Fire`, `Silent`,
+/// `Glowing`, `NoGravity` and `Invulnerable` as `Entity.saveWithoutId` writes them. `None`
+/// or `false` from them means a stale handle, a non-finite input or the wrong side. The
+/// exceptions are a fishing bobber, a leash knot and a dragon's part, which keep no entity
+/// data: they read the defaults and refuse writes. Kinds the game keeps as saved data hold
+/// `Fire` as the saved short.
 #[derive(sunrise_mod_api_macros::Wire, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // exhaustive: its fields are private, so mods cannot build or destructure it
 pub struct EntityRef {
@@ -159,6 +225,19 @@ impl EntityRef {
     /// The open of the world the handle belongs to.
     pub fn epoch(self) -> WorldEpoch {
         self.epoch
+    }
+    /// Where the entity is `partial` of the way through its current tick
+    /// (`Entity.getPosition(float)`): on each axis `Mth.lerp(partial, xo, x)`, from
+    /// [`Self::previous_position`] to [`Self::position`], the position a renderer draws the
+    /// entity at with the frame's partial tick. NeoForge mods call the same vanilla method.
+    /// Side: both. None when either read is None.
+    pub fn position_at(self, host: &dyn Host, partial: f32) -> Option<[f64; 3]> {
+        let old = self.previous_position(host)?;
+        let now = self.position(host)?;
+        let delta = f64::from(partial);
+        Some(std::array::from_fn(|axis| {
+            old[axis] + delta * (now[axis] - old[axis])
+        }))
     }
     /// Use the entity's live `Entity.getRandom` stream for `draw`. The hit leaves the
     /// draws in the stream in listener order. Returns `None` without running `draw`
@@ -1020,6 +1099,10 @@ impl NoBackend for PierceLevelError {
     fn no_backend() -> Self {
         Self::Stale
     }
+
+    fn wrong_side() -> Self {
+        Self::WrongSide
+    }
 }
 
 /// Why a player's collision exclusions were not set (`EntityRef::set_collision_exclusions`,
@@ -1291,9 +1374,9 @@ pub struct PlayerFood {
     pub exhaustion: f32,
 }
 
-// no wire: borrows the connected player's profile from the host.
+// no wire: borrows a profile from the host.
 /// A player's borrowed game profile (authlib's `GameProfile`): UUID, name and login
-/// properties, such as `textures` (the skin). A custom test host can lend one using
+/// properties, such as `textures` (the skin) when available. A custom test host can lend one using
 /// `mod_api::testing::GameProfileFixture` with the `testing` feature enabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1307,7 +1390,7 @@ pub struct GameProfile<'a> {
 
 impl<'a> GameProfile<'a> {
     /// Read the profile's properties in login order without copying the text.
-    /// An offline-mode player has no properties.
+    /// Offline-mode players and profiles from the user cache have no properties.
     pub fn properties(&self) -> impl ExactSizeIterator<Item = ProfileProperty<'a>> + use<'a> {
         self.properties.iter().map(|property| ProfileProperty {
             name: &property.name,
@@ -1439,6 +1522,10 @@ impl NoBackend for RespawnRefusal {
     fn no_backend() -> Self {
         Self::Stale
     }
+
+    fn wrong_side() -> Self {
+        Self::Client
+    }
 }
 
 /// Where a player would respawn now, as [`PlayerRef::respawn_target`] finds it: the transition
@@ -1515,6 +1602,10 @@ impl From<StackWriteError> for MenuItemsRefusal {
 impl NoBackend for MenuItemsRefusal {
     fn no_backend() -> Self {
         Self::Unavailable
+    }
+
+    fn wrong_side() -> Self {
+        Self::Client
     }
 }
 
@@ -1727,8 +1818,8 @@ pub enum MoveCause {
     /// `MoverType.SHULKER`: a shulker mob's opening lid pushes it away.
     Shulker,
     /// Sunrise's own: a moving collider (an entity's `set_collider`) carries a body standing on
-    /// it or shoves a body swept by its translation, after the level's entities tick. Vanilla
-    /// has no such mover.
+    /// it or shoves a body in the swept path of its translation and rotation, after the level's
+    /// entities tick. Vanilla has no such mover.
     Carried,
 }
 
@@ -1773,6 +1864,34 @@ pub(crate) fn refused_move_output(
         return Err("delta");
     }
     Ok(())
+}
+
+/// A `living_travel_moved` listener's proposed velocity: any finite vector is accepted
+/// (`Entity.setDeltaMovement`), a changed non-finite one is refused.
+pub(crate) fn refused_velocity_output(
+    accepted: &[f64; 3],
+    velocity: &[f64; 3],
+) -> Result<(), &'static str> {
+    if accepted.map(f64::to_bits) != velocity.map(f64::to_bits)
+        && velocity.iter().any(|component| !component.is_finite())
+    {
+        return Err("velocity");
+    }
+    Ok(())
+}
+
+#[test]
+fn travel_velocity_proposals_accept_finite_vectors_and_refuse_a_changed_non_finite_one() {
+    let accepted = [65.0, -66.0, 67.0];
+    assert_eq!(refused_velocity_output(&[1.0; 3], &accepted), Ok(()));
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut proposed = accepted;
+        proposed[1] = value;
+        assert_eq!(
+            refused_velocity_output(&accepted, &proposed),
+            Err("velocity")
+        );
+    }
 }
 
 #[test]

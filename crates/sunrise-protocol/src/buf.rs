@@ -545,6 +545,13 @@ impl Codec<Tag> for TrustedCompound {
         TrustedNbt::write(v, w)
     }
 }
+/// Whether `id` is a registered mod data component type: the client and server both register
+/// them (`Hooks::component_types`), so text carrying an item with one (a `show_item` hover)
+/// decodes as vanilla's `DataComponentPatch.CODEC` does through the full component registry.
+fn native_component(id: &str) -> bool {
+    crate::item::custom::id(id).is_some()
+}
+
 /// `ComponentSerialization.TRUSTED_STREAM_CODEC` and `TRUSTED_CONTEXT_FREE_STREAM_CODEC`:
 /// read unlimited-heap NBT, then decode it as a component.
 pub struct TrustedComponent;
@@ -554,7 +561,7 @@ impl TrustedComponent {
         if *tag == Tag::End {
             return Err(Error::new("Expected non-null compound tag"));
         }
-        sunrise_world::component_value::source::text_from_tag(tag, &|item| {
+        sunrise_world::component_value::source::text_from_tag(tag, &native_component, &|item| {
             r.contains_registry_entry("minecraft:item", item)
         })
         .map_err(|e| Error::new(format!("Failed to decode: {e}")))?;
@@ -576,11 +583,11 @@ pub struct TrustedStyle;
 impl Codec<Tag> for TrustedStyle {
     fn read(r: &mut Reader) -> Result<Tag> {
         let tag = TrustedNbt::read(r)?;
-        if let Err(error) =
-            sunrise_world::component_value::source::validate_text_style(&tag, &|item| {
-                r.contains_registry_entry("minecraft:item", item)
-            })
-        {
+        if let Err(error) = sunrise_world::component_value::source::validate_text_style(
+            &tag,
+            &native_component,
+            &|item| r.contains_registry_entry("minecraft:item", item),
+        ) {
             nbt::discard_tag(tag);
             return Err(Error::new(format!("Failed to decode: {error}")));
         }

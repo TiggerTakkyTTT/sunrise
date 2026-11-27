@@ -368,8 +368,8 @@ jobs:
       commit: ${{ needs.pick.outputs.sha }}
       dev: true
 
-  # sdk-<sha> from the SDK legs' artifacts, as soon as they are done, while the game legs may still build. A dry run
-  # signs with a throwaway key and publishes nothing.
+  # sdk-<sha> from the SDK legs' artifacts, as soon as they are done, while the game legs may still build, as a draft:
+  # promote-dev.yml makes it public, then the game's. A dry run signs with a throwaway key and publishes nothing.
   sdk-publish:
     needs: [pick, sdk]
     if: >-
@@ -380,11 +380,13 @@ jobs:
     with:
       commit: ${{ needs.pick.outputs.sha }}
       publish: ${{ needs.pick.outputs.publish == 'true' }}
+      draft: true
     secrets: inherit
 
-  # The SDK index a Dev build carries in its signed sums (as `pick` fetches a Nightly's): sdk-<sha>'s sdk.json once
-  # it is published, checked against its SHA256SUMS. A dry run that built its own SDK publishes none: it carries
-  # that SDK's index.
+  # The SDK index a Dev build carries in its signed sums: the sdk.json of the release sdk-publish left (its draft,
+  # or the public sdk-<sha> it found), or, when sdk-<sha> was public before this run, its sdk.json checked against its
+  # SHA256SUMS, as `pick` fetches a Nightly's. A dry run that built its own SDK publishes none: it carries that SDK's
+  # index.
   sdk-index:
     needs: [pick, sdk, sdk-publish]
     if: >-
@@ -397,14 +399,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v8
-        if: needs.pick.outputs.publish != 'true' && needs.sdk.outputs.needed == 'true'
+        if: needs.sdk.outputs.needed == 'true'
         with:
-          name: sdk-release
+          name: ${{ needs.pick.outputs.publish == 'true' && 'sdk-released-index' || 'sdk-release' }}
           path: ${{ runner.temp }}/sdk-release
       - env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.pick.outputs.sha }}
-          OWN: ${{ needs.pick.outputs.publish != 'true' && needs.sdk.outputs.needed == 'true' && 'yes' || '' }}
+          OWN: ${{ needs.sdk.outputs.needed == 'true' && 'yes' || '' }}
         run: |
           if [[ -n "$OWN" ]]; then
             cp "$RUNNER_TEMP/sdk-release/sdk.json" sdk.json
@@ -586,16 +588,27 @@ jobs:
           TAG: ${{ needs.pick.outputs.tag }}
         run: |
           set -euo pipefail
-          python3 tools/ci/nightly.py require-sdk "$SHA"
+          # The SDK's draft (sdk-publish, `draft`) or its public release: promote-dev.yml makes both public, SDK first.
+          python3 tools/ci/nightly.py require-sdk --draft "$SHA"
           # The title is what launchers parse (strictly) into the version SHA256SUMS.v2.sig is signed for: the tag.
           [[ "${SHA:0:7}" == "$SHORT" && "$TAG" == "dev-$DATE-$SHORT" ]] || { echo "::error::the build's commit isn't the one signed"; exit 1; }
           # Exactly the files SHA256SUMS lists, and the signatures.
           files=(); while read -r _ name; do files+=("dist/${name#\*}"); done < dist/SHA256SUMS
-          # A pre-release, never GitHub's latest, under its own tag: no launcher lists or updates to it.
-          gh release create "$TAG" --prerelease --latest=false --target "$SHA" \
+          # An earlier attempt's draft of this tag, perhaps half uploaded, is replaced: nobody sees a draft.
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null)" == true ]]; then
+            gh release delete "$TAG" --yes
+          fi
+          # A draft pre-release, never GitHub's latest, under its own tag: tested from the draft (docs/release-flow.md
+          # "Dev"), then made public by promote-dev.yml, which also prunes the old Dev builds.
+          gh release create "$TAG" --draft --prerelease --latest=false --target "$SHA" \
             --title "Dev $DATE · $SHORT" --notes-file dist/nightly-notes.md \
             "${files[@]}" dist/SHA256SUMS dist/SHA256SUMS.sig dist/SHA256SUMS.v2.sig dist/smoke-test.json
-          python3 tools/ci/nightly.py prune-dev --days 7
+          {
+            echo "### Draft $TAG and sdk-$SHA"
+            echo "Test them from a folder: \`gh release download $TAG -D drafts/$TAG\` and \`gh release download sdk-$SHA -D drafts/sdk-$SHA\`,"
+            echo "then \`SUNRISE_LAUNCHER_DRAFTS=drafts sunrise-launcher install $TAG\` (mod tools: \`SUNRISE_SDK_BASE=drafts\`)."
+            echo "Make them public with \`gh workflow run promote-dev.yml -R $GITHUB_REPOSITORY -f tag=$TAG\`."
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Check stable mod API compatibility and list changed mixin targets
         # Run before tag reservation, including publish-only retries and dry runs.
         if: inputs.kind == 'stable' && github.repository == 'sunrise-org/sunrise'

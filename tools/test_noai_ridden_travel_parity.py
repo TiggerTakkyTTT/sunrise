@@ -12,12 +12,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base
-except ImportError:
-    import lab
-    import oracle_harness as harness
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base
 
 ORACLE = lab.ROOT / "mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaNoAiRiddenTravelOracle.java"
 TEST = "mobs::ai::noai_ridden_tests::a_ridden_noai_donkey_travels_and_turns_with_its_rider"
@@ -115,10 +114,10 @@ def main():
         lab.ROOT / "tools/test_rust_parity.py",
         lab.ROOT / "Cargo.toml",
         lab.ROOT / "Cargo.lock",
-        lab.ROOT / "crates/sunrise-client/src/mobs/ai.rs",
-        lab.ROOT / "crates/sunrise-client/src/mobs/equine.rs",
-        lab.ROOT / "crates/sunrise-client/src/mobs/living.rs",
-        lab.ROOT / "crates/sunrise-client/src/mobs/living/travel.rs",
+        lab.ROOT / "crates/sunrise-sim/src/mobs/ai.rs",
+        lab.ROOT / "crates/sunrise-sim/src/mobs/equine.rs",
+        lab.ROOT / "crates/sunrise-sim/src/mobs/living.rs",
+        lab.ROOT / "crates/sunrise-sim/src/mobs/living/travel.rs",
     ]
     hashes = base.source_hashes(sources)
     witness, row_count = record(build, lock, jars, libraries)

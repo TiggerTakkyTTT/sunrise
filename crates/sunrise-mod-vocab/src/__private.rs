@@ -107,6 +107,12 @@ pub fn install(mods: Mods) {
     crate::install(mods);
 }
 
+/// Bind a native mod entry's declared package side before installation.
+pub fn with_mod_side(mut entry: ModEntry, side: Side) -> ModEntry {
+    entry.side = side;
+    entry
+}
+
 // no wire: process-local diagnostic report, never crosses the wire.
 // exhaustive: internal two-field report for the game client's toast queue.
 /// One mod callback panic queued for the game client's error toast.
@@ -218,9 +224,9 @@ pub fn installed_code_ids() -> impl Iterator<Item = &'static str> {
 
 /// What the installed code mod `id` carries that a joining client must have, as the end of a
 /// sentence about the mod: its first subscription to a client-side hook, its first part that
-/// subscribes to one, a required client menu screen, a synced attachment, a required datapack
-/// registry, or a required payload channel sent to clients. The engine refuses a
-/// `side = "server"` mod that has one. Read once the parts are installed.
+/// subscribes to one, a listener of a client mod event, a required client menu screen, a synced
+/// attachment, a required datapack registry, or a required payload channel sent to clients. The
+/// engine refuses a `side = "server"` mod that has one. Read once the parts are installed.
 pub fn client_requirement(id: &str) -> Option<String> {
     let mine = || crate::mods().iter().filter(|entry| entry.id == id);
     if let Some(hook) = mine().find_map(|entry| entry.client_hook()) {
@@ -241,6 +247,9 @@ pub fn client_requirement(id: &str) -> Option<String> {
         .any(|book| book.owner == id)
     {
         return Some("binds a recipe book that requires a client menu screen".into());
+    }
+    if let Some(event) = mod_index(id).and_then(|index| installed.client_event(index)) {
+        return Some(format!("listens to the client event {event}"));
     }
     if let Some((part, hook)) = installed.client_part(id) {
         return Some(format!(
@@ -318,6 +327,11 @@ pub fn loaded_mods() -> LoadedMods {
     LoadedMods::new()
 }
 
+/// The packages enabled and admitted at startup, as registration reads them: `ConfigHost::mods`.
+pub fn startup_mods() -> LoadedMods {
+    LoadedMods::enabled_at_startup()
+}
+
 /// The data-pack and resource reloads the game runs.
 pub mod reload {
     include!(concat!(
@@ -336,18 +350,72 @@ pub mod built {
     pub fn instance_group_ref(generation: u64, slot: u32) -> crate::InstanceGroupRef {
         crate::InstanceGroupRef::from_parts(generation, slot).expect("published group generation")
     }
+    /// Wrap a slot in the prepared item store.
+    pub fn prepared_item_ref(generation: u64, slot: u32) -> crate::PreparedItemRef {
+        crate::PreparedItemRef::from_parts(generation, slot)
+            .expect("published prepared item generation")
+    }
     /// Wrap a slot in the model store's published generation.
     pub fn model_ref(generation: u64, slot: u32) -> crate::ModelRef {
         crate::ModelRef(generation, slot)
-    }
-    /// What a mod may still create of its dynamic textures: `images` and `bytes` of pixels left.
-    pub fn dynamic_texture_budget(images: u32, bytes: u64) -> crate::DynamicTextureBudget {
-        crate::DynamicTextureBudget { images, bytes }
     }
     /// Wrap a slot in the pipeline set's published generation.
     pub fn render_pipeline_ref(generation: u64, slot: u32) -> crate::RenderPipelineRef {
         crate::RenderPipelineRef::from_parts(generation, slot)
             .expect("published pipeline generation")
+    }
+    /// Wrap a slot in the render-type table's published generation.
+    pub fn render_type_ref(generation: u64, slot: u32) -> crate::RenderTypeRef {
+        crate::RenderTypeRef::from_parts(generation, slot)
+            .expect("published render type generation")
+    }
+    /// Wrap a slot in the compute-pipeline table's published generation.
+    pub fn compute_pipeline_ref(generation: u64, slot: u32) -> crate::ComputePipelineRef {
+        crate::ComputePipelineRef::from_parts(generation, slot)
+            .expect("published compute pipeline generation")
+    }
+    /// Wrap a registered pipeline modifier slot.
+    pub fn pipeline_modifier_ref(slot: u32) -> crate::PipelineModifierRef {
+        crate::PipelineModifierRef::from_slot(slot)
+    }
+    /// Wrap a slot in the retained GPU mesh store.
+    pub fn mesh_ref(generation: u64, slot: u32) -> crate::MeshRef {
+        crate::MeshRef::from_parts(generation, slot).expect("published mesh generation")
+    }
+    /// The renderer's [`crate::RenderCapabilities`].
+    pub fn render_capabilities(
+        float32_filterable: bool,
+        read_write_storage: Vec<crate::RenderTargetFormat>,
+        subgroup: bool,
+        indirect_first_instance: bool,
+        multi_draw_indirect_count: bool,
+    ) -> crate::RenderCapabilities {
+        crate::RenderCapabilities {
+            float32_filterable,
+            read_write_storage,
+            subgroup,
+            indirect_first_instance,
+            multi_draw_indirect_count,
+        }
+    }
+    /// Wrap a slot in the retained GPU storage buffer store.
+    pub fn storage_buffer_ref(generation: u64, slot: u32) -> crate::StorageBufferRef {
+        crate::StorageBufferRef::from_parts(generation, slot)
+            .expect("published storage buffer generation")
+    }
+    /// Wrap a readback id in the pending readback table.
+    pub fn readback_ticket(id: u64) -> crate::ReadbackTicket {
+        crate::ReadbackTicket::from_id(id).expect("published readback ticket id")
+    }
+    /// Wrap a slot in the retained GPU uniform buffer store.
+    pub fn uniform_buffer_ref(generation: u64, slot: u32) -> crate::UniformBufferRef {
+        crate::UniformBufferRef::from_parts(generation, slot)
+            .expect("published uniform buffer generation")
+    }
+    /// Wrap a slot in the retained GPU offscreen render target store.
+    pub fn render_target_ref(generation: u64, slot: u32) -> crate::RenderTargetRef {
+        crate::RenderTargetRef::from_parts(generation, slot)
+            .expect("published render target generation")
     }
 }
 
@@ -555,6 +623,36 @@ pub mod game {
                 generation: self.0,
                 slot: self.1,
             }
+        }
+    }
+
+    impl Fields for RenderTypeRef {
+        type Fields<'a> = ModelRefFields;
+        fn fields(&self) -> ModelRefFields {
+            ModelRefFields {
+                generation: self.0,
+                slot: self.1,
+            }
+        }
+    }
+
+    impl Fields for ComputePipelineRef {
+        type Fields<'a> = ModelRefFields;
+        fn fields(&self) -> ModelRefFields {
+            ModelRefFields {
+                generation: self.0,
+                slot: self.1,
+            }
+        }
+    }
+
+    pub struct PipelineModifierRefFields {
+        pub slot: u32,
+    }
+    impl Fields for PipelineModifierRef {
+        type Fields<'a> = PipelineModifierRefFields;
+        fn fields(&self) -> PipelineModifierRefFields {
+            PipelineModifierRefFields { slot: self.0 }
         }
     }
 

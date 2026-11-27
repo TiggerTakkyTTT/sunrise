@@ -392,6 +392,25 @@ pub trait MobsBackendMut {
     /// or unavailable mob, a client, and the dragon.
     fn mob_jump(&mut self, mob: MobRef) -> bool;
     /// Side: server.
+    /// `Mob.doHurtTarget(level, target)`, the strike a melee goal ends with, on a target the mod
+    /// chooses, as a NeoForge or Fabric mod calls it: the attack damage of the mob and its
+    /// weapon (`EnchantmentHelper.modifyDamage`), the hurt with a `mob_attack` source and every
+    /// damage hook it fires, the `attack_knockback` push and the mob's slow-down after it, the
+    /// weapon's enchantment effects (fire aspect...), `setLastHurtMob` and the attack sound,
+    /// with each species' override (`Zombie`'s fire, `IronGolem`'s toss, `Bee`'s sting,
+    /// `Hoglin`'s throw, `Warden`'s sonic boom cooldown, `Creeper`'s, which does nothing and
+    /// answers true...). Nothing else of the goal runs: no swing (the goal's
+    /// `swingForAttack`), reach, sight or cooldown check.
+    ///
+    /// Answers vanilla's `wasHurt`: whether the target took the hit. The target is a player
+    /// or a mob of the mob's level. Refused with [`AttackRefused`] before anything runs:
+    /// `Stale` (also for the dragon and on a client), `OtherLevel`, `Busy` (a player's turn,
+    /// a transaction or another such call is running, or the mob is held out of the level for
+    /// its own tick) and `Unsupported` (the mob itself, or a target that is neither a player
+    /// nor a mob: an armor stand, a boat, an item frame...).
+    fn mob_do_hurt_target(&mut self, mob: MobRef, target: EntityRef)
+    -> Result<bool, AttackRefused>;
+    /// Side: server.
     /// `Mob.restrictTo(pos, radius)`: the home area the mob keeps to — its
     /// own stroll and wander goals pick their positions inside it, as a
     /// lead's and a guardian's home do. Radius `-1` clears the restriction

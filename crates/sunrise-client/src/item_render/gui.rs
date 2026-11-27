@@ -101,13 +101,40 @@ fn clip_triangle(tri: [Point; 3], rect: [f32; 4]) -> Vec<Point> {
 }
 
 /// RGBA vertex colour of a lit quad: `minecraft_mix_light` on the tint.
+/// Skips directional diffuse shading when `q.lightmap_only` is set (`SpecialModelLighting::LightmapOnly`).
 pub fn lit_color(q: &ItemQuad, lights: (Vec3, Vec3)) -> u32 {
-    let light = crate::block_entity_render::diffuse(q.normal, lights);
+    let light = if q.lightmap_only {
+        1.0
+    } else {
+        crate::block_entity_render::diffuse(q.normal, lights)
+    };
     let [a, r, g, b] = q.color.to_be_bytes();
     let c = |v: u8| (f32::from(v) * light) as u8;
     crate::hud::rgba(c(r), c(g), c(b), a)
 }
-fn emit(batch: &mut HudBatch, fan: &[Point], color: impl Fn(Vec2) -> u32, glint: Option<&Glint>) {
+
+/// Encode `ItemQuad`'s explicit lightmap coordinates and item alpha-cutoff flag into
+/// [`crate::hud::HudVertex::light`]. Returns `0` for ordinary HUD quads.
+fn hud_light_word(q: &ItemQuad) -> u32 {
+    let mut word = 0u32;
+    if let Some(packed) = q.packed_light {
+        let block = packed & 0xFF;
+        let sky = (packed >> 16) & 0xFF;
+        word |= 0x0100_0000 | block | (sky << 8);
+    }
+    if q.explicit_alpha_cutoff {
+        word |= 0x0200_0000;
+    }
+    word
+}
+
+fn emit(
+    batch: &mut HudBatch,
+    fan: &[Point],
+    color: impl Fn(Vec2) -> u32,
+    light: u32,
+    glint: Option<&Glint>,
+) {
     for i in 1..fan.len().saturating_sub(1) {
         let (a, b, c) = (fan[0], fan[i], fan[i + 1]);
         let corners = [a, b, c, c];
@@ -121,10 +148,11 @@ fn emit(batch: &mut HudBatch, fan: &[Point], color: impl Fn(Vec2) -> u32, glint:
             );
             batch.blend_since(start, crate::hud::Blend::Additive);
         } else {
-            batch.quad(
+            batch.quad_lit(
                 corners.map(|v| v.p.to_array()),
                 corners.map(|v| v.uv),
                 color(a.p),
+                light,
             );
         }
     }
@@ -319,7 +347,9 @@ impl DrawnKey {
             .iter()
             .map(|layer| match (&layer.geometry, &layer.tints) {
                 (super::LayerGeometry::Quads(baked), super::LayerTints::Owned(tints))
-                    if layer.foil == super::FoilType::None =>
+                    if layer.foil == super::FoilType::None
+                        && layer.submit_options
+                            == mod_api::SpecialModelSubmitOptions::default() =>
                 {
                     Some((
                         Arc::as_ptr(baked) as usize,
@@ -729,9 +759,10 @@ pub fn draw_posed(
     // The foil's faces follow the item's own, as `depth_glint_over` takes them.
     let mut foil = Vec::new();
     let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
-    for face in depth::sort(&quads) {
+    for face in ordered_gui_faces(&quads) {
         let q = &quads[face.quad];
         let color = lit_color(q, lights);
+        let light = hud_light_word(q);
         // A whole quad goes out as one; a face the sort split goes out as a fan of triangles.
         let fan: Vec<[_; 4]> = if let Ok(quad) = <[_; 4]>::try_from(&face.corners[..]) {
             vec![quad]
@@ -751,10 +782,11 @@ pub fn draw_posed(
                 }
             }
             if q.foil != Foil::GlintOnly {
-                batch.quad_3d(
+                batch.quad_3d_lit(
                     corners.map(|c| c.pos.to_array()),
                     corners.map(|c| c.uv),
                     color,
+                    light,
                 );
             }
             if q.foil != Foil::None && glint.is_some() {
@@ -792,6 +824,17 @@ fn draw_quads(
     draw_quads_with(quads, lights, batch, rect, glint, None);
 }
 
+/// Order GUI faces with cutout/solid before translucent when any quad carries an explicit
+/// `SpecialModelRenderType`, keeping `depth::sort` order within each phase (and identical order
+/// when no explicit override is present).
+fn ordered_gui_faces(quads: &[ItemQuad]) -> Vec<depth::Face> {
+    let mut faces = depth::sort(quads);
+    if quads.iter().any(|q| q.explicit_alpha_cutoff) {
+        faces.sort_by_key(|face| quads[face.quad].translucent);
+    }
+    faces
+}
+
 /// [`draw_quads`], then a stack's CIT glint layers over every face.
 fn draw_quads_with(
     quads: &[ItemQuad],
@@ -803,7 +846,7 @@ fn draw_quads_with(
 ) {
     // The faces the CIT layers go over once the item is drawn.
     let mut fans = Vec::new();
-    for face in depth::sort(quads) {
+    for face in ordered_gui_faces(quads) {
         let q = &quads[face.quad];
         let points: Vec<_> = face
             .corners
@@ -816,6 +859,7 @@ fn draw_quads_with(
             })
             .collect();
         let color = lit_color(q, lights);
+        let light = hud_light_word(q);
         for i in 1..points.len().saturating_sub(1) {
             let tri = [points[0], points[i], points[i + 1]];
             let fan = clip_triangle(tri, rect);
@@ -823,14 +867,14 @@ fn draw_quads_with(
                 continue;
             }
             if q.foil != Foil::GlintOnly {
-                emit(batch, &fan, |_| color, None);
+                emit(batch, &fan, |_| color, light, None);
                 if cit.is_some() {
                     fans.push(fan.clone());
                 }
             }
             if q.foil != Foil::None {
                 let quad_glint = glint.map(|g| g.for_quad(q.entity_glint));
-                emit(batch, &fan, |_| color, quad_glint.as_ref());
+                emit(batch, &fan, |_| color, 0, quad_glint.as_ref());
             }
         }
     }
@@ -1006,6 +1050,9 @@ mod tests {
             translucent: false,
             oit: false,
             banner_pattern: false,
+            packed_light: None,
+            lightmap_only: false,
+            explicit_alpha_cutoff: false,
         }
     }
 

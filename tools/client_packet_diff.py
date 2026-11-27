@@ -38,11 +38,11 @@ import math
 from pathlib import Path
 import struct
 
-try:
-    from . import client_packet_routes, wire_stream
-except ImportError:
-    import client_packet_routes
-    import wire_stream
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import client_packet_routes, wire_stream
 
 MOVES = wire_stream.MOVES
 # Packets the server's timing decides, or that only the network thread sends: never per tick.

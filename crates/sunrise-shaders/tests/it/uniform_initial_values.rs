@@ -1,21 +1,10 @@
 //! Original synthetic inputs; no third-party shader code is included.
-use sunrise_shaders::{Origin, Preprocessed, Target, translate_composite, translate_compute};
+use sunrise_shaders::{Preprocessed, Target, translate_composite, translate_compute};
 
 fn source(code: &str) -> Preprocessed {
-    Preprocessed {
-        code: code.into(),
-        files: vec!["original.glsl".into()],
-        lines: code
-            .lines()
-            .enumerate()
-            .map(|(i, _)| Origin {
-                file: 0,
-                line: i as u32 + 1,
-            })
-            .collect(),
-        version: Some((430, None)),
-        ..Default::default()
-    }
+    let mut pp = Preprocessed::from_source("original.glsl", code);
+    pp.version = Some((430, None));
+    pp
 }
 
 const VERTEX: &str = "void main() { gl_Position = vec4(0.0); }";

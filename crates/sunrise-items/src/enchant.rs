@@ -4,9 +4,11 @@
 //! value/attribute effect components (`LevelBasedValue`, `EnchantmentValueEffect`
 //! and the loot-condition subset that enchantment requirements use).
 mod holder_sets;
+mod providers;
 use crate::item_data::{CodecBool, Levels};
 use crate::items::{ItemStack, Items};
 pub use holder_sets::HolderSetBinding;
+pub use providers::{EnchantmentProvider, EnchantmentSet};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -250,6 +252,9 @@ pub struct Enchantment {
     pub description: String,
     /// `description`'s translation key (`enchantment.minecraft.<name>`).
     pub description_key: String,
+    /// `Enchantment.description`, the definition's component as written: a translatable key
+    /// with its fallback and arguments, or a literal, with its style.
+    pub description_text: sunrise_game_data::text::Text,
     pub max_level: u32,
     pub weight: u32,
     pub anvil_cost: u32,
@@ -293,6 +298,8 @@ pub struct Enchantments {
     primary_answers: sunrise_world::enchantment_answers::AnswerTable,
     /// The item's support answer, resolved at install for this registry snapshot.
     support_answers: sunrise_world::enchantment_answers::AnswerTable,
+    /// `minecraft:enchantment_provider` registry entries frozen for this world.
+    providers: BTreeMap<String, EnchantmentProvider>,
 }
 
 fn string_list(v: &Value) -> Vec<String> {
@@ -467,12 +474,17 @@ fn parse_entry(
             // A data pack's entry may name itself with a literal component
             // rather than a translation key.
             if key.is_empty() && !v["description"].is_null() {
-                sunrise_client_core::scoreboard::comp_text(&v["description"]).plain()
+                sunrise_game_data::scoreboard::comp_text(&v["description"]).plain()
             } else {
                 id.trim_start_matches("minecraft:").replace('_', " ")
             }
         }),
         description_key: key.to_owned(),
+        description_text: if v["description"].is_null() {
+            sunrise_game_data::text::Text::literal(id)
+        } else {
+            sunrise_game_data::scoreboard::comp_text(&v["description"])
+        },
         max_level: v["max_level"].as_u64().unwrap_or(1) as u32,
         weight: v["weight"].as_u64().unwrap_or(1) as u32,
         anvil_cost: v["anvil_cost"].as_u64().unwrap_or(0) as u32,
@@ -538,12 +550,14 @@ impl Enchantments {
                 binding.bind(id, value)?;
             }
         }
-        Self::load_selected(
+        let mut enchantments = Self::load_selected(
             root,
             overlay,
             defaults,
             files.iter().map(|(id, value)| (id.as_str(), value)),
-        )
+        )?;
+        enchantments.install_providers(providers::load_from_resources(root, overlay)?);
+        Ok(enchantments)
     }
 
     /// Assemble gameplay behavior from the selected, holder-bound definitions in id order.
@@ -670,7 +684,33 @@ impl Enchantments {
             lang,
             primary_answers: Default::default(),
             support_answers: Default::default(),
+            providers: BTreeMap::new(),
         })
+    }
+    /// Replace the `minecraft:enchantment_provider` table for this snapshot.
+    pub fn install_providers(&mut self, providers: BTreeMap<String, EnchantmentProvider>) {
+        self.providers = providers;
+    }
+    /// Look up one `minecraft:enchantment_provider` by canonical id.
+    pub fn provider(&self, id: &str) -> Option<&EnchantmentProvider> {
+        self.providers.get(id)
+    }
+    /// `EnchantmentHelper.enchantItemFromProvider`: look up `provider_id` in
+    /// the `minecraft:enchantment_provider` registry and compute the
+    /// `(enchantment, level)` upgrades for `stack`. Returns empty (drawing
+    /// nothing from `random`) if the provider is not registered.
+    pub fn enchant_from_provider<R: RandomSource>(
+        &self,
+        provider_id: &str,
+        items: &Items,
+        random: &mut R,
+        stack: &ItemStack,
+        special_multiplier: f32,
+    ) -> Levels {
+        let Some(provider) = self.providers.get(provider_id) else {
+            return Vec::new();
+        };
+        provider.enchant(self, items, random, stack, special_multiplier)
     }
     /// The `isPrimaryItemFor` answers the server resolved for this snapshot when its parts
     /// installed; selection reads them.
@@ -823,14 +863,14 @@ impl Enchantments {
     }
     /// `Enchantment.getFullname` as plain text and whether it is a curse (red).
     pub fn full_name(&self, id: &str, level: u32) -> (String, bool) {
-        let language = sunrise_client_core::lang::current();
+        let language = sunrise_game_data::lang::current();
         self.full_name_in(language.as_deref(), id, level)
     }
     /// `Enchantment.getFullname` against `language`; `None` (no language loaded: a
     /// dedicated server, the probes) keeps the English names loaded above.
     pub fn full_name_in(
         &self,
-        language: Option<&sunrise_client_core::lang::Language>,
+        language: Option<&sunrise_game_data::lang::Language>,
         id: &str,
         level: u32,
     ) -> (String, bool) {
@@ -840,7 +880,7 @@ impl Enchantments {
     /// [`Enchantments::full_name_in`] with the level as a number when `numeric`.
     fn full_name_with(
         &self,
-        language: Option<&sunrise_client_core::lang::Language>,
+        language: Option<&sunrise_game_data::lang::Language>,
         id: &str,
         level: u32,
         numeric: bool,
@@ -2012,6 +2052,7 @@ pub mod tests {
                 id: Arc::from(*id),
                 description: id.trim_start_matches("minecraft:").into(),
                 description_key: v["description"]["translate"].as_str().unwrap_or("").into(),
+                description_text: sunrise_game_data::scoreboard::comp_text(&v["description"]),
                 max_level: v["max_level"].as_u64().unwrap() as u32,
                 weight: v["weight"].as_u64().unwrap() as u32,
                 anvil_cost: v["anvil_cost"].as_u64().unwrap() as u32,
@@ -2096,6 +2137,7 @@ pub mod tests {
             lang: HashMap::new(),
             primary_answers: Default::default(),
             support_answers: Default::default(),
+            providers: BTreeMap::new(),
         }
     }
     pub fn sample_items() -> Items {
@@ -2557,7 +2599,7 @@ pub mod tests {
     #[test]
     fn names_follow_the_language() {
         struct Mem(HashMap<String, Vec<u8>>);
-        impl sunrise_client_core::lang::ResourceSource for Mem {
+        impl sunrise_game_data::lang::ResourceSource for Mem {
             fn read(&self, path: &str) -> Option<Vec<u8>> {
                 self.0.get(path).cloned()
             }
@@ -2568,7 +2610,7 @@ pub mod tests {
                 .as_bytes()
                 .to_vec(),
         )]));
-        let ru = sunrise_client_core::lang::Language::load(&[&ru], "ru_ru");
+        let ru = sunrise_game_data::lang::Language::load(&[&ru], "ru_ru");
         let e = sample();
         assert_eq!(
             e.full_name_in(Some(&ru), "minecraft:sharpness", 5).0,
@@ -2634,6 +2676,7 @@ mod ignite_tests {
             id: Arc::from("minecraft:fire_aspect"),
             description: "fire_aspect".into(),
             description_key: String::new(),
+            description_text: sunrise_game_data::text::Text::literal("fire_aspect"),
             max_level: 2,
             weight: 2,
             anvil_cost: 4,
@@ -2700,6 +2743,165 @@ mod ignite_tests {
             }
             assert!(reg.weighted(&mut LegacyRandom::new(0), &[]).is_none());
         }
+    }
+
+    #[test]
+    fn damage_source_properties_match_source_and_direct_entities() {
+        let e = super::tests::sample();
+        let mut random = LegacyRandom::new(0);
+        let predicate = |field: &str, kind: &str| {
+            json!({
+                "type": "minecraft:damage_source_properties",
+                "predicate": {field: {"minecraft:entity_type": kind}}
+            })
+        };
+        let source_zombie = predicate("source_entity", "minecraft:zombie");
+        let direct_player = predicate("direct_entity", "minecraft:player");
+        let none = EffectContext {
+            damage_type: Some("minecraft:generic"),
+            ..Default::default()
+        };
+        assert!(
+            !e.condition(&source_zombie, 1, &none, &mut random),
+            "source_entity requires an attacker"
+        );
+        assert!(
+            !e.condition(&direct_player, 1, &none, &mut random),
+            "direct_entity requires a direct attacker"
+        );
+        let hit = EffectContext {
+            damage_type: Some("minecraft:generic"),
+            attacker: Some("minecraft:zombie"),
+            direct_attacker: Some("minecraft:player"),
+            ..Default::default()
+        };
+        assert!(e.condition(&source_zombie, 1, &hit, &mut random));
+        assert!(e.condition(&direct_player, 1, &hit, &mut random));
+        assert!(
+            !e.condition(
+                &predicate("direct_entity", "minecraft:zombie"),
+                1,
+                &hit,
+                &mut random
+            ),
+            "the direct entity is evaluated separately from the source"
+        );
+        let legacy = json!({
+            "type": "minecraft:damage_source_properties",
+            "predicate": {"source_entity": {"type": "minecraft:zombie"}}
+        });
+        assert!(
+            e.condition(&legacy, 1, &hit, &mut random),
+            "the legacy `type` key still names the entity type"
+        );
+    }
+
+    #[test]
+    fn damage_immunity_requires_the_matching_attacker() {
+        use std::sync::Arc;
+
+        let definition = json!({
+            "description": "Zombie ward",
+            "max_level": 1,
+            "weight": 1,
+            "anvil_cost": 0,
+            "supported_items": "#minecraft:enchantable/foot_armor",
+            "effects": {"minecraft:damage_immunity": [{
+                "requirements": {
+                    "type": "minecraft:damage_source_properties",
+                    "predicate": {"source_entity": {
+                        "minecraft:entity_type": "minecraft:zombie"
+                    }}
+                }
+            }]}
+        });
+        let table = super::tests::sample()
+            .with_entries([("test:zombie_ward", &definition)])
+            .unwrap()
+            .unwrap();
+        let active = [(Arc::<str>::from("test:zombie_ward"), 1)];
+        let active = active.iter().map(|(id, level)| (id, *level));
+        let mut random = LegacyRandom::new(0);
+        let zombie = EffectContext {
+            damage_type: Some("minecraft:generic"),
+            attacker: Some("minecraft:zombie"),
+            ..Default::default()
+        };
+        assert!(table.is_damage_immune(active, &zombie, &mut random));
+        let active = [(Arc::<str>::from("test:zombie_ward"), 1)];
+        let active = active.iter().map(|(id, level)| (id, *level));
+        let skeleton = EffectContext {
+            damage_type: Some("minecraft:generic"),
+            attacker: Some("minecraft:skeleton"),
+            ..Default::default()
+        };
+        assert!(!table.is_damage_immune(active, &skeleton, &mut random));
+        let active = [(Arc::<str>::from("test:zombie_ward"), 1)];
+        let active = active.iter().map(|(id, level)| (id, *level));
+        let absent = EffectContext {
+            damage_type: Some("minecraft:generic"),
+            ..Default::default()
+        };
+        assert!(
+            !table.is_damage_immune(active, &absent, &mut random),
+            "a source_entity requirement fails when the attacker is absent"
+        );
+    }
+
+    #[test]
+    fn a_source_entity_requirement_gates_a_damage_effect() {
+        let definition = json!({
+            "description": "Zombie bane",
+            "max_level": 1,
+            "weight": 1,
+            "anvil_cost": 0,
+            "supported_items": "#minecraft:enchantable/sword",
+            "effects": {"minecraft:damage": [{
+                "effect": {"type": "minecraft:add", "value": 2.0},
+                "requirements": {
+                    "type": "minecraft:damage_source_properties",
+                    "predicate": {"source_entity": {
+                        "minecraft:entity_type": "minecraft:zombie"
+                    }}
+                }
+            }]}
+        });
+        let table = super::tests::sample()
+            .with_entries([("test:zombie_bane", &definition)])
+            .unwrap()
+            .unwrap();
+        let mut sword = ItemStack::new("minecraft:diamond_sword", 1);
+        sword.enchant("test:zombie_bane", 1);
+        let mut random = LegacyRandom::new(0);
+        let zombie = EffectContext {
+            damage_type: Some("minecraft:mob_attack"),
+            attacker: Some("minecraft:zombie"),
+            ..Default::default()
+        };
+        assert_eq!(
+            table.modify_value(Some(&sword), "minecraft:damage", &zombie, &mut random, 0.0),
+            2.0
+        );
+        let skeleton = EffectContext {
+            damage_type: Some("minecraft:mob_attack"),
+            attacker: Some("minecraft:skeleton"),
+            ..Default::default()
+        };
+        assert_eq!(
+            table.modify_value(
+                Some(&sword),
+                "minecraft:damage",
+                &skeleton,
+                &mut random,
+                0.0
+            ),
+            0.0
+        );
+        let absent = EffectContext::default();
+        assert_eq!(
+            table.modify_value(Some(&sword), "minecraft:damage", &absent, &mut random, 0.0),
+            0.0
+        );
     }
 
     #[test]

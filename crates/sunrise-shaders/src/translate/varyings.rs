@@ -73,11 +73,11 @@ pub(super) fn assign(
                     }
                     split.insert(var.name.clone(), (String::new(), copies));
                 }
-                Ok(None) => errors.push(Error {
-                    file: stage.pp.files.first().cloned().unwrap_or_default(),
-                    line: 0,
-                    message: format!("`{}`: this struct can't be a varying", var.name),
-                }),
+                Ok(None) => errors.push(Error::new(
+                    stage.pp.file(),
+                    0,
+                    format!("`{}`: this struct can't be a varying", var.name),
+                )),
                 Err(TooManyParts) => errors.push(too_many()),
             }
             continue;

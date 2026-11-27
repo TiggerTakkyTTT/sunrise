@@ -166,6 +166,25 @@ class ParityRunnerTests(unittest.TestCase):
             source.write_text("two!")
             self.assertTrue(parity.stale("x", state, hasher, "env"))
 
+    def test_an_unreadable_trace_is_an_error_and_a_missing_one_is_an_unkeyed_pass(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)):
+            script = Path(temp, "tools", "test_x_parity.py")
+            missing = parity.outcome("x", script, True, 1.0, Path(temp, "none.json"))
+            self.assertEqual((missing["status"], missing["dependencies"], missing["artifacts"]), ("pass", [], []))
+            cut = Path(temp, "cut.json")
+            cut.write_text('{"modules": [', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                parity.outcome("x", script, True, 1.0, cut)
+
+    def test_a_damaged_reach_cache_is_an_error(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
+                mock.patch.object(parity, "SHARED", Path(temp, "shared")):
+            Path(temp, "shared").mkdir()
+            Path(temp, "shared", "reach-cache.json").write_text("{not json", encoding="utf-8")
+            found = {"food": Path(temp, "tools", "test_food_parity.py")}
+            with self.assertRaises(ValueError):
+                parity.affected_harnesses(found, {"food": {"dependencies": ["crates/a.rs"]}}, {"crates/a.rs"})
+
     def test_a_change_affects_the_harnesses_that_depend_on_it(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
                 mock.patch.object(parity, "SHARED", Path(temp, "shared")):
@@ -390,6 +409,61 @@ class DependencyPathTests(unittest.TestCase):
             self.assertEqual(parity.affected_harnesses(found, records, {"crates/w/src/other.rs"}, reach=False), set())
             self.assertEqual(records, {"local": record, "empty": {"dependencies": []}})
             self.assertEqual((local.read_bytes(), shared.read_bytes()), before)
+
+    def test_fixture_fallback_selects_and_runs_past_old_and_incomplete_passes(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
+                mock.patch.object(parity, "SHARED", Path(temp, "shared")), \
+                mock.patch.object(parity, "STATE_DIR", Path(temp, "state")):
+            root = Path(temp)
+            marker = root / "crates/sunrise-mod-api-gen/source-layout"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("split")
+            owners = ["fixture-common", "fixture-server", "fixture-client"]
+            paths = {owner: f"crates/{owner}/src/lib.rs" for owner in owners}
+            dispatcher = "crates/sunrise-parity-fixtures/src/main.rs"
+            for path in (*paths.values(), dispatcher):
+                (root / path).parent.mkdir(parents=True)
+                (root / path).write_text("fn run() {}")
+            mapping = root / parity.FIXTURE_ROOTS
+            mapping.parent.mkdir(parents=True)
+            roles = {
+                "lean": {"packages": owners[:2], "dispatcher": dispatcher, "inputs": [],
+                         "fixtures": {"legacy::serve": paths["fixture-server"]}},
+                "client-defaults": {"packages": owners, "dispatcher": dispatcher, "inputs": [],
+                                    "fixtures": {"legacy::render": paths["fixture-client"]}},
+            }
+            mapping.write_text(json.dumps({"version": parity.FIXTURE_RECORD_VERSION, "variants": roles}))
+            found = {name: root / f"tools/test_{name}.py" for name in roles}
+            hasher = lambda path: path.read_text() if path.is_file() else "missing"
+            records = {}
+            for variant, suffix, selector in (("lean", "no-default-features", "legacy::serve"),
+                                              ("client-defaults", "client-defaults", "legacy::render")):
+                record = {"status": "pass", "fixture_record_version": parity.FIXTURE_RECORD_VERSION,
+                          "fixture_ownership": True, "fixture_runs": parity.fixture_runs([
+                              [f"sunrise-parity-fixtures-{suffix}", selector, "--exact"],
+                          ]), "dependencies": [], "artifacts": []}
+                coverage = parity.fixture_coverage(record, roles)
+                self.assertIn(roles[variant]["fixtures"][selector], coverage[1])
+                record["dependencies"] = sorted(parity.fixture_inputs(coverage))
+                record["key"] = parity.key(record, hasher, "fixture")
+                records[variant] = record
+                self.assertFalse(parity.stale(variant, {"harnesses": records}, hasher, "fixture"))
+
+            added = "crates/fixture-common/src/new_mount.rs"
+            (root / added).write_text("pub fn reached_indirectly() {}")
+            self.assertEqual(parity.affected_harnesses(found, records, {added}, reach=False), set(found))
+            for variant in found:
+                self.assertTrue(parity.stale(variant, {"harnesses": records}, hasher, "fixture"))
+
+            old = {"status": "pass", "dependencies": [paths["fixture-common"]], "artifacts": []}
+            old["key"] = parity.key(old, hasher, "fixture")
+            parity.publish("lean", old)
+            self.assertTrue(parity.stale("lean", {"harnesses": {}}, hasher, "fixture"))
+            records["lean"] = old
+            self.assertEqual(parity.affected_harnesses(found, records, {added}, reach=False), set(found))
+            client_change = {paths["fixture-client"]}
+            self.assertEqual(parity.affected_harnesses(found, records, client_change, reach=False),
+                             {"client-defaults", "lean"})
 
     def test_changed_probes_and_oracles_accept_legacy_separators(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)):
@@ -824,10 +898,15 @@ class OracleKeepTests(unittest.TestCase):
             (keep / "fresh-only.json").write_text(json.dumps({"peer": lately}))
             parity.remember_fresh_only(keep, {"light": {"status": "pass", "oracle_reuse": True}})
             self.assertEqual(parity.fresh_only(keep), {"peer": lately})
-            (keep / "fresh-only.json").write_text("[1, 2]")
-            self.assertEqual(parity.fresh_only(keep), {})
-            (keep / "fresh-only.json").write_text(json.dumps({"loot": 3, "light": lately}))
-            self.assertEqual(parity.fresh_only(keep), {"light": lately})
+
+    def test_a_fresh_only_list_of_the_wrong_shape_is_an_error(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = Path(tmp)
+            for text in ("[1, 2]", json.dumps({"loot": 3, "light": "2026-11-20"})):
+                (keep / "fresh-only.json").write_text(text)
+                with self.assertRaises(ValueError):
+                    parity.fresh_only(keep)
 
     def kept_run(self, root, outputs):
         import json

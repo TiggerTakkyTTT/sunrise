@@ -162,6 +162,10 @@ pub trait ReloadContext:
     fn effect_category(&self, _key: crate::EffectKey) -> Option<crate::EffectCategory> {
         None
     }
+    /// `EntityType.getCategory()` for `key`.
+    fn entity_type_category(&self, _key: crate::EntityTypeKey) -> Option<crate::MobCategory> {
+        None
+    }
     /// Borrow the canonical fluid id for `key`.
     fn fluid_key_id(&self, _key: crate::FluidKey) -> Option<&str> {
         None
@@ -214,6 +218,42 @@ impl crate::RenderAssets for EmptyClientReloadServices {
     ) -> Result<crate::RenderPipelineRef, crate::RenderPipelineError> {
         Err(crate::RenderPipelineError::Unknown)
     }
+    fn render_type(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::RenderTypeRef, crate::RenderTypeError> {
+        Err(crate::RenderTypeError::Unknown)
+    }
+    fn entity_solid(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::RenderTypeRef, crate::RenderTypeError> {
+        Err(crate::RenderTypeError::Unknown)
+    }
+    fn entity_cutout(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::RenderTypeRef, crate::RenderTypeError> {
+        Err(crate::RenderTypeError::Unknown)
+    }
+    fn entity_translucent(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::RenderTypeRef, crate::RenderTypeError> {
+        Err(crate::RenderTypeError::Unknown)
+    }
+    fn compute_pipeline(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::ComputePipelineRef, crate::ComputePipelineError> {
+        Err(crate::ComputePipelineError::Unknown)
+    }
+    fn pipeline_modifier(
+        &self,
+        _: &crate::Identifier,
+    ) -> Result<crate::PipelineModifierRef, crate::RenderPipelineError> {
+        Err(crate::RenderPipelineError::Unknown)
+    }
     fn animation(&self, _: &crate::Identifier) -> Option<crate::AnimationHolder> {
         None
     }
@@ -234,6 +274,18 @@ impl crate::RenderAssets for EmptyClientReloadServices {
         _: crate::BakedModelKey,
     ) -> Result<crate::BakedModelView<'_>, crate::ModelError> {
         Err(crate::ModelError::UnknownModel)
+    }
+    fn atlas_sprite_pixels(
+        &self,
+        _: crate::SpriteRef,
+    ) -> Result<crate::AtlasSpritePixels, crate::AtlasSpriteError> {
+        Err(crate::AtlasSpriteError::NotReady)
+    }
+    fn shader_pack_block_id(&self, _: crate::BlockState) -> Option<i32> {
+        None
+    }
+    fn pipeline_pack_bound(&self, _: crate::RenderPipelineRef) -> bool {
+        false
     }
 }
 
@@ -274,6 +326,16 @@ pub trait ClientReloadHost:
         _context: crate::ItemDisplayContext,
     ) -> bool {
         false
+    }
+    /// Resolve `stack`'s item model once for `display` and `seed`, returning a retained
+    /// [`crate::PreparedItemRef`] for [`crate::BlockEntityDrawContext::prepared_item`].
+    fn prepare_item(
+        &self,
+        _stack: &crate::ItemStack,
+        _display: crate::ItemDisplayContext,
+        _seed: i32,
+    ) -> Result<crate::PreparedItemRef, crate::ModelError> {
+        Err(crate::ModelError::UnknownModel)
     }
     /// Resolved block sprites for each requested block state.
     fn block_sprites(&self, blocks: &[crate::BlockState]) -> Vec<Option<crate::BlockSprites>> {
@@ -928,7 +990,7 @@ impl LoadedMods {
         Self { entries, authority }
     }
 
-    fn enabled_at_startup() -> Self {
+    pub(crate) fn enabled_at_startup() -> Self {
         crate::dispatch_scope::backend()
             .and_then(|backend| (backend.visible_packages)())
             .unwrap_or_else(Self::new)
@@ -947,6 +1009,22 @@ impl LoadedMods {
     /// Find a package by ID. This linear lookup is intended for registration, not hot paths.
     pub fn get(&self, id: &str) -> Option<&PackageInfo> {
         self.entries.iter().find(|entry| entry.id() == id)
+    }
+
+    /// The name to show for mod `id` (NeoForge's `IModInfo.getDisplayName`): `Minecraft` for
+    /// `minecraft`, the game itself, which is not a package here; otherwise the package's
+    /// manifest [`name`](PackageInfo::name), or its id when the manifest gives none, as
+    /// NeoForge's display name falls back to the mod id. `None` for an id no package here has.
+    pub fn display_name<'a>(&'a self, id: &'a str) -> Option<&'a str> {
+        if id == "minecraft" {
+            return Some("Minecraft");
+        }
+        let package = self.get(id)?;
+        Some(if package.name().is_empty() {
+            package.id()
+        } else {
+            package.name()
+        })
     }
 }
 
@@ -1198,14 +1276,14 @@ pub trait LoopContext {
     /// snapshot is unavailable or a member of this tag could not be bound. Absent
     /// or empty tags in a loaded snapshot answer `Some(false)`. Reads allocate
     /// nothing and perform no file I/O.
-    fn is_in_tag(&self, item: crate::ItemKey, tag: crate::TagKey) -> Option<bool>;
+    fn is_in_tag(&self, item: crate::ItemKey, tag: crate::TagKey<crate::ItemKey>) -> Option<bool>;
 
     /// Borrow the bound item members in authoritative order for this generation.
     /// `None` means the snapshot was unavailable or a member of this tag could not
     /// be bound at publication; no partial list is returned. A missing or empty tag
     /// in a loaded snapshot returns `Some(&[])`. On clients these are the server's
     /// synced tags, never the local pack's. Reads allocate nothing.
-    fn items_in_tag(&self, tag: crate::TagKey) -> Option<&[crate::ItemKey]>;
+    fn items_in_tag(&self, tag: crate::TagKey<crate::ItemKey>) -> Option<&[crate::ItemKey]>;
 
     /// Whether a mod-created recipe property set accepts an item ID. Unknown
     /// sets/items and vanilla set keys return false. Use this in
@@ -1276,10 +1354,10 @@ impl<'a> OwningLoop<'a> {
 }
 
 impl LoopContext for OwningLoop<'_> {
-    fn is_in_tag(&self, item: crate::ItemKey, tag: crate::TagKey) -> Option<bool> {
+    fn is_in_tag(&self, item: crate::ItemKey, tag: crate::TagKey<crate::ItemKey>) -> Option<bool> {
         self.item_tags?.contains(tag, item)
     }
-    fn items_in_tag(&self, tag: crate::TagKey) -> Option<&[crate::ItemKey]> {
+    fn items_in_tag(&self, tag: crate::TagKey<crate::ItemKey>) -> Option<&[crate::ItemKey]> {
         self.item_tags?.items(tag)
     }
     fn mod_recipe_property_contains(&self, set: &str, item: crate::ItemKey) -> bool {
@@ -1338,6 +1416,12 @@ pub trait WorldgenHost {
         key: &str,
         value: &str,
     ) -> Option<crate::BlockState>;
+
+    /// `BlockState.getValue`: the value of `state`'s property `key` as its block's state
+    /// definition spells it (`north`, `true`, `3`), so a `rotate` part can read the property it
+    /// turns. None when its block has no such property, for a state this game does not have, and
+    /// in a context with no block states at hand.
+    fn state_property(&self, state: crate::BlockState, key: &str) -> Option<String>;
 }
 
 // no wire: a process-local borrow of frozen worldgen metadata.
@@ -1359,6 +1443,7 @@ pub trait WorldgenReader: Sync {
 pub struct OwningWorldgen<'a> {
     source: &'a dyn WorldgenReader,
     state_with_property: &'a StateWithProperty<'a>,
+    state_property: &'a StateProperty<'a>,
     mods: LoadedMods,
 }
 
@@ -1366,15 +1451,22 @@ pub struct OwningWorldgen<'a> {
 type StateWithProperty<'a> =
     dyn Fn(crate::BlockState, &str, &str) -> Option<crate::BlockState> + 'a;
 
+/// `BlockState.getValue` as the game answers it for [`OwningWorldgen`].
+type StateProperty<'a> = dyn Fn(crate::BlockState, &str) -> Option<String> + 'a;
+
 impl<'a> OwningWorldgen<'a> {
-    /// Borrow the owning engine's frozen metadata reader and block-state query.
+    /// Borrow the owning engine's frozen metadata reader and its block-state build and read
+    /// (`BlockState.setValue`, `getValue`). A context with no block index to answer from passes
+    /// closures that answer None.
     pub fn new(
         source: &'a dyn WorldgenReader,
         state_with_property: &'a StateWithProperty<'a>,
+        state_property: &'a StateProperty<'a>,
     ) -> Self {
         Self {
             source,
             state_with_property,
+            state_property,
             mods: LoadedMods::enabled_at_startup(),
         }
     }
@@ -1397,6 +1489,9 @@ impl WorldgenHost for OwningWorldgen<'_> {
         value: &str,
     ) -> Option<crate::BlockState> {
         (self.state_with_property)(state, key, value)
+    }
+    fn state_property(&self, state: crate::BlockState, key: &str) -> Option<String> {
+        (self.state_property)(state, key)
     }
 }
 
@@ -1428,6 +1523,57 @@ pub(crate) fn with_test_package_inventory<R>(
 
 #[cfg(test)]
 pub(crate) use crate::testing::TestReader;
+
+/// `ConfigHost::mods` reads the startup inventory at run time: an installed package's
+/// manifest name and version (`IModInfo.getDisplayName`, `getVersion`), and nothing for an id
+/// no package has.
+#[test]
+fn a_host_reads_an_installed_packages_name_and_version() {
+    let packages = vec![
+        PackageInfo::new(
+            "machines".to_owned(),
+            "2.1.0".to_owned(),
+            PackageKind::Code,
+            crate::Side::Both,
+            vec!["machines".to_owned()],
+            vec![],
+        )
+        .with_details(crate::PackageDetails {
+            name: "Machines".to_owned(),
+            ..Default::default()
+        }),
+    ];
+    with_test_package_inventory(packages, || {
+        let host = crate::testing::FakeHost::new();
+        let mods = crate::prelude::ConfigHost::mods(&host);
+        let machines = mods.get("machines").unwrap();
+        assert_eq!((machines.name(), machines.version()), ("Machines", "2.1.0"));
+        assert!(mods.get("minecraft").is_none());
+        assert!(mods.get("missing").is_none());
+        assert_eq!(mods.display_name("machines"), Some("Machines"));
+        assert_eq!(mods.display_name("missing"), None);
+    });
+}
+
+/// `LoadedMods::display_name` answers `Minecraft` for the game, which is no package, and a
+/// package's id when its manifest has no name, as NeoForge's display name falls back to it.
+#[test]
+fn a_mods_display_name_is_minecraft_for_the_game_and_its_id_without_a_name() {
+    let unnamed = PackageInfo::new(
+        "bare".to_owned(),
+        "1".to_owned(),
+        PackageKind::Content,
+        crate::Side::Both,
+        vec!["bare".to_owned()],
+        vec![],
+    );
+    with_test_package_inventory(vec![unnamed], || {
+        let mods = crate::prelude::ConfigHost::mods(&crate::testing::FakeHost::new());
+        assert_eq!(mods.display_name("minecraft"), Some("Minecraft"));
+        assert_eq!(mods.get("bare").unwrap().name(), "");
+        assert_eq!(mods.display_name("bare"), Some("bare"));
+    });
+}
 
 #[test]
 fn the_registration_context_lists_installed_packages_with_their_details() {

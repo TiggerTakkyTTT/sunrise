@@ -78,7 +78,7 @@ Vanilla Minecraft: Java Edition 26.3, and nothing else.
 
 ### Portable crates
 
-`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-client-core`
+`sunrise-core`, `sunrise-world`, `sunrise-protocol`, `sunrise-items`, `sunrise-command`, `sunrise-game-data`
 and `sunrise-assets` hold vanilla's rules and data with no desktop in them. `sunrise-threads` provides worker
 scheduling and sampling, and `sunrise-java-properties` reads and writes Java-properties files with the standard
 library alone. These portable crates have no window, GPU, sound, gamepad or clipboard library, no HTTP client,
@@ -99,14 +99,14 @@ lets it take `sunrise-client-lib` until the types it needs move down, and only e
 What makes vanilla nicer to change, port and run, with no Sunrise branding and no address of its own. It is the
 public API that mods, desktop-class ports and the Sunrise layer build on.
 
-- **Belongs:** the mod API and mod formats, the native mod host, the shader API and pack formats beyond vanilla
+- **Belongs:** the mod API and mod formats, the native mod host, shader pack formats beyond vanilla
   (OptiFine, Polytone, `shaders/`), HDR, controllers, replay recording and playback, the HUD widget
   framework, UI pages and the settings system, agent control (`sunrise-ctl`, MCP),
   modpack porting, the design tokens of non-vanilla screens.
 - **Exposes what vanilla already uses.** FOV changes, potion effects, the player's state, screens, rendering
   hooks and so on become public API with stable types (arismoko/horizon#1608's patterns). Then a mod, a port or a
   Sunrise feature builds on them instead of editing or copying engine code.
-- **Examples:** `sunrise-shader-api`, `sunrise-shaders`, `sunrise-optifine` (`cem/`), `sunrise-polytone`,
+- **Examples:** `sunrise-shaders`, `sunrise-optifine` (`cem/`), `sunrise-polytone`,
   `sunrise-hdr`, `sunrise-dualsense`, `sunrise-mods`, `sunrise-mcp`,
   `sunrise-theme`. Still in engine crates today: `game/mod_api_host.rs`, `game/native_*.rs`, `shader_ui.rs`,
   `hdr_calibration.rs`.
@@ -162,7 +162,7 @@ Sunrise's own extras and its product, and every built-in address of an outside s
 - **Rules:**
   - It uses the platform's public API only, never the engine.
   - Until it moves, every Sunrise feature in the game sits behind the `sunrise-extras` feature
-    ([forking.md](forking.md)), so [sunrise-plain](https://github.com/horizon-rust/horizon-plain) builds without it.
+    ([forking.md](forking.md)), so a plain build compiles without it.
 
 ## Tools
 
@@ -249,7 +249,7 @@ it.
 |---|---|
 | The launcher's release builds, every platform and format: Linux `.tar.gz` and AppImage, macOS `.zip` and signed `.dmg`, Windows `.zip` and `sunrise-launcher-setup*.exe` | sunrise-org/sunrise-launcher's release workflow |
 | GitHub releases (`launcher@X.Y.Z`) | `.github/workflows/launcher-bridge.yml` (signed here, published there and here) |
-| playsunrise.net's download page | horizon-rust/horizon-site, reading `https://github.com/sunrise-org/sunrise-launcher/blob/main/links.json` and the releases |
+| playsunrise.net's download page | `sunrise-org/sunny`, reading `https://github.com/sunrise-org/sunrise-launcher/blob/main/links.json` and the releases |
 | The launcher's self-update | `https://github.com/sunrise-org/sunrise-launcher/blob/main/src/backend.rs` (`stage_update`), `https://github.com/sunrise-org/sunrise-launcher/blob/main/src/update_handoff.rs`, `https://github.com/sunrise-org/sunrise-launcher/blob/main/src/nightly.rs` |
 | The game builds the launcher installs, so the in-game part reaches every player | `.github/workflows/nightly-build.yml`, `release.yml`, `game-build.yml` |
 | The links the launcher and the site read (Discord, website) | `https://github.com/sunrise-org/sunrise-launcher/blob/main/links.json` |
@@ -404,9 +404,9 @@ pub enum Act { Press, PressBack, Slide(f32), Bind(String), Edit(String), Submit 
 pub fn connect(address: impl Into<String>);                   // from a Title page's act: join that server
 ```
 
-- `SunriseSettings`: a row of the Sunrise Settings page, after the engine's own pages. `Title` and `Pause`: a
-  button on the title screen or the pause menu that opens the page. These buttons exist only when something
-  registered, so the vanilla menus keep vanilla's look. The page is drawn with the same widgets, tooltips,
+- `SunriseSettings`: a row on Sunrise Settings' Extras page, after PvP & HUD's, that opens the page.
+  `Title` and `Pause`: a button on the title screen or the pause menu that opens the page. These buttons
+  exist only when something registered, so the vanilla menus keep vanilla's look. The page is drawn with the same widgets, tooltips,
   narration, controller focus and `sunrise-ctl` ids as the engine's pages.
 - `Button` and `Text` are built with `Row::button` and `Row::text` and their options: `.active(false)` greys a
   button, `.half()` puts two side by side, `.footer()` sets one beside Done on a page drawn as its own screen,
@@ -573,6 +573,22 @@ pub const MAX_BUTTONS: usize = 56;              // and `register` refuses one wi
   block to also clear the logo and edition banner shows fewer rows — the ones that fit.
 - With no button shown the title screen is vanilla's.
 
+### Item catalog (`sunrise_platform::items`)
+
+Reads of vanilla's own item catalogs, which any crate may use (an inventory tool, a search, a sorter); the engine
+fills them from the data it loaded, and nothing in them is per feature.
+
+```rust
+fn creative_order(stack: &containers::Stack) -> Option<usize>;  // its place in vanilla's creative order
+```
+
+- This is the stock order, the one the built-in sorter ranks by (the search tab's stacks, then the ungrouped items),
+  not the search tab as mods and permissions change it. The place of the same stack (same item and components,
+  by `Stack::kind`), else its item's first place; `None` for an item the creative tabs don't show, or before the
+  game has built them.
+- The window's game publishes the table each time it builds the creative tabs' contents, so a read is two hash
+  lookups, never a scan.
+
 ### Lang files (`sunrise_platform::lang`)
 
 A crate keeps the text for its keys in its own folder, `crates/<name>/assets/lang/<code>.json`, with the same
@@ -659,11 +675,6 @@ The current dependency inventory is in `tools/layers.json`, with fork-specific c
 `_fork_baselines`. It records existing fork dependencies and the restored upstream Horizon layer dependencies. The separate launcher and registry workspaces take two engine crates: `sunrise-mod-package` (the launcher's
 package, modpack and index reads; the registry's index format) and `sunrise-system` (the launcher's bug reports).
 Those three edges are `allowed` rows like the launcher's other engine dependencies.
-
-`sunrise-mod-package`'s registry index validates shader packages with `sunrise-shader-api`, behind the optional
-`index` feature (the portable crates take `sunrise-mod-package` without it). That edge is the one `optional` row:
-it excuses the layer check and the portable check only while the dependency stays optional, so making it mandatory
-fails both.
 
 ## Built-in addresses
 

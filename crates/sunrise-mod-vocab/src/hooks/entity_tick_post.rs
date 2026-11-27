@@ -8,12 +8,13 @@ pub trait Hooks {
     /// says which side). Version 4 fires whenever a mod subscribes to `entity_tick_post` directly
     /// (removing the `entity_tick_listened` opt-in poll hook, the `entity_tick_each` /
     /// `entity_tick_each_entity` registrar flags, and family batching) and carries one entity
-    /// (`entity`, `kind`).
+    /// (`entity`, `kind`). Version 5 adds the server's frames, paintings, armor stands and thrown
+    /// tridents.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_entity_tick_post",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_entity_tick_post",
         dispatch = "flat",
         side = "both",
-        version = 4,
+        version = 5,
         contract = "listen",
         neoforge = "EntityTickEvent.Post",
         cancellable = false

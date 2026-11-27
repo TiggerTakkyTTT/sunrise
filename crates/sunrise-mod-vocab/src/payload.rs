@@ -2,8 +2,8 @@
 #[path = "payload/codec.rs"]
 mod codec;
 pub use codec::{
-    PAYLOAD_DECODE_BUDGET, PAYLOAD_MAX_DEPTH, PAYLOAD_MAX_LIST_ENTRIES, PAYLOAD_MAX_STRING_BYTES,
-    PAYLOAD_SCHEMA_MARKER, decode_payload, encode_payload, payload_schema, typed_payload_version,
+    PAYLOAD_DECODE_BUDGET, PAYLOAD_MAX_DEPTH, PAYLOAD_MAX_STRING_BYTES, PAYLOAD_SCHEMA_MARKER,
+    decode_payload, encode_payload, payload_schema, typed_payload_version,
 };
 #[path = "payload/registrar.rs"]
 mod registrar;

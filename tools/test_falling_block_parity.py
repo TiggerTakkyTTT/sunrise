@@ -22,13 +22,11 @@ from pathlib import Path
 import platform
 import subprocess
 
-try:
-    from . import block_update_harness as h, lab, test_dispenser_parity as d, test_rust_parity as base
-except ImportError:
-    import block_update_harness as h
-    import lab
-    import test_dispenser_parity as d
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import block_update_harness as h, lab, test_dispenser_parity as d, test_rust_parity as base
 
 
 def base_cases(facts):
@@ -112,7 +110,7 @@ def main():
     sources = [oracle, Path(__file__), lab.ROOT / 'tools/test_rust_parity.py', lab.ROOT / 'tools/lab.py',
                lab.ROOT / 'tools/block_update_harness.py', lab.ROOT / 'tools/test_dispenser_parity.py',
                lab.ROOT / 'crates/sunrise-client/examples/probe/falling_block_fixture.rs',
-               lab.ROOT / 'crates/sunrise-client/src/falling_block.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/falling_block.rs',
                lab.ROOT / 'crates/sunrise-world/src/level/falling.rs']
     tested = base.source_hashes(sources)
     classes = build / 'classes'

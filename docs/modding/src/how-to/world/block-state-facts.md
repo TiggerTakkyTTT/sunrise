@@ -14,7 +14,10 @@ serialized value from immutable metadata. `state.with(&metadata, "facing", "east
 new state without writing to the world. To start from a block's default and apply partial
 property constraints, use `BlockState::of(&metadata, key, constraints)`. A missing property on a
 known state reads as `Ok(None)`; unavailable metadata, invalid states and refused edits return
-`BlockStateError`. For a known local ordinal, use the
+`BlockStateError`. To read a state's whole property set, as a tint source forwarding it does,
+`state.visit_properties(&metadata, &mut |name, value| ...)` calls back with each property's name
+and serialized value, in name order, as borrowed `&str`s (nothing is allocated). A block with no
+properties calls nothing; metadata that cannot enumerate returns `Unavailable`. For a known local ordinal, use the
 [block's state range](../../concepts/registry-keys.md#block-states).
 
 | Method | Vanilla |
@@ -28,13 +31,21 @@ known state reads as `Ok(None)`; unavailable metadata, invalid states and refuse
 | `friction(state) -> Option<f32>` | `BlockBehaviour.getFriction()` of the block: 0.6 usually, 0.98 ice, 0.8 slime |
 | `speed_factor(state) -> Option<f32>` | `Block.getSpeedFactor()`: 1.0 usually, 0.4 soul sand and honey; the declared value, which a block's `block_speed_factor` part can change where an entity stands |
 | `jump_factor(state) -> Option<f32>` | `Block.getJumpFactor()`: 1.0 usually, 0.5 honey; the declared value, which a block's `block_jump_factor` part can change |
+| `collision(state) -> Option<StateCollision>` | `BlockState.getCollisionShape(level, pos, CollisionContext.empty())`: `Fixed` boxes the same at every position, `Contextual` boxes an entity's context can change (scaffolding, powder snow, liquids), or `Positional` (bamboo and dripstone offsets, shulker boxes, moving pistons, published shapes, parts that answer collision): read those per position |
+| `landing(state) -> Option<BlockLanding>` | `BlockBehaviour.Properties.bounceRestitution` and `fallDistanceReduction`: 0.75 and 0.5 for beds and the shelf mushroom, a bounce of 1.0 for slime, 0 usually; not a part's `bounce_restitution` or a custom `fallOn` (hay) |
+| `path_type(state) -> Option<PathType>` | `WalkNodeEvaluator.getPathTypeFromState` after parts' `isPathfindable`: the state alone, without the `block_path_type` hook or neighbour rules |
 | `is_solid_render(state) -> Option<bool>` | `BlockState.isSolidRender()`: a full, occluding cube (stone yes; glass, leaves, slabs no) |
+| `is_solid(state) -> Option<bool>` | `BlockState.isSolid()`, the cached `legacySolid`: `forceSolidOn` (cobweb, signs) and `forceSolidOff` (ladder) first; then a dynamic shape (scaffolding) or an empty collision shape (torches) is not solid, and a collision shape large or high enough is (leaves and slabs yes) |
+| `collision_is_full_block(state) -> Option<bool>` | `BlockState.isCollisionShapeFullBlock` at the origin with an empty getter, as vanilla caches it (stone and leaves yes, slabs and fences no); `None` for a dynamic shape (shulker boxes, moving pistons, bamboo, scaffolding), which vanilla never caches |
+| `poi_type(state) -> Option<Identifier>` | `PoiTypes.forState`: the point of interest type (`minecraft:librarian` for a lectern, `minecraft:meeting` for a bell), mods' `extend_poi_types` states included |
 | `propagates_skylight_down(state) -> Option<bool>` | `BlockState.propagatesSkylightDown()`: sky light passes down unchanged, the block's own answer included (glass and air yes, stone no) |
 | `is_air(state) -> Option<bool>` | `BlockState.isAir()`: air, cave air and void air, by the block's flag rather than the `#minecraft:air` tag |
 | `is_redstone_conductor(state) -> Option<bool>` | `BlockState.isRedstoneConductor` when it depends only on the block state; `None` when a position is needed |
 | `map_color(state) -> Option<u8>` | `BlockState.getMapColor`: the `MapColor.id` a map item colours a column by, 0 for none |
 | `map_color_rgba(packed) -> Option<[u8; 4]>` | `MapColor.getColorFromPackedId`: decode a map pixel to `[red, green, blue, alpha]`; ID 0 and undefined IDs decode to transparent RGBA; `None` means no game backend |
-| `block_class(state, class: BlockClass) -> Result<Option<bool>, LevelReadError>` | Java `instanceof` on the block's vanilla class, subclasses included: `Stair`, `Entity` (`EntityBlock`), `IronBars`, `StainedGlassPane`, `TrapDoor`, `Bonemealable` (`BonemealableBlock`). See below |
+| `block_class(state, class: BlockClass) -> Result<Option<bool>, LevelReadError>` | Java `instanceof` on the block's vanilla class, subclasses included: `Stair`, `Entity` (`EntityBlock`), `IronBars`, `StainedGlassPane`, `TrapDoor`, `Bonemealable` (`BonemealableBlock`), `Slab`, `Wall`, `Fence`. See below |
+| `is_liquid_block_container(state) -> Option<bool>` | `instanceof LiquidBlockContainer`: the waterloggable blocks and kelp, seagrass |
+| `is_simple_waterlogged(state) -> Option<bool>` | `instanceof SimpleWaterloggedBlock`; a container that is not one holds water without a `waterlogged` property |
 | `piston_push_reaction(state) -> Result<Option<PushReaction>, LevelReadError>` | `BlockState.getPistonPushReaction()`: the resolved reaction used by pistons, including Part answers. See [piston push reactions](piston-push-reactions.md) |
 | `states_of(block) -> Option<BlockStateRange>` | `StateDefinition.getPossibleStates`, as owned values in canonical local-ordinal order |
 | `definition(block) -> Option<StateProperties<'_>>` | Borrowed property names and legal serialized values |
@@ -60,6 +71,19 @@ let allows_north = host.block_states().definition(block).is_some_and(|properties
 
 Copy a property's name with `.to_owned()` and values with `.to_vec()` only if you need them
 after that borrow ends.
+
+## Block metadata off the host's thread
+
+`BlockMetadata` is the block registry's metadata a thread can read without a host, as vanilla
+reads `BuiltInRegistries.BLOCK` from any thread: `key("minecraft:deepslate_bricks")` resolves a
+full identifier to its `BlockKey` (`BuiltInRegistries.BLOCK.getValue`), `default_state(key)` is
+`Block.defaultBlockState()`, `state_definition(key)` borrows its properties and legal values
+(`StateDefinition`), and `name`, `property`, `with` and `of` read and edit states as above. A chunk
+generator's worker gets it from `ChunkAccess::metadata`, so a palette resolves its ids there.
+`host.block_states().metadata()` returns the same tables as an owned
+`Arc<dyn BlockMetadata + Send + Sync>`: take it on the server or client thread and move it to a
+thread of your own, such as one rendering a region to an image. The tables never change once the
+registry is loaded.
 
 The conductor query uses the same exported predicate as redstone, not render solidity. It returns
 `None` for shulker boxes because their collision bounds depend on the live block entity. To query a
@@ -164,7 +188,8 @@ mod that changes it belongs on both sides.
 ## Block classes
 
 `block_class(state, class)` answers what a mod would ask with `instanceof StairBlock`, `EntityBlock`,
-`IronBarsBlock`, `StainedGlassPaneBlock`, `TrapDoorBlock` or `BonemealableBlock`. It reads the engine's own class of the
+`IronBarsBlock`, `StainedGlassPaneBlock`, `TrapDoorBlock`, `BonemealableBlock`, `SlabBlock`, `WallBlock` or
+`FenceBlock`. It reads the engine's own class of the
 block, so a subclass counts (a waxed copper stair is a `Stair`) and a mod block declared on a vanilla
 behaviour template belongs to that template's classes. It never reads tags: a pack that adds a block
 to `minecraft:stairs` does not make it a `Stair`. An unknown state answers `Ok(None)`; a host with no game

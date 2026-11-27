@@ -104,6 +104,22 @@ only in the local client's view and requires `&mut dyn ClientHost`, not a server
 host. Local cracks expire after 400 ticks without an update and clear when the
 client changes levels or disconnects.
 
+### Hear breaking cracks on a client
+
+`client_break_progress(dimension, breaker, pos, progress)` tells a client mod each crack its
+client level is told of (`ClientLevel.destroyBlockProgress`): the server's crack packets, and
+the local player's own dig, whose `breaker` is the player's entity id. `progress` `0..=9` is the
+stage; any other value means that breaker's crack went. A server that runs mining itself shows the
+player's own crack only through its packets, so this is how a client mod follows how far the block
+it mines has cracked:
+
+```rust
+{{#include ../../../examples/src/client_misc.rs:client_break_progress}}
+```
+
+A dig tells its stage every tick, so keep the listener cheap. A mod's own
+`set_client_break_progress` is not told back to it.
+
 ### Read tool speed
 
 `level.block_break_speed(host, pos, tool)` reads the tool's destroy speed on that
@@ -111,3 +127,12 @@ block, including its `minecraft:tool` component rules and default speed. It does
 not include Efficiency, player attributes, effects, fluid/airborne penalties or
 block hardness. Bare hands return `1.0`; an unavailable position returns `None`.
 This read takes an immutable host and does not modify blocks or tools.
+
+## Hearing and cancelling the server's level events
+
+`server_level_event` is asked for every level event the server sends, the game's and the mods' alike,
+before it goes out: the level, the event id, its position and data, and whether it is a global event
+(`global_level_event` while the `global_sound_events` rule is on). Return `Flow::Cancel` and nobody
+gets it: no packet is sent, and the world's own player neither hears nor sees it. To narrow an event,
+for example a wither's spawn heard only nearby, cancel it and play your own sound for the players you
+choose with `PlayerRef::play_sound`. Check the id first: the hook is asked for every event.

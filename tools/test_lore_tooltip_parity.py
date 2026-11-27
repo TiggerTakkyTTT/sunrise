@@ -7,10 +7,12 @@ with dark purple italic (VanillaLoreTooltipOracle). Sunrise prints what
 """
 import json
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 # SNBT stacks. A lore line is a text component; italic:0b is an explicit false.
 CASES = [
@@ -128,7 +130,7 @@ if __name__ == '__main__':
         sources=[
             lab.ROOT / 'crates/sunrise-client/src/item_tooltip.rs',
             lab.ROOT / 'crates/sunrise-items/src/item_data.rs',
-            lab.ROOT / 'crates/sunrise-client-core/src/text.rs',
-            lab.ROOT / 'crates/sunrise-client-core/src/component.rs',
+            lab.ROOT / 'crates/sunrise-game-data/src/text.rs',
+            lab.ROOT / 'crates/sunrise-game-data/src/component.rs',
         ],
         expected_lines=len(corpus()))

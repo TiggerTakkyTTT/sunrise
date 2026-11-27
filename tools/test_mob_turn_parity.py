@@ -17,10 +17,11 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, integration_env
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, integration_env
 
 OUTPUTS = {'fox.txt': 13 * 3 * 2, 'dolphin.txt': 13 * 3, 'dragon.txt': 7 * 5 * 3 * 2, 'look_at.txt': 36}
 WITNESS_ENV = 'SUNRISE_MOB_TURN_WITNESS_DIR'
@@ -29,7 +30,7 @@ LIB_TESTS = [
     'mobs::dolphin::jump_turn_tests::the_jump_turn_matches_the_pinned_oracle',
 ]
 CLIENT_TESTS = [
-    'game::dragon::tests::the_scanning_turn_matches_the_pinned_oracle',
+    'game::server_side::dragon::tests::the_scanning_turn_matches_the_pinned_oracle',
     'game::remote::tests::client_read_tests::look_at_matches_the_pinned_oracle',
 ]
 
@@ -118,11 +119,11 @@ def main():
                lab.ROOT / 'tools/integration_env.py', lab.ROOT / 'Cargo.toml', lab.ROOT / 'Cargo.lock',
                lab.ROOT / 'crates/sunrise-core/src/geometry/trig.rs',
                lab.ROOT / 'crates/sunrise-core/src/jmath.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/fox.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/dolphin.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/mobs/dragon.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/network/remote/mod.rs',
-               lab.ROOT / 'crates/sunrise-client/src/game/network/remote/client_read_tests.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/fox.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/dolphin.rs',
+               lab.ROOT / 'crates/sunrise-gameplay/src/game/mobs/dragon.rs',
+               lab.ROOT / 'crates/sunrise-gameplay-common/src/game/network/remote/mod.rs',
+               lab.ROOT / 'crates/sunrise-client/src/cut_layout/game/network/remote/client_read_tests.rs',
                parity_data, block_update_oracle]
     hashes = base.source_hashes(sources)
     with tempfile.TemporaryDirectory(prefix='sunrise-mob-turn-') as scratch:

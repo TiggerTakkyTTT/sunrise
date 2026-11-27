@@ -4,7 +4,8 @@ pub trait Hooks {
     /// The entity `entity` of type `kind` (`minecraft:zombie`, `minecraft:item`) is about to tick
     /// in the level `dimension` (NeoForge's `EntityTickEvent.Pre`, posted right before each
     /// entity's tick in `tickNonPassenger`).
-    /// Told on the server for the mobs, players, item entities, minecarts, boats, general entity
+    /// Told on the server for the mobs, players, item entities, minecarts, boats, item and glow
+    /// item frames, paintings, armor stands, thrown tridents, general entity
     /// rows and projectiles that tick in an entity-ticking chunk, and the entities the server
     /// keeps without simulating them (displays, markers, interactions), whose tick is only told
     /// (not a player's own boat or cart, which ticks with the player); and on a client for the
@@ -21,12 +22,13 @@ pub trait Hooks {
     /// Version 4 fires whenever a mod subscribes to `entity_tick_pre` directly (removing the
     /// `entity_tick_listened` opt-in poll hook, the `entity_tick_each` / `entity_tick_each_entity`
     /// registrar flags, and family batching) and carries one entity (`entity`, `kind`) returning
-    /// [`Flow`].
+    /// [`Flow`]. Version 5 adds the server's item and glow item frames, paintings, armor stands
+    /// and thrown tridents.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_entity_tick_pre",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_entity_tick_pre",
         dispatch = "flat",
         side = "both",
-        version = 4,
+        version = 5,
         contract = "cancel",
         out = "canceled",
         neoforge = "EntityTickEvent.Pre",

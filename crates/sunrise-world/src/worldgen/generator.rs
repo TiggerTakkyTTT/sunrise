@@ -821,6 +821,11 @@ where
                 Ok(id)
             })
             .map_err(stage("biomes"))?;
+        if let Some(terrain) = &self.mod_terrain {
+            terrain
+                .create_biomes(&mut chunk, &self.data, self.seed, [min, height])
+                .map_err(stage("biomes"))?;
+        }
         let chunk = Arc::new(chunk);
         let mut cache = self.biome_cache.lock().unwrap();
         cache.insert((pos.x, pos.z), chunk.clone());
@@ -1157,8 +1162,20 @@ where
         };
         context.set_lattice(lattice);
         // Masking off structures in WorldOptions does not change the terrain's range.
+        let mut block_entities = Vec::new();
         let filled = match &self.mod_terrain {
-            Some(terrain) => terrain.fill(&mut chunk, data.registry, self.seed, [min, height]),
+            Some(terrain) => terrain.fill(
+                &mut chunk,
+                &mut block_entities,
+                data.registry,
+                self.seed,
+                [
+                    min,
+                    height,
+                    self.settings.level_min_y,
+                    self.settings.level_min_y + self.settings.level_height,
+                ],
+            ),
             None => fill_noise(
                 &mut chunk,
                 volume,
@@ -1186,7 +1203,7 @@ where
                 biomes: center,
                 data: data.clone(),
                 decorated: false,
-                block_entities: Vec::new(),
+                block_entities: std::mem::take(&mut block_entities),
                 structure_starts: references,
                 own_starts,
                 entities: Vec::new(),
@@ -1246,7 +1263,7 @@ where
                 biomes: center,
                 data: data.clone(),
                 decorated: false,
-                block_entities: Vec::new(),
+                block_entities: std::mem::take(&mut block_entities),
                 structure_starts: references,
                 own_starts,
                 entities: Vec::new(),
@@ -1312,7 +1329,7 @@ where
             biomes: center,
             data: data.clone(),
             decorated: false,
-            block_entities: Vec::new(),
+            block_entities: std::mem::take(&mut block_entities),
             structure_starts: references,
             own_starts,
             entities: Vec::new(),
@@ -3287,11 +3304,54 @@ impl GeneratorWorker {
 }
 
 #[cfg(test)]
+mod pack_kinds;
+#[cfg(test)]
 mod region_tests;
 #[cfg(test)]
 mod tests {
     use super::super::biome_chunks::CACHE_LIMIT;
+    use super::super::{
+        feature::FeatureWorld,
+        placement::{PlacementContext, PlacementQueryError},
+    };
     use super::*;
+    use std::convert::Infallible;
+
+    /// A world of loose blocks that a structure piece's features place into.
+    pub(super) struct PieceWorld(pub(super) BTreeMap<[i32; 3], BlockStateId>);
+    impl FeatureWorld for PieceWorld {
+        type Error = Infallible;
+        fn block(&mut self, p: [i32; 3]) -> Result<BlockStateId, Infallible> {
+            Ok(self.0.get(&p).copied().unwrap_or(BlockStateId(0)))
+        }
+        fn set_block(
+            &mut self,
+            p: [i32; 3],
+            state: BlockStateId,
+            _: i32,
+        ) -> Result<bool, Infallible> {
+            self.0.insert(p, state);
+            Ok(true)
+        }
+    }
+    impl PlacementContext for PieceWorld {
+        fn generation(&self) -> super::super::anchor::WorldGenerationContext {
+            super::super::anchor::WorldGenerationContext::new(-64, 384, 63)
+        }
+        fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
+            Ok(-64)
+        }
+        fn height(&mut self, _: HeightmapType, _: i32, _: i32) -> Result<i32, PlacementQueryError> {
+            Err(PlacementQueryError::Unavailable)
+        }
+        fn block_survives(
+            &mut self,
+            _: BlockStateId,
+            _: [i32; 3],
+        ) -> Result<bool, PlacementQueryError> {
+            Ok(true)
+        }
+    }
     #[test]
     fn out_from_origin_preserves_order_and_handles_extreme_positive_steps() {
         assert_eq!(out_from_origin(4, 0, 8, 2), [4, 6, 2, 8, 0]);
@@ -3876,8 +3936,8 @@ mod tests {
         assert_eq!(second.state.carver_biomes, expected);
     }
 
-    /// The prepared worldgen data, if this checkout has it.
-    fn prepared_data() -> Option<Arc<GeneratorData>> {
+    /// The prepared resources' root, if this checkout has them.
+    pub(super) fn prepared_root() -> Option<std::path::PathBuf> {
         let root = std::env::var_os("SUNRISE_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -3887,10 +3947,24 @@ mod tests {
             eprintln!("skipping: no worldgen bundle at {}", root.display());
             return None;
         }
+        Some(root)
+    }
+
+    /// The prepared worldgen data under the data packs' files `overrides`, if this checkout has it.
+    pub(super) fn prepared_with(overrides: &WorldgenOverrides) -> Option<Arc<GeneratorData>> {
+        let root = prepared_root()?;
         let registry: &'static BlockRegistry = Box::leak(Box::new(
             crate::level::data::load_registry(&root).expect("registry"),
         ));
-        Some(GeneratorData::load(&root.join("worldgen"), registry).expect("worldgen data"))
+        Some(
+            GeneratorData::load_with(&root.join("worldgen"), registry, overrides)
+                .expect("worldgen data"),
+        )
+    }
+
+    /// The prepared worldgen data, if this checkout has it.
+    fn prepared_data() -> Option<Arc<GeneratorData>> {
+        prepared_with(&WorldgenOverrides::default())
     }
 
     /// A superflat world decorates with what `adjustGenerationSettings` keeps of its biome
@@ -3968,55 +4042,8 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn a_structure_piece_places_configured_and_placed_features_by_id() {
-        use super::super::{
-            feature::FeatureWorld,
-            generator_decoration::Decoration,
-            placement::{PlacementContext, PlacementQueryError},
-            structure::jigsaw::FeatureKey,
-        };
-        use std::collections::BTreeMap;
-        use std::convert::Infallible;
+        use super::super::{generator_decoration::Decoration, structure::jigsaw::FeatureKey};
         use sunrise_core::random::LegacyRandom;
-
-        struct World(BTreeMap<[i32; 3], BlockStateId>);
-        impl FeatureWorld for World {
-            type Error = Infallible;
-            fn block(&mut self, p: [i32; 3]) -> Result<BlockStateId, Infallible> {
-                Ok(self.0.get(&p).copied().unwrap_or(BlockStateId(0)))
-            }
-            fn set_block(
-                &mut self,
-                p: [i32; 3],
-                state: BlockStateId,
-                _: i32,
-            ) -> Result<bool, Infallible> {
-                self.0.insert(p, state);
-                Ok(true)
-            }
-        }
-        impl PlacementContext for World {
-            fn generation(&self) -> super::super::anchor::WorldGenerationContext {
-                super::super::anchor::WorldGenerationContext::new(-64, 384, 63)
-            }
-            fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
-                Ok(-64)
-            }
-            fn height(
-                &mut self,
-                _: HeightmapType,
-                _: i32,
-                _: i32,
-            ) -> Result<i32, PlacementQueryError> {
-                Err(PlacementQueryError::Unavailable)
-            }
-            fn block_survives(
-                &mut self,
-                _: BlockStateId,
-                _: [i32; 3],
-            ) -> Result<bool, PlacementQueryError> {
-                Ok(true)
-            }
-        }
 
         let data = prepared_data().expect("prepared resources");
         let plains = ResolvedBiomeSource::Fixed(super::super::biome_source::FixedBiomeSource {
@@ -4026,7 +4053,7 @@ mod tests {
             .unwrap()
             .expect("decoration");
         let pumpkin = data.registry().default_state("minecraft:pumpkin").unwrap();
-        let mut world = World(BTreeMap::new());
+        let mut world = PieceWorld(BTreeMap::new());
         let mut random = LegacyRandom::new(5);
         let mut place = |feature, pos| {
             decoration

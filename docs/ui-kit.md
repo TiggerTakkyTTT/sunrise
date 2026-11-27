@@ -39,7 +39,7 @@ and an area. There are two kinds:
 | `BossBars` | `hud_overlays::boss_bars_bottom(h, n)`: vanilla's `BossHealthOverlay` layout, y from 12 in steps of 19 until a third of the view's height; as wide as the 182 px bar or its widest name |
 | `StatusRows` | the survival rows above the hotbar (health with its absorption rows, armour, food or the mount's hearts, air), from the highest row's top to the view's bottom, as `hud_layout::draws_top` reports them; `room.bottom()` is the lowest y an overlay may reach |
 
-`Game::hud_room` (`crates/sunrise-client/src/game/hud_room.rs`) gathers what is showing.
+`ClientGame::hud_room` (`crates/sunrise-client-gameplay/src/game/interface/hud_room.rs`) gathers what is showing.
 Nothing shows while F1 or Replay Studio hides the HUD, or off a world. `hud` empties `ui.room` at
 the start of every frame, and `hud_layers` fills it in before the world's HUD draws, so every
 overlay in the frame reads the same room and never a stale one.
@@ -67,15 +67,15 @@ these push-aside points for mods.
 ### Overlays that hold the view
 
 Some overlays take the middle of the view for themselves, as the radial menu does once it shows.
-What vanilla draws there gives way to them through one query, `Game::overlay_holds_view()`
-(`crates/sunrise-client/src/game/hud_room.rs`), not a check per overlay in each piece:
+What vanilla draws there gives way to them through one query, `ClientGame::overlay_holds_view()`
+(`crates/sunrise-client-gameplay/src/game/interface/hud_room.rs`), not a check per overlay in each piece:
 
 | Gives way | Where |
 |---|---|
-| the 2D crosshair and F3's crosshair | `hud_layers`, `debug_crosshair_drawn` (`game.rs`) |
-| the chat's lines (an open chat still draws) | `hud_layers` (`game.rs`) |
-| every toast: advancements, recipes, tutorials, packs, music | `Game::draw_every_toast` (`hud_room.rs`); they go on timing out, as under F1 |
-| the first-person hands | `Game::hands_shown` (`hud_room.rs`), which `hand_geometry` reads (`game/frame_geometry.rs`) |
+| the 2D crosshair and F3's crosshair | `hud_layers`, `debug_crosshair_drawn` (`crates/sunrise-client-gameplay/src/game/game_client.rs`) |
+| the chat's lines (an open chat still draws) | `hud_layers` (`crates/sunrise-client-gameplay/src/game/game_client.rs`) |
+| every toast: advancements, recipes, tutorials, packs, music | `ClientGame::draw_every_toast` (`hud_room.rs`); they go on timing out, as under F1 |
+| the first-person hands | `ClientGame::hands_shown` (`hud_room.rs`), which `hand_geometry` reads (`crates/sunrise-client-gameplay/src/game/interface/frame_geometry.rs`) |
 
 A new overlay that holds the view adds its own condition to `overlay_holds_view`. Ask from the moment
 it shows, not from when it owns the pad ([Pad capture](#pad-capture)): a quick tap of the radial
@@ -140,7 +140,7 @@ segment counts, a clip that keeps half a disc and its blend run, gradient stops,
 `hud_kit::motion` is quiet motion for overlays. It holds no state: the overlay keeps the moments
 things happened and asks where a tween is now.
 
-- `Clock { now, still }` is built once a frame by the game (`Game::hud_clock`). `still` is set
+- `Clock { now, still }` is built once a frame by the game (`ClientGame::hud_clock`). `still` is set
   while the game is paused, frame-stepped (`SUNRISE_STILL`, a screenshot sequence) or a repro
   recording or replay runs. A still clock shows every tween at its end, so recordings and
   screenshots are the same every run.
@@ -167,7 +167,7 @@ sector is drawing.
 | `Icon` | Drawn by |
 |---|---|
 | `Sprite("statistics/item_dropped")` | the kit, from the atlas's `gui/sprites/`; proportions kept, centred |
-| `Item("minecraft:chest")` | the game's `IconPainter::item` (`game/item_draw.rs`): the item's model, scaled from 16 |
+| `Item("minecraft:chest")` | the game's `IconPainter::item` (`crates/sunrise-client-gameplay/src/game/interface/item_draw.rs`): the item's model, scaled from 16 |
 | `Glyph(glyph)` | the kit, `pad_glyph::draw`, centred |
 
 `icon::draw(batch, atlas, painter, icon, area, alpha)` says whether anything was drawn. The render
@@ -211,8 +211,8 @@ as its pages turn round, lights both arrows of a collapsed strip.
 
 ### Where it is used
 
-The settings shell's page list ([The page list](#the-page-list)) collapses into it when its pages
-don't fit: Shaders' pack screens in a short view (four fit at 427x240 GUI px: an 854x480 window at
+The settings shell's page list ([The page list](#the-page-list)) collapses into it when a list with
+section lines doesn't fit: Shaders' pack screens in a short view (four fit at 427x240 GUI px: an 854x480 window at
 GUI scale 2, or 720p at its automatic scale; packs such as BSL have about ten).
 
 Tests: `hud_kit::tabs` (centring, cutting, dimmed ends, the pip window; a row's order, fades,
@@ -223,8 +223,8 @@ twelve-screen pack in a real game).
 
 ## Pad capture
 
-Several overlays over play take the controller for themselves. `Game::pad_capture`
-(`crates/sunrise-client/src/game/pad/capture.rs`) is the one place that says which owns it now,
+Several overlays over play take the controller for themselves. `ClientGame::pad_capture`
+(`crates/sunrise-client-gameplay/src/game/interface/pad/capture.rs`) is the one place that says which owns it now,
 in one priority order:
 
 | `PadCapture` | Owns the pad while |
@@ -270,13 +270,13 @@ art and the label, so South shows that A. `GlyphStyle` is only the setting: the 
 
 What the types guarantee: no code outside `pad_glyph` can turn a bare `Button` into art or a label, and none
 can make `Glyphs` without the `PadSettings` its letters come from. What they don't: a caller holding the
-settings could still pass another pad's family, so gameplay reads the player's through `Game::glyph` and
-`Game::menu_glyph`.
+settings could still pass another pad's family, so gameplay reads the player's through `ClientGame::glyph` and
+`ClientGame::menu_glyph`.
 
 A new screen asks for a glyph like this:
 
 ```rust
-// Gameplay: `Game::glyph` for anything, `Game::menu_glyph` for a menu job.
+// Gameplay: `ClientGame::glyph` for anything, `ClientGame::menu_glyph` for a menu job.
 if let Some(jump) = self.glyph(GlyphOf::Bound("key.jump")) {
     pad_glyph::draw(batch, atlas, jump, x, y);
 }
@@ -419,6 +419,14 @@ Polytone config entries, a page per section, with Undo from a snapshot taken whe
    not `options_ui.rs`.
 7. **Delete** the screen's own drawing, scrolling, focus, search and click code.
 
+A screen can host other screens' rows rather than describe them again, as Sunrise Settings
+(`sunrise_ui.rs`) hosts the graphics screen's, the extras' and the pack list's: it keeps those screens
+as fields, takes their `sheets` and re-tags each `Group` and `Row` with its own row id (`Group::map_id`,
+`Row::map_id`), and hands each press, slide and wheel step back to the screen the row came from.
+`Screen::note_lines_on(page)` gives a page more description lines than the others (Gameplay keeps the
+extras' page's, `extras_ui::NOTE_LINES`). A `Group` with an empty name draws no title and takes no
+room: a page of one group shows its rows alone.
+
 What the old screen's tests checked moves to tests on the `Shell` of the new one: press a row with
 `click` at `point_at`, walk with `key`, and read `listed`, `row_labels`, `focused` and `changed`.
 
@@ -473,7 +481,7 @@ radial menu's editor does for a slot's action:
   Shift press). `None`, the default, steps it as Right does; outputs (a `Push` of the list's page) open
   the list instead. Left and Right still step it.
 - `Hosted::clicks_step(on)`: the host marks the clicks that are a controller's D-pad Left or Right
-  (`OptionsUi::pad_clicks_step`, from `game/pad_menu.rs`), so on such a choice they step rather than
+  (`OptionsUi::pad_clicks_step`, from `crates/sunrise-client-gameplay/src/game/interface/pad_menu.rs`), so on such a choice they step rather than
   open the list.
 - `Shell::focus_soon(row)`: put the focus on a row at the next draw, scrolled into view, as the
   keyboard would. The host reads where it went (`Hosted::opened_focus`, `OptionsUi::shell_opened_focus`)
@@ -489,9 +497,19 @@ radial menu's editor does for a slot's action:
 A screen of two pages or more has a page list down the left, a page under the last. A `Sheet` with
 `listed: false` isn't in it (it opens from a link, and the list lights the page the link was on), and
 one with a `heading` has a line over it that starts a section, as Shaders names the picked pack over its
-screens. When the pages and lines don't fit above the foot (`Columns::page_room`), the last section
-collapses into one `hud_kit::tabs::collapsed` row ([Tabs](#tabs)); pages that fit look as they always
-did. In the row:
+screens. When the pages don't fit above the foot (`Columns::page_room`):
+
+- A list with no section lines (Sunrise Settings) scrolls: the pages in view stay tabs one under another,
+  a scroller beside them shows there is more, the wheel over them moves them a page at a time, and a
+  page out of view has no place on the screen (no click, no target). The keys go on past either end of
+  the view in list order (Down or Tab from the last page in view, Up or Shift Tab from the first),
+  scrolling the next page in; a controller's focus reaching either end scrolls the next one in
+  (`Hosted::reveal`), and its bumpers walk every page in list order, wrapping (`Hosted::step_page`);
+  a page opened out of view is scrolled in. The wheel taking the focused page out of view hands the
+  focus to the nearest page in view (while searching, one with matches). Every step passes over
+  pages with no matches while searching.
+- A list with section lines collapses its last section into one `hud_kit::tabs::collapsed` row
+  ([Tabs](#tabs)); pages that fit look as they always did. In the row:
 
 - Left of the name picks the page before, the name the one shown, right of it the page after. While
   searching, before and after are the nearest pages with matches; an arrow with none is dimmed and picks

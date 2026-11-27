@@ -85,10 +85,48 @@ pub trait ClientSession {
         Err(ClientSessionReadError::Unavailable)
     }
     /// Side: client.
+    /// The locator bar's tracked waypoints: each waypoint's identifier, target, icon style and
+    /// icon colour, farthest first by squared distance from the camera entity when one
+    /// exists (ties in no promised order; no promised order without one). What this client
+    /// has been sent; None outside a logged-in client world. Sends nothing.
+    fn client_waypoints(&self) -> Option<ClientWaypoints> {
+        unimplemented!("ClientSession::client_waypoints")
+    }
+    /// Side: client.
+    /// The listed players' skins as the Tab overlay draws them: each player's skin texture path
+    /// and whether it uses the slim model. What this client has been sent; None outside a
+    /// logged-in client world. Sends nothing.
+    fn client_player_skins(&self) -> Option<ClientPlayerSkins> {
+        unimplemented!("ClientSession::client_player_skins")
+    }
+    /// The local player's fishing hook: its position and whether a fish is biting. What
+    /// this client tracks; None outside a logged-in client world or when no hook is out.
+    /// Sends nothing.
+    fn client_fishing_hook(&self) -> Option<ClientFishingHook> {
+        unimplemented!("ClientSession::client_fishing_hook")
+    }
+    /// Side: client.
     /// Existing local frame counters; None outside a logged-in client world.
     /// This read collects no history and sends nothing anywhere.
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
         unimplemented!("ClientSession::client_frame_stats")
+    }
+    /// Side: client.
+    /// The title, subtitle and action bar on screen now. Each is None once its timer has run
+    /// out; the subtitle shows only with a title. What this client has been sent; `Ok(None)`
+    /// outside a logged-in client world. A text conversion error is returned for the failing
+    /// read. No plaintext is substituted. Sends nothing.
+    fn client_titles(&self) -> Result<Option<ClientTitles>, ClientSessionReadError> {
+        Err(ClientSessionReadError::Unavailable)
+    }
+    /// Side: client.
+    /// Every boss bar the client holds, in server order: each bar's name and
+    /// progress (0 to 1, as drawn). The HUD draws only those that fit within
+    /// `guiHeight / 3`. What this client has been sent; `Ok(None)` outside a
+    /// logged-in client world. A text conversion error is returned for the failing read.
+    /// No plaintext is substituted. Sends nothing.
+    fn client_boss_bars(&self) -> Result<Option<Vec<ClientBossBarEntry>>, ClientSessionReadError> {
+        Err(ClientSessionReadError::Unavailable)
     }
 }
 /// The commands service, reached through its host.
@@ -234,6 +272,27 @@ pub trait Players {
         unimplemented!("Players::player_by_name")
     }
     /// Side: server.
+    /// An online player's profile by UUID, else an unexpired user-cache entry without login
+    /// properties. Does not contact the profile service or synthesize an offline identity.
+    fn profile_by_uuid(&self, uuid: u128) -> Option<GameProfile<'_>> {
+        unimplemented!("Players::profile_by_uuid")
+    }
+    /// Side: server.
+    /// An online player's profile by account name (case-insensitive), else an unexpired
+    /// user-cache entry without login properties. Does not contact the profile service or
+    /// synthesize an offline identity.
+    fn profile_by_name(&self, name: &str) -> Option<GameProfile<'_>> {
+        unimplemented!("Players::profile_by_name")
+    }
+    /// Side: server.
+    /// The permission set for a profile (`MinecraftServer.getProfilePermissions`), even before
+    /// the player joins. Dedicated servers look up the UUID in the op list. Integrated servers
+    /// check the owner's name case-insensitively and account for world and guest command access.
+    /// An ordinary player has [`PermissionLevel::All`] (level 0).
+    fn profile_permission_level(&self, uuid: u128, name: &str) -> PermissionLevel {
+        unimplemented!("Players::profile_permission_level")
+    }
+    /// Side: server.
     /// The player whose action or command a hook hears, as their state is
     /// swapped in (a command executor, `right_click_block`,
     /// `native_use_on`, `break_block`...): None outside such a
@@ -353,6 +412,73 @@ pub trait RenderAssets {
     }
     /// Side: client.
     /// Published asset/data read: available in Setup, Reloading and World.
+    /// Resolve the handle of a built-in ([`BUILTIN_RENDER_TYPE_IDS`]) or registered custom
+    /// [`RenderSetup`] render type by ID once in `client_setup` and again in
+    /// `client_resources_reloaded`, not each frame. Returns [`RenderTypeError::Unknown`] for an
+    /// unregistered ID, or [`RenderTypeError::Invalid`] when a custom render type's underlying
+    /// optional pipeline failed to build in the current resource load.
+    fn render_type(&self, id: &Identifier) -> Result<RenderTypeRef, RenderTypeError> {
+        let _ = id;
+        unimplemented!("RenderAssets::render_type")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// The render type `RenderTypes.entitySolid(texture)`: the built-in `minecraft:entity_solid`
+    /// drawing the dynamic texture `texture`, for `BlockEntityDrawContext::textured_quad`.
+    /// Memoized per texture as vanilla's is, so the same `texture` gives the same handle in one
+    /// resource load; resolve it once in `client_setup` and again in
+    /// `client_resources_reloaded`, not each frame. The texture need not exist yet: a draw asks
+    /// whether it does. Only `textured_quad` takes this handle; any other draw refuses it as
+    /// [`RenderTypeError::Unknown`].
+    fn entity_solid(&self, texture: &Identifier) -> Result<RenderTypeRef, RenderTypeError> {
+        let _ = texture;
+        unimplemented!("RenderAssets::entity_solid")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// As [`Self::entity_solid`] for `RenderTypes.entityCutout(texture)`: texels under alpha 0.1
+    /// are discarded.
+    fn entity_cutout(&self, texture: &Identifier) -> Result<RenderTypeRef, RenderTypeError> {
+        let _ = texture;
+        unimplemented!("RenderAssets::entity_cutout")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// As [`Self::entity_solid`] for `RenderTypes.entityTranslucent(texture)`: alpha blended,
+    /// depth written, quads sorted far to near.
+    fn entity_translucent(&self, texture: &Identifier) -> Result<RenderTypeRef, RenderTypeError> {
+        let _ = texture;
+        unimplemented!("RenderAssets::entity_translucent")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// Resolve the handle of a registered compute pipeline ([`ComputePipeline`]) by ID once in
+    /// `client_setup` and again in `client_resources_reloaded`, not each frame. Returns
+    /// [`ComputePipelineError::Unknown`] for an unregistered ID,
+    /// [`ComputePipelineError::Invalid`] when the shader did not build in the current resource
+    /// load or the device refuses it, and [`ComputePipelineError::UnsupportedFeature`] when it
+    /// needs subgroup operations the adapter lacks.
+    fn compute_pipeline(
+        &self,
+        id: &Identifier,
+    ) -> Result<ComputePipelineRef, ComputePipelineError> {
+        let _ = id;
+        unimplemented!("RenderAssets::compute_pipeline")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// Resolve the handle of a registered pipeline modifier by ID once in `client_setup`
+    /// (also valid in `client_resources_reloaded`). `Unknown` for an ID no mod registered.
+    /// Modifiers are static across resource reloads.
+    fn pipeline_modifier(
+        &self,
+        id: &Identifier,
+    ) -> Result<PipelineModifierRef, RenderPipelineError> {
+        let _ = id;
+        unimplemented!("RenderAssets::pipeline_modifier")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
     /// The keyframe animation `id`, from `assets/<namespace>/neoforge/animations/entity/<path>.json`
     /// in the mod's or a pack's resources (NeoForge's `Model.getAnimation`), as the latest resource
     /// load read it; `None` when no file gives it or the file failed to load. Get and
@@ -367,11 +493,19 @@ pub trait RenderAssets {
     /// moving piston block, a falling block, a block display): all the parts its blockstate file
     /// selects for its properties, weighted alternatives picked at the fixed seed
     /// `BlockEntityDrawContext::block` uses, tint layers from the block's tint sources without a
-    /// position. Any state: a mod's, vanilla's, a resource pack's. It draws through
+    /// position. Any state: a mod's, vanilla's, a resource pack's. A block vanilla also draws with
+    /// a special renderer (the blocks vanilla's `BuiltInBlockModels` lists: chests, shulker
+    /// boxes, banners, heads and skulls, the bell, conduit, decorated pot, enchanting table's
+    /// book, copper golem statues, the end portal and gateway) is their composite: the
+    /// blockstate parts, then the special renderer's geometry with no block entity data (a
+    /// closed lid, a closed book lying on the enchanting table, a still banner with no
+    /// patterns, every face of the end portal and gateway, no profile), as a block display
+    /// shows it. It draws through
     /// [`WorldDrawContext::draw_model_instances`](crate::WorldDrawContext::draw_model_instances),
-    /// [`InstanceGroupRef`] and `BlockEntityDrawContext::terrain_model`. `ModelError::UnknownModel` for a
-    /// state with no baked model (air, a block drawn by a special renderer) or one the live
-    /// block-state index lacks (a block it does not hold, or an ordinal past the block's states).
+    /// [`InstanceGroupRef`] and `BlockEntityDrawContext::terrain_model`; the special part takes
+    /// the entity materials, no tint and no hidden faces. `ModelError::UnknownModel` for a state
+    /// that draws nothing (air, a block with no model) or one the live block-state index lacks
+    /// (a block it does not hold, or an ordinal past the block's states).
     /// Resolve once per distinct state in `client_setup` and again in `client_resources_reloaded`,
     /// not each frame; the handle goes stale on a reload.
     fn block_state_model(&self, state: BlockState) -> Result<ModelRef, ModelError> {
@@ -396,6 +530,59 @@ pub trait RenderAssets {
     /// lacks. Retain the key and borrow the model when reading its quads, without copying them.
     fn baked_model(&self, key: BakedModelKey) -> Result<BakedModelView<'_>, ModelError> {
         unimplemented!("RenderAssets::baked_model")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// The pixels of one blocks-atlas sprite, as `TextureAtlas.getSprite(..)`'s `SpriteContents`
+    /// holds them: the first frame of an animated sprite (the one its `.mcmeta` starts on, not the
+    /// whole strip), untinted, RGBA8, read on the CPU from the published resources with no GPU
+    /// readback. `sprite` is the reference `texture_sprites` and `block_sprites` answer; it names
+    /// the blocks atlas, the only atlas a `SpriteRef` indexes (`TextureAtlas::Blocks`).
+    ///
+    /// The size is the sprite's own frame as the engine stitched it, larger than the texture
+    /// budget lets the atlas array hold it included: such a sprite comes back at its own size, not
+    /// shrunk to the array's edge. A frame the atlas squared (a `.mcmeta` frame that is not
+    /// square) comes back squared. `AtlasSpriteError::NoSuchSprite` only for a reference whose array or layer is
+    /// out of range; `AtlasSpriteError::NotReady` before any resources are published. A
+    /// `SpriteRef` carries no generation: one kept across a resource reload may name a different
+    /// sprite and is read as that sprite, so resolve references again whenever
+    /// `block_sprites_version` changes. Each call copies the pixels: read once in `client_setup` or
+    /// `client_resources_reloaded` to bake a lookup texture, a colour table or a preview, not
+    /// each frame.
+    fn atlas_sprite_pixels(
+        &self,
+        sprite: SpriteRef,
+    ) -> Result<AtlasSpritePixels, AtlasSpriteError> {
+        unimplemented!("RenderAssets::atlas_sprite_pixels")
+    }
+    /// Side: client.
+    /// Published asset/data read: available in Setup, Reloading and World.
+    /// The active `shaders/` pack's `block.properties` integer id (`mc_Entity`) for `state`, as
+    /// Sunrise's shader-pack loader maps it: the one the engine's own terrain carries for it.
+    /// `None` when no pack is active and rendering (the title screen and a pack still loading
+    /// included), when the active pack is not a `shaders/` pack, when the pack gives `state` no
+    /// id, and when `state` is not in the live block-state index.
+    ///
+    /// The answer changes when the active pack is loaded, switched or turned off, and no signal
+    /// of such a change exists yet: nothing tells a mod when a pack reloads, and
+    /// `shader_pack_active()` stays `true` across a switch from one pack to another. A mod that
+    /// needs the current id asks again when it needs it; keep no cache that nothing invalidates.
+    /// Item and entity ids are not part of this read.
+    fn shader_pack_block_id(&self, state: BlockState) -> Option<i32> {
+        let _ = state;
+        unimplemented!("RenderAssets::shader_pack_block_id")
+    }
+    /// Side: client.
+    /// Whether a shader pack is active and compiled a pack program for `pipeline`'s
+    /// [`PackBinding`], so the pack draws it (Iris's `DHCompatInternal.shouldOverride` and
+    /// `shouldOverrideShadow`; `incompatiblePack` is the opposite). `false` when no pack is
+    /// active (the title screen included), when `pipeline` is stale or invalid, and when the
+    /// pack has no matching program or the pipeline has no `PackBinding`: the engine then draws
+    /// the pipeline through the mod's own shaders. Read in the render callbacks, as the state
+    /// was at the start of the frame; [`ShaderPackState::generation`] says when to ask again.
+    fn pipeline_pack_bound(&self, pipeline: RenderPipelineRef) -> bool {
+        let _ = pipeline;
+        unimplemented!("RenderAssets::pipeline_pack_bound")
     }
 }
 

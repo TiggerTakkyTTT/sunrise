@@ -40,6 +40,7 @@ fn an_output_validator_is_a_path_on_a_global_cancel_or_plain_listen_hook() {
     for api in [
         json!({"contract":"cancel", "out":"canceled", "output_validator":"crate::check"}),
         json!({"contract":"listen", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"value", "output_validator":"crate::check"}),
     ] {
         assert_eq!(
             parse(api, None).unwrap().output_validator.as_deref(),
@@ -51,6 +52,8 @@ fn an_output_validator_is_a_path_on_a_global_cancel_or_plain_listen_hook() {
         json!({"contract":"cancel", "out":"canceled", "output_validator":"not a path"}),
         json!({"contract":"listen", "staged_surface":"sink", "output_validator":"crate::check"}),
         json!({"contract":"listen", "owner":"mod_id", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"items", "answered_by":"mod", "output_validator":"crate::check"}),
+        json!({"contract":"collect", "out":"items", "registration_append":"attributed", "output_validator":"crate::check"}),
     ] {
         assert!(parse(api, None).is_err());
     }

@@ -87,7 +87,7 @@ checks runners are the only ones it may reach:
 
 ## On playsunrise
 
-Installed by `tools/ci/checks-runners.sh` (run it there; it reads the registration token on stdin, so the token never
+Installed by `tools/ci/checks-runners.sh`, copied to `~/sunrise-install/` with `git-slim.sh` and `job-started.sh` beside it (run it there; it reads the registration token on stdin, so the token never
 touches the disk or the screen):
 
 ```sh

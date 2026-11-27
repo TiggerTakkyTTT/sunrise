@@ -21,18 +21,18 @@ pub trait Hooks {
     /// owner is disabled, execution is refused rather than handed to another mod.
     /// Clients get the command tree, not executors. An argument's kind is one
     /// of `word`, `string` (a word or a quoted phrase), `text`, `integer`, `integer(min,max)`,
-    /// `long`, `long(min,max)`, `number`, `boolean`, `player`, `item`, `block_pos` and `vec3`,
+    /// `long`, `long(min,max)`, `number`, `boolean`, `player`, `item`, `block_pos`, `vec3` and `vec2`,
     /// or a command argument type a mod
     /// registered (`Registrar::register_command_argument`), named by its namespaced id.
     #[notes = r#"## Command argument kinds beyond the basics
 
-- Besides `word`, `text`, `integer`, `number`, `boolean`, `player`, `item` and `block_pos`, an argument's kind may be `vec3`, `vec3_uncentered`, `column_pos`, `rotation`, `dimension` or `nbt`. Each is sent to clients as vanilla's parser, so `~`, `^` and the dimension list complete as in a vanilla command. A `vec3` and a `vec3_uncentered` cannot share a position in one command's usages, as they look the same to a client.
+- Besides `word`, `text`, `integer`, `number`, `boolean`, `player`, `item` and `block_pos`, an argument's kind may be `vec3`, `vec3_uncentered`, `vec2`, `vec2_uncentered`, `column_pos`, `rotation`, `dimension` or `nbt`. Each is sent to clients as vanilla's parser, so `~`, `^` and the dimension list complete as in a vanilla command. Neither `vec3`/`vec3_uncentered` nor `vec2`/`vec2_uncentered` can share a position in one command's usages, as they look the same to a client.
 
-- `vec3` and `vec3_uncentered` deliver `CommandArgumentValue::Vec3`; `column_pos` delivers `ColumnPos`, `rotation` delivers `Rotation` (yaw, pitch), `dimension` delivers `Dimension(LevelRef)` and `nbt` delivers `Nbt(Compound)`. `~` and `^` resolve against the source's position and rotation. A `dimension` the world has not loaded is refused with `argument.dimension.invalid` before the executor runs.
+- `vec3` and `vec3_uncentered` deliver `CommandArgumentValue::Vec3`; `vec2` and `vec2_uncentered` deliver `CommandArgumentValue::Vec2` (`x` and `z` as `[f32; 2]`, `~` relative parts only); `column_pos` delivers `ColumnPos`, `rotation` delivers `Rotation` (yaw, pitch), `dimension` delivers `Dimension(LevelRef)` and `nbt` delivers `Nbt(Compound)`. `~` and `^` resolve against the source's position and rotation. A `dimension` the world has not loaded is refused with `argument.dimension.invalid` before the executor runs.
 
 - `string` reads one word or one `"quoted"` / `'quoted'` phrase, as Brigadier's `StringArgumentType.string()` (`QUOTABLE_PHRASE`), and other arguments may follow it. A registered argument type reads the same with `CommandArgumentKind::Quotable` (otherwise one word, or the rest of the line with `Greedy`). Word, `string` and greedy text values are strings: a `string` arrives decoded as `CommandArgumentValue::String`, without its quotes and escapes, and a `Quotable` type's `parse` gets that decoded text. Clients receive both as `brigadier:string` mode 1."#]
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_register_commands",
+        target = "sunrise_gameplay::game::native_hooks::base::ServerGame<'_>::native_register_commands",
         dispatch = "flat",
         side = "server",
         contract = "collect",

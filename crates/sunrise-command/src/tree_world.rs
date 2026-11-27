@@ -7,7 +7,7 @@ use super::{
     args::{ArgType, integer},
     vanilla::{ENTITIES, ENTITY, GAMEMASTERS, PLAYERS},
 };
-use sunrise_client_core::sound_source::SOUND_SOURCES;
+use sunrise_game_data::sound_source::SOUND_SOURCES;
 
 fn float(min: f32) -> ArgType {
     ArgType::Float { min, max: f32::MAX }
@@ -40,7 +40,7 @@ pub fn register(d: &mut Dispatcher, root: usize) {
     // spreadplayers <center> <spreadDistance> <maxRange> [under <maxHeight>] <respectTeams> <targets>
     let spread = d.literal(root, "spreadplayers");
     d.requires(spread, GAMEMASTERS);
-    let center = d.argument(spread, "center", ArgType::Vec2);
+    let center = d.argument(spread, "center", ArgType::Vec2 { center: true });
     let dist = d.argument(center, "spreadDistance", float(0.0));
     let range = d.argument(dist, "maxRange", float(1.0));
     let respect = d.argument(range, "respectTeams", ArgType::Bool);
@@ -351,7 +351,7 @@ fn worldborder(d: &mut Dispatcher, root: usize) {
         d.executes(time, id);
     }
     let center = d.literal(w, "center");
-    let pos = d.argument(center, "pos", ArgType::Vec2);
+    let pos = d.argument(center, "pos", ArgType::Vec2 { center: true });
     d.executes(pos, "worldborder.center");
     let damage = d.literal(w, "damage");
     let amount = d.literal(damage, "amount");

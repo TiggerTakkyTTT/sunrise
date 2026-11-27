@@ -45,10 +45,9 @@ import sys
 import zipfile
 from pathlib import Path
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 ORACLE = Path(os.environ.get('SUNRISE_STRUCTURE_ORACLE', lab.LOCAL / 'structure-oracle'))
 JARS = Path(os.environ.get('SUNRISE_STRUCTURE_JARS', ORACLE / 'jars'))

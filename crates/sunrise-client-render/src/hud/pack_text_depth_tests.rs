@@ -18,12 +18,21 @@ const PIPELINES: [(&str, &str); 5] = [
     ("screenquad", "lightmap"),
 ];
 
+/// The first pipeline Sunrise draws with each of [`PIPELINES`].
+const DRAWN: [&str; 5] = [
+    "minecraft:pipeline/text",
+    "minecraft:pipeline/lines",
+    "minecraft:pipeline/sky",
+    "minecraft:pipeline/stars",
+    "minecraft:pipeline/lightmap",
+];
+
 fn stage(name: &str, extension: &str) -> String {
     format!("assets/minecraft/shaders/core/{name}.{extension}")
 }
 
 /// A fragment stage declaring `Other`, a block no pipeline gives, and reading it only between
-/// `condition` (a `#if` line) and its `#endif`: where it is read, the shader is refused.
+/// `condition` (a `#if` line) and its `#endif`: where it is read, the load fails.
 fn fragment(condition: &str) -> String {
     format!(
         "#version 330\nlayout(std140) uniform Other {{\n    vec4 Tint;\n}};\n\
@@ -48,8 +57,12 @@ fn game(plain: &str, extra: &[(&str, String)]) -> Vec<(String, String)> {
 }
 
 /// Which programs load (the GUI's, the world's and the see-through text, the block outline,
-/// the sky, the stars, the lightmap) from the packs at `root` over the game's `defaults`.
-fn loaded(root: &[(String, String)], defaults: &[(String, String)]) -> [bool; 7] {
+/// the sky, the stars, the lightmap) from the packs at `root` over the game's `defaults`, or the
+/// required pipeline that fails the load.
+fn loaded(
+    root: &[(String, String)],
+    defaults: &[(String, String)],
+) -> Result<[bool; 7], &'static str> {
     let files = |f: &[(String, String)]| {
         source(
             &f.iter()
@@ -58,9 +71,9 @@ fn loaded(root: &[(String, String)], defaults: &[(String, String)]) -> [bool; 7]
         )
     };
     let mut atlas = super::super::HudAtlas::boot();
-    load_shaders(&mut atlas, &files(root), &files(defaults)).expect("no required shader");
+    load_shaders(&mut atlas, &files(root), &files(defaults)).map_err(|e| e.pipeline)?;
     let text = &atlas.text_shaders;
-    [
+    Ok([
         text.gui.is_some(),
         text.world.is_some(),
         text.see_through.is_some(),
@@ -68,7 +81,7 @@ fn loaded(root: &[(String, String)], defaults: &[(String, String)]) -> [bool; 7]
         atlas.sky_shader.is_some(),
         atlas.stars_shader.is_some(),
         atlas.lightmap_shader.is_some(),
-    ]
+    ])
 }
 
 /// The programs pipeline `i` of [`PIPELINES`] makes, in [`loaded`]'s order.
@@ -83,7 +96,8 @@ fn programs_of(i: usize) -> [bool; 7] {
 /// A pack replacing one pipeline's fragment stage with one that reads a block no pipeline gives
 /// only where the define is missing (`#ifndef`, `#if !defined`) loads every program of that
 /// pipeline, and only that pipeline's; one reading it only where the define is there (`#ifdef`,
-/// `#if defined`) loads none. `#undef` takes it away for the rest of the stage.
+/// `#if defined`) fails the load at the first pipeline Sunrise draws with it. `#undef` takes it
+/// away for the rest of the stage.
 #[test]
 fn every_core_program_is_translated_with_the_zero_to_one_depth_define() {
     let plain = fragment("#if 0");
@@ -100,11 +114,19 @@ fn every_core_program_is_translated_with_the_zero_to_one_depth_define() {
             let fsh = stage(name, "fsh");
             root.retain(|(p, _)| *p != fsh);
             root.push((fsh, fragment(&condition)));
-            let expected = if loads { programs_of(i) } else { [false; 7] };
+            let expected = if loads {
+                Ok(programs_of(i))
+            } else {
+                Err(DRAWN[i])
+            };
             assert_eq!(loaded(&root, &defaults), expected, "{name}: {condition}");
         }
     }
-    assert_eq!(loaded(&defaults, &defaults), [false; 7], "the game's own");
+    assert_eq!(
+        loaded(&defaults, &defaults),
+        Ok([false; 7]),
+        "the game's own"
+    );
 }
 
 /// Telling a pack's shader from the game's sees the define as the translation does: a stage the
@@ -124,17 +146,24 @@ fn an_include_override_counts_only_where_the_depth_define_keeps_it() {
         root.retain(|(p, _)| p != INCLUDE);
         root.push((INCLUDE.to_owned(), "const float hz_pack = 1.0;".to_owned()));
         let expected = [changed; 7];
-        assert_eq!(loaded(&root, &defaults), expected, "{directive}");
-        // An include the pack replaces with one that doesn't translate refuses where it counts.
+        assert_eq!(loaded(&root, &defaults), Ok(expected), "{directive}");
+        // An include the pack replaces with one that doesn't translate fails the load where it
+        // counts (the text's pipeline first), and changes nothing where the compiler drops it.
         root.retain(|(p, _)| p != INCLUDE);
         root.push((INCLUDE.to_owned(), "uniform float Broken;".to_owned()));
-        assert_eq!(loaded(&root, &defaults), [false; 7], "{directive}: broken");
+        let broken = if changed {
+            Err("minecraft:pipeline/text")
+        } else {
+            Ok([false; 7])
+        };
+        assert_eq!(loaded(&root, &defaults), broken, "{directive}: broken");
     }
 }
 
 /// The define is there before the pack's code, as shaderc's command-line macros are: the pack
 /// defining it again the same way (whitespace aside) changes nothing, and defining it otherwise
-/// is a redefinition the compiler refuses, as glslang does. Another macro of the pack's is its own.
+/// is a redefinition the compiler refuses, as glslang does, which fails the load. Another macro
+/// of the pack's is its own.
 #[test]
 fn a_pack_redefining_the_depth_define_otherwise_is_refused() {
     let defaults = game(&fragment("#if 0"), &[]);
@@ -150,7 +179,11 @@ fn a_pack_redefining_the_depth_define_otherwise_is_refused() {
         let text = fragment(&format!("#ifndef {DEPTH}"))
             .replace("#version 330\n", &format!("#version 330\n{define}\n"));
         root.push((fsh, text));
-        let expected = if loads { programs_of(0) } else { [false; 7] };
+        let expected = if loads {
+            Ok(programs_of(0))
+        } else {
+            Err("minecraft:pipeline/text")
+        };
         assert_eq!(loaded(&root, &defaults), expected, "{define}");
     }
 }

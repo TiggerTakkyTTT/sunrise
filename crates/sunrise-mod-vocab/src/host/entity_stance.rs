@@ -6,9 +6,11 @@ use crate::*;
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait EntityStanceBackend {
-    /// Side: server.
+    /// Side: both.
     /// `Entity.isSpectator`: true for a player in spectator mode, false for
-    /// every other entity.
+    /// every other entity. On a client, a player's game mode as its `PlayerInfo` says
+    /// (`AbstractClientPlayer.gameMode`), the local player's and every tracked player's;
+    /// false while that `PlayerInfo` is missing. None for a stale handle.
     fn entity_spectator(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
     /// `isSecondaryUseActive`: the local client's live semantic sneak state (not the
@@ -37,6 +39,17 @@ pub trait EntityStanceBackend {
     /// tracked bodies without the flag), other kinds and stale handles.
     fn entity_is_swimming(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
+    /// An armor stand's pose rotations (`ArmorStand.getHeadPose` ... `getRightLegPose`). On a
+    /// client, the synced `DATA_*_POSE` the server last sent, so another player's or a
+    /// command's edit shows as soon as it arrives. None for an entity that isn't an armor stand
+    /// and for a stale handle.
+    fn entity_armor_stand_pose(&self, entity: EntityRef) -> Option<ArmorStandPose>;
+    /// Side: both.
+    /// An armor stand's client flags (`isSmall`, `showArms`, `showBasePlate`, `isMarker`). On a
+    /// client, the synced `DATA_CLIENT_FLAGS` the server last sent. None for an entity that isn't
+    /// an armor stand and for a stale handle.
+    fn entity_armor_stand_flags(&self, entity: EntityRef) -> Option<ArmorStandFlags>;
+    /// Side: both.
     /// The entity's pose (`Entity.getPose`) as `Pose` names it: `standing`,
     /// `crouching`, `swimming`, `sleeping`, a warden's `roaring`... Kinds
     /// with no pose stand. On a client, the local player's own predicted pose, or the synched
@@ -51,6 +64,14 @@ pub trait EntityStanceBackend {
     /// own Main Hand option. Sunrise keeps no left-handed flag for the ender dragon, which reads
     /// right. None for an entity that isn't living and for a stale handle.
     fn entity_main_arm(&self, entity: EntityRef) -> Option<MainHand>;
+    /// Side: both.
+    /// Whether the entity sits, by its own vanilla test: `Panda.isSitting`,
+    /// `Camel.isCamelSitting` (a camel husk too), `Fox.isSitting` and
+    /// `TamableAnimal.isInSittingPose` (wolf, cat, parrot, nautilus, zombie nautilus). A mod
+    /// entity answers by its template's test. On a client, the synced flags the server last sent
+    /// for a kept mob. None for a kind with no sitting test (players included), a stale handle, or
+    /// an entity whose body the client doesn't keep.
+    fn entity_is_sitting(&self, entity: EntityRef) -> Option<bool>;
 }
 /// The handles' writes of the `entity_stance` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

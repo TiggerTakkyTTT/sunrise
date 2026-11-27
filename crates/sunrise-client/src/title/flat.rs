@@ -10,12 +10,13 @@ use crate::{
     ui,
 };
 use serde_json::Value;
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 use sunrise_assets::item_model::{DisplayContext, ItemEnv};
-use sunrise_core::nbt::Tag;
+use sunrise_world::worldgen::overrides::{FLAT_PRESET_TAGS, FLAT_PRESETS, WorldgenOverrides};
 
-/// DimensionType.Y_SIZE: the most blocks a flat generator takes.
-const Y_SIZE: i32 = 4064;
 /// The list's row width (ObjectSelectionList.getRowWidth).
 const ROW_WIDTH: f32 = 220.0;
 /// The header row above the layers.
@@ -24,205 +25,7 @@ const HEADER: f32 = 14.0;
 const LAYER_ROW: f32 = 20.0;
 const PRESET_ROW: f32 = 24.0;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlatLayer {
-    /// A block id such as `minecraft:dirt`.
-    pub block: String,
-    /// How many blocks tall this layer is (0..=4064).
-    pub height: i32,
-}
-
-/// FlatLevelGeneratorSettings: the layers (bottom to top), the biome and the
-/// decorations CreateFlatWorldScreen edits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlatSettings {
-    pub biome: String,
-    pub features: bool,
-    pub lakes: bool,
-    pub layers: Vec<FlatLayer>,
-    pub structure_overrides: Vec<String>,
-}
-impl Default for FlatSettings {
-    fn default() -> Self {
-        // worldgen/world_preset/flat.json's overworld.
-        Self {
-            biome: "minecraft:plains".into(),
-            features: false,
-            lakes: false,
-            layers: vec![
-                FlatLayer {
-                    block: "minecraft:bedrock".into(),
-                    height: 1,
-                },
-                FlatLayer {
-                    block: "minecraft:dirt".into(),
-                    height: 2,
-                },
-                FlatLayer {
-                    block: "minecraft:grass_block".into(),
-                    height: 1,
-                },
-            ],
-            structure_overrides: vec!["minecraft:strongholds".into(), "minecraft:villages".into()],
-        }
-    }
-}
-impl FlatSettings {
-    /// A saved world's flat generator settings, for Re-Create.
-    pub fn from_world(dir: &Path) -> Option<Self> {
-        let settings = crate::save::world_gen_settings(dir)?;
-        let generator = settings
-            .get("dimensions")?
-            .get("minecraft:overworld")?
-            .get("generator")?;
-        if crate::save::text(generator.get("type"))?.trim_start_matches("minecraft:") != "flat" {
-            return None;
-        }
-        Self::from_tag(generator.get("settings")?)
-    }
-    pub fn from_tag(tag: &Tag) -> Option<Self> {
-        let Some(Tag::List(list)) = tag.get("layers") else {
-            return None;
-        };
-        let layers: Vec<FlatLayer> = list
-            .iter()
-            .filter_map(|layer| {
-                Some(FlatLayer {
-                    block: crate::save::text(layer.get("block"))?,
-                    height: crate::save::number(layer.get("height"))?.clamp(0, Y_SIZE as i64)
-                        as i32,
-                })
-            })
-            .collect();
-        // `layers: []` is a valid void flat world; a list whose entries all
-        // fail to parse is not.
-        if layers.is_empty() && !list.is_empty() {
-            return None;
-        }
-        let flag = |key: &str, default: bool| {
-            crate::save::number(tag.get(key)).map_or(default, |value| value != 0)
-        };
-        let structure_overrides = match tag.get("structure_overrides") {
-            Some(Tag::String(text)) => vec![text.to_string_lossy()],
-            Some(Tag::List(list)) => list
-                .iter()
-                .filter_map(|value| crate::save::text(Some(value)))
-                .collect(),
-            _ => Vec::new(),
-        };
-        Some(Self {
-            biome: crate::save::text(tag.get("biome")).unwrap_or_else(|| "minecraft:plains".into()),
-            features: flag("features", false),
-            lakes: flag("lakes", false),
-            layers,
-            structure_overrides,
-        })
-    }
-    /// FlatLevelGeneratorSettings.CODEC, as world_gen_settings stores it.
-    pub fn to_tag(&self) -> Tag {
-        let string = |text: &str| Tag::String(text.into());
-        Tag::compound([
-            ("biome", string(&self.biome)),
-            ("features", Tag::Byte(i8::from(self.features))),
-            ("lakes", Tag::Byte(i8::from(self.lakes))),
-            (
-                "layers",
-                Tag::List(
-                    self.layers
-                        .iter()
-                        .map(|layer| {
-                            Tag::compound([
-                                ("block", string(&layer.block)),
-                                ("height", Tag::Int(layer.height)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            ),
-            (
-                "structure_overrides",
-                Tag::List(
-                    self.structure_overrides
-                        .iter()
-                        .map(|id| string(id))
-                        .collect(),
-                ),
-            ),
-        ])
-    }
-    /// `CreateFlatWorldScreen.save`: the text the preset screen shows.
-    pub fn to_share(&self) -> String {
-        let layers = self
-            .layers
-            .iter()
-            .map(|layer| {
-                if layer.height == 1 {
-                    layer.block.clone()
-                } else {
-                    format!("{}*{}", layer.height, layer.block)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("{layers};{}", self.biome)
-    }
-    /// `PresetFlatWorldScreen.fromString`: `layers;biome`, keeping the
-    /// decorations the screen was opened with. `None` for a malformed list,
-    /// as vanilla falls back to the preset's own settings.
-    pub fn parse(
-        text: &str,
-        blocks: &BTreeSet<String>,
-        biomes: &BTreeSet<String>,
-        base: &Self,
-    ) -> Option<Self> {
-        let (layer_text, biome_text) = text.split_once(';').unwrap_or((text, ""));
-        let mut layers = Vec::new();
-        let mut total = 0;
-        for part in layer_text.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let (height, block) = match part.split_once('*') {
-                Some((height, block)) => (height.trim().parse::<i32>().ok()?, block.trim()),
-                None => (1, part),
-            };
-            let block = namespaced(block);
-            if !blocks.is_empty() && !blocks.contains(&block) {
-                return None;
-            }
-            let height = height.max(0).min(Y_SIZE - total);
-            if height == 0 {
-                continue;
-            }
-            total += height;
-            layers.push(FlatLayer { block, height });
-        }
-        if layers.is_empty() {
-            return None;
-        }
-        let mut biome = namespaced(biome_text.trim());
-        if biome == "minecraft:" || biome.is_empty() {
-            biome = "minecraft:plains".into();
-        }
-        if !biomes.is_empty() && !biomes.contains(&biome) {
-            biome = "minecraft:plains".into();
-        }
-        Some(Self {
-            biome,
-            layers,
-            ..base.clone()
-        })
-    }
-}
-/// `Identifier.parse`: bare names get the default namespace.
-fn namespaced(id: &str) -> String {
-    if id.is_empty() || id.contains(':') {
-        id.to_owned()
-    } else {
-        format!("minecraft:{id}")
-    }
-}
+pub use sunrise_sim::world_options::{FlatLayer, FlatSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Page {
@@ -259,9 +62,13 @@ impl State {
     pub fn settings(&self) -> &FlatSettings {
         &self.settings
     }
-    pub(super) fn new(root: &Path, current: Option<FlatSettings>) -> Self {
+    pub(super) fn new(
+        root: &Path,
+        current: Option<FlatSettings>,
+        overrides: &WorldgenOverrides,
+    ) -> Self {
         let settings = current.unwrap_or_default();
-        let (presets, blocks, biomes) = load(root);
+        let (presets, blocks, biomes) = load(root, overrides);
         Self {
             page: Page::Layers,
             share: settings.to_share(),
@@ -332,22 +139,43 @@ impl State {
     }
 }
 
-/// `<root>/data/<namespace>/worldgen/flat_level_generator_preset/<path>.json`,
-/// in the order of the `visible` tag, plus the block and biome ids the share
-/// text is checked against.
-fn load(root: &Path) -> (Vec<Preset>, BTreeSet<String>, BTreeSet<String>) {
+/// The flat presets of the `visible` tag (`FlatLevelGeneratorPresetTags`), in its order: the
+/// resource root's `data/<namespace>/worldgen/flat_level_generator_preset/<path>.json` and
+/// tag files with the selected packs' (`overrides`) over them, plus the block and biome ids
+/// the share text is checked against.
+fn load(
+    root: &Path,
+    overrides: &WorldgenOverrides,
+) -> (Vec<Preset>, BTreeSet<String>, BTreeSet<String>) {
     let mut presets = Vec::new();
     let kind = "worldgen/flat_level_generator_preset";
-    let preset_path = |id: &str| {
+    let in_packs: BTreeMap<&str, &str> = overrides.entries(FLAT_PRESETS).collect();
+    let preset_text = |id: &str| -> Option<String> {
+        if let Some(json) = in_packs.get(id) {
+            return Some((*json).to_owned());
+        }
         let (namespace, path) = id.split_once(':')?;
         let name = format!("data/{namespace}/{kind}/{path}.json");
-        sunrise_assets::resource_source::stays_inside(&name).then(|| root.join(name))
+        if !sunrise_assets::resource_source::stays_inside(&name) {
+            return None;
+        }
+        std::fs::read_to_string(root.join(name)).ok()
     };
+    let tag_files: Vec<(String, Vec<Vec<u8>>)> = overrides
+        .tags(FLAT_PRESET_TAGS)
+        .filter_map(|(id, _, json)| {
+            let (namespace, path) = id.split_once(':')?;
+            Some((
+                format!("tags/{namespace}:{kind}/{path}"),
+                vec![json.as_bytes().to_vec()],
+            ))
+        })
+        .collect();
     let tags = sunrise_world::tag_layers::load(
         root,
         kind,
-        &sunrise_world::loot::PackOverlay::NONE,
-        |id| preset_path(id).is_some_and(|file| file.is_file()),
+        &sunrise_world::loot::PackOverlay::new(&tag_files),
+        |id| preset_text(id).is_some(),
     )
     .unwrap_or_else(|error| {
         log::warn!("Sunrise: flat preset tags unavailable: {error}");
@@ -355,10 +183,7 @@ fn load(root: &Path) -> (Vec<Preset>, BTreeSet<String>, BTreeSet<String>) {
     });
     if let Some(ids) = tags.get("minecraft:visible") {
         for id in ids {
-            let Some(path) = preset_path(id) else {
-                continue;
-            };
-            let Ok(text) = std::fs::read_to_string(path) else {
+            let Some(text) = preset_text(id) else {
                 continue;
             };
             let Ok(value) = serde_json::from_str::<Value>(&text) else {
@@ -378,7 +203,8 @@ fn load(root: &Path) -> (Vec<Preset>, BTreeSet<String>, BTreeSet<String>) {
         }
     }
     let blocks = registry_ids(root, "minecraft:block");
-    let biomes = json_keys(&root.join("worldgen/biomes.json"));
+    let mut biomes = json_keys(&root.join("worldgen/biomes.json"));
+    biomes.extend(overrides.entries("biomes").map(|(id, _)| id.to_owned()));
     (presets, blocks, biomes)
 }
 fn preset_settings(value: &Value) -> Option<FlatSettings> {
@@ -1098,6 +924,47 @@ mod tests {
     };
     use crate::item_render::{ItemRenderer, LayerTints};
     use std::path::Path;
+    use sunrise_world::worldgen::overrides::WorldgenOverrides;
+
+    /// A pack's flat preset in the `#minecraft:visible` tag is offered on the preset screen, with
+    /// its own layers and display item, beside the vanilla ones the resource root gives.
+    #[test]
+    fn a_pack_flat_preset_in_the_visible_tag_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "data/test/worldgen/flat_level_generator_preset/flat_islands.json",
+            r#"{"display":"minecraft:sand","settings":{"biome":"minecraft:desert","features":false,"lakes":false,
+            "layers":[{"block":"minecraft:sand","height":3},{"block":"minecraft:water","height":1}]}}"#,
+        );
+        write(
+            "data/minecraft/tags/worldgen/flat_level_generator_preset/visible.json",
+            r#"{"values":["test:flat_islands"]}"#,
+        );
+        let pack = crate::datapack::DataPack::from_source(
+            "file/islands".into(),
+            crate::resource_source::ResourceSource::directory(dir.path().to_path_buf()),
+        );
+        let (overrides, _) = crate::datapack::worldgen_overrides_over(
+            &[],
+            &crate::datapack::DataPacks::new(&[&pack]),
+            &sunrise_world::conditions::LoadConditions::vanilla(),
+        );
+        let state = State::new(Path::new("missing"), None, &overrides);
+        let [preset] = &state.presets[..] else {
+            panic!("{:?}", state.presets);
+        };
+        assert_eq!(preset.id, "test:flat_islands");
+        assert_eq!(preset.display, "minecraft:sand");
+        assert_eq!(preset.settings.biome, "minecraft:desert");
+        assert_eq!(preset.settings.layers.len(), 2);
+        let none = State::new(Path::new("missing"), None, &WorldgenOverrides::default());
+        assert!(none.presets.is_empty());
+    }
 
     /// Vanilla keeps the deleted row's position selected: the layer that slid
     /// into it, or the new last row when the last one was deleted, and nothing
@@ -1114,7 +981,7 @@ mod tests {
     /// (`Entry.select`), so stepping through the list keeps what was typed there.
     #[test]
     fn only_a_press_puts_a_preset_in_the_share_box() {
-        let mut state = State::new(Path::new("missing"), None);
+        let mut state = State::new(Path::new("missing"), None, &WorldgenOverrides::default());
         let mut settings = FlatSettings::default();
         settings.layers.clear();
         let share = settings.to_share();

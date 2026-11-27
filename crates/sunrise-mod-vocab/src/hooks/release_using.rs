@@ -12,12 +12,13 @@ pub trait Hooks {
     /// (`LivingEntityUseItemEvent.Stop` is `living_entity_use_item_stop`);
     /// `on_stop_using` hears every stop, this one included.
     #[hook(
-        target = "sunrise_client::game::native_hooks::base::Game<'_>::native_release_using",
+        target = "sunrise_gameplay_common::game::native_hooks::base::GameHooks::native_release_using",
         dispatch = "flat",
         side = "both",
         contract = "listen",
         scope = "item",
-        key = "stack"
+        key = "stack",
+        version = 2
     )]
     fn release_using(stack: &ItemStack, entity: Option<i32>, time_left: i32, used: &mut bool);
 }

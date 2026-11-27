@@ -3,7 +3,8 @@
 pub trait Hooks {
     /// NeoForge's `IItemExtension.canContinueUsing`: does the use of `stack`,
     /// the stack it began with (vanilla's `useItem`), go on now that the used
-    /// `hand` holds `held`? `entity` is `None` for a player. `can_continue`
+    /// `hand` holds `held`? `entity` is the user's id, as in
+    /// `living_entity_use_item_start`. `can_continue`
     /// arrives with vanilla's answer (`ItemStack.isSameItem(held, stack)`).
     /// `true` goes on with `held` as the use's stack; `false` stops the use
     /// without a release. Asked each tick of a use, where
@@ -20,7 +21,8 @@ pub trait Hooks {
         scope = "item",
         key = "stack",
         host = "read",
-        neoforge = "IItemExtension.canContinueUsing"
+        neoforge = "IItemExtension.canContinueUsing",
+        version = 2
     )]
     fn can_continue_using(
         stack: &ItemStack,

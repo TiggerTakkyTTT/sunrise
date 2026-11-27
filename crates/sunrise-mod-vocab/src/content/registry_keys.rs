@@ -393,6 +393,12 @@ pub fn block_definitions() -> Option<&'static sunrise_mod_runtime::block_definit
     resolved_block_keys().get().map(|blocks| &**blocks)
 }
 
+/// Share the immutable definitions published with completed block identities, for a holder
+/// that outlives the borrow or moves to another thread.
+pub fn block_definitions_shared() -> Option<Arc<sunrise_mod_runtime::block_definitions::Blocks>> {
+    resolved_block_keys().get().cloned()
+}
+
 /// Find an item in the completed registry without allocating at a hook boundary.
 pub fn item_key(id: &str) -> Option<ItemKey> {
     Some(ItemKey(*resolved_items().get()?.slots.get(id)?))
@@ -587,6 +593,14 @@ pub fn menu_keys() -> Vec<MenuKey> {
 /// Every loaded enchantment key in registry order.
 pub fn enchantment_keys() -> Vec<EnchantmentKey> {
     ordered_keys(&ENCHANTMENTS, EnchantmentKey)
+}
+
+/// Find a loaded enchantment by canonical registry id.
+pub fn enchantment_key(id: &str) -> Option<EnchantmentKey> {
+    let table = ENCHANTMENTS.read().ok()?;
+    let names = table.as_ref()?;
+    let slot = *names.slots.get(id)?;
+    names.order.contains(&slot).then_some(EnchantmentKey(slot))
 }
 
 impl EntityTypeKey {

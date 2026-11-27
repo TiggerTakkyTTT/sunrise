@@ -4,8 +4,12 @@
 //! rule and the carvers run after it as `buildTerrain` runs them after its fill, and the
 //! structures and features as the base `ChunkGenerator` runs them.
 use super::*;
-use crate::worldgen::mod_generators::{ChunkAccess, ModChunkGenerator, VanillaStages};
+use crate::worldgen::mod_generators::{
+    ChunkAccess, ChunkBiomes, ModChunkGenerator, VanillaStages, pending_block_entity_pos,
+};
 use crate::worldgen::terrain::TerrainError;
+use sunrise_core::identifier::Identifier;
+use sunrise_core::nbt::Compound;
 
 /// A mod's terrain and the stages its level runs. `stages.structures` is off when the world's
 /// structures are.
@@ -20,16 +24,21 @@ pub(super) struct ModTerrain {
 impl ModTerrain {
     /// The fill of `buildTerrain`: the mod's blocks in `chunk`, which is air, within the noise's
     /// `min_y` and `height` as the noise fill writes, and the worldgen heightmaps the noise fill
-    /// keeps (`ChunkStatus.NOISE`'s), which the material rule and the carvers read.
+    /// keeps (`ChunkStatus.NOISE`'s), which the material rule and the carvers read. The
+    /// block-entity data it sets goes to `block_entities`, the proto chunk's pending data, for a
+    /// block within the level's `[level_min_y, level_max_y)`.
     pub(super) fn fill(
         &self,
         chunk: &mut TerrainChunk<'_, GenBlockStates>,
+        block_entities: &mut Vec<([i32; 3], Compound)>,
         registry: &'static BlockRegistry,
         seed: i64,
-        [min_y, height]: [i32; 2],
+        [min_y, height, level_min_y, level_max_y]: [i32; 4],
     ) -> Result<(), TerrainError> {
         self.generator.build_terrain(&mut Filling {
             chunk,
+            block_entities,
+            levels: level_min_y..level_max_y,
             registry,
             level: &self.level,
             seed,
@@ -38,11 +47,81 @@ impl ModTerrain {
         });
         chunk.prime_heightmaps(&[HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg])
     }
+
+    /// `createBiomes`: the mod's biome for every cell of `chunk`, which the level's biome source
+    /// filled, when its generator answers; a biome the world does not have refuses the chunk.
+    pub(super) fn create_biomes(
+        &self,
+        chunk: &mut BiomeChunk<BiomeId>,
+        data: &GeneratorData,
+        seed: i64,
+        [min_y, height]: [i32; 2],
+    ) -> Result<(), String> {
+        let mut biomes = Biomes {
+            chunk,
+            data,
+            level: &self.level,
+            seed,
+            min_y,
+            height,
+            error: None,
+        };
+        self.generator.create_biomes(&mut biomes);
+        biomes.error.map_or(Ok(()), Err)
+    }
+}
+
+/// The biome cells of a mod's level as its generator fills them.
+struct Biomes<'a> {
+    chunk: &'a mut BiomeChunk<BiomeId>,
+    data: &'a GeneratorData,
+    level: &'a str,
+    seed: i64,
+    min_y: i32,
+    height: i32,
+    /// The first biome the world does not have.
+    error: Option<String>,
+}
+
+impl ChunkBiomes for Biomes<'_> {
+    fn pos(&self) -> ChunkPos {
+        self.chunk.position()
+    }
+    fn level(&self) -> &str {
+        self.level
+    }
+    fn seed(&self) -> i64 {
+        self.seed
+    }
+    fn min_y(&self) -> i32 {
+        self.min_y
+    }
+    fn height(&self) -> i32 {
+        self.height
+    }
+    fn fill_biomes_from_noise(&mut self, resolver: &mut dyn FnMut([i32; 3]) -> Identifier) {
+        let data = self.data;
+        let filled = self.chunk.fill(
+            self.min_y,
+            self.min_y + self.height - 1,
+            |quart| -> Result<BiomeId, String> {
+                let name = resolver(quart);
+                data.biome_id(name.as_str())
+                    .ok_or_else(|| format!("the world has no biome {name}"))
+            },
+        );
+        if let Err(error) = filled {
+            self.error.get_or_insert(error.to_string());
+        }
+    }
 }
 
 /// The proto chunk as a mod's generator writes it: its noise range only.
 struct Filling<'a, 'r> {
     chunk: &'a mut TerrainChunk<'r, GenBlockStates>,
+    block_entities: &'a mut Vec<([i32; 3], Compound)>,
+    /// The level's block Ys, where block entities can be.
+    levels: std::ops::Range<i32>,
     registry: &'static BlockRegistry,
     level: &'a str,
     seed: i64,
@@ -81,6 +160,13 @@ impl ChunkAccess for Filling<'_, '_> {
             && z >> 4 == pos.z
             && (self.min_y..self.min_y + self.height).contains(&y)
             && self.chunk.set_block_raw(x, y, z, state).is_ok()
+    }
+    fn set_block_entity_nbt(&mut self, nbt: Compound) {
+        let position = self.chunk.position();
+        if let Some(pos) = pending_block_entity_pos(position, &nbt, self.levels.clone()) {
+            self.block_entities.retain(|(at, _)| *at != pos);
+            self.block_entities.push((pos, nbt));
+        }
     }
 }
 
@@ -196,6 +282,7 @@ impl OverworldGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sunrise_core::nbt::Tag;
 
     /// Stone from the level's floor up to y 70 in every column of the chunk.
     struct Slab(VanillaStages);
@@ -852,6 +939,107 @@ mod tests {
             }),
             "invalid generator resources: chunk generator test:slab asks for structures, but the \
              world has no structure sets"
+        );
+    }
+
+    /// Stone up to y 70 with a chest on it at `[3, 71, 5]` of each chunk, whose data names a loot
+    /// table, and its own biomes: desert in the chunks whose x is even, plains in the others
+    /// (`unknown`: a biome the world does not have). The material rule runs over it.
+    struct Desert {
+        unknown: bool,
+    }
+    impl ModChunkGenerator for Desert {
+        fn build_terrain(&self, chunk: &mut dyn ChunkAccess) {
+            Slab(VanillaStages::default()).build_terrain(chunk);
+            let pos = chunk.pos();
+            let at = [pos.x * 16 + 3, 71, pos.z * 16 + 5];
+            assert!(chunk.set_block(at, chunk.state("chest")));
+            let mut nbt = Compound::new();
+            nbt.insert("id".into(), Tag::String("minecraft:chest".into()));
+            for (key, value) in ["x", "y", "z"].into_iter().zip(at) {
+                nbt.insert(key.into(), Tag::Int(value));
+            }
+            nbt.insert(
+                "LootTable".into(),
+                Tag::String("minecraft:chests/simple_dungeon".into()),
+            );
+            chunk.set_block_entity_nbt(nbt);
+        }
+        fn vanilla_stages(&self) -> VanillaStages {
+            VanillaStages {
+                surface: true,
+                ..Default::default()
+            }
+        }
+        fn create_biomes(&self, chunk: &mut dyn ChunkBiomes) {
+            let unknown = self.unknown;
+            chunk.fill_biomes_from_noise(&mut |[x, _, _]| {
+                let name = match (unknown, x.div_euclid(4) % 2 == 0) {
+                    (true, _) => "test:nowhere",
+                    (false, true) => "minecraft:desert",
+                    (false, false) => "minecraft:plains",
+                };
+                Identifier::parse(name).unwrap()
+            });
+        }
+    }
+
+    /// A staged level over the Overworld's noise settings and its fixed plains source, whose
+    /// generator answers `createBiomes` and sets a chest's data: the chunk keeps the generator's
+    /// biomes, the material rule reads them (desert sand, plains grass), and the chest's data
+    /// waits in the proto chunk for its promotion.
+    #[test]
+    #[ignore = "daily"]
+    fn a_generators_biomes_and_block_entity_data_are_the_proto_chunks() {
+        let stem = stem(Value::from("minecraft:overworld"));
+        let open = |unknown| {
+            for_mod(
+                data(),
+                12345,
+                "minecraft:overworld",
+                &stem,
+                Arc::new(Desert { unknown }),
+                true,
+            )
+            .unwrap()
+        };
+        let level = open(false);
+        let mut worker = level.worker();
+        let id = |name| level.data().biome_id(name).unwrap();
+        // Chunk x 1 is plains, chunk x 2 desert, in every cell; the middle of each chunk, away
+        // from the biome zoom's reach across its borders, gets that biome's surface.
+        for (x, biome, top) in [
+            (1, "minecraft:plains", "minecraft:grass_block"),
+            (2, "minecraft:desert", "minecraft:sand"),
+        ] {
+            let chunk = worker.generate_proto(ChunkPos::new(x, -1)).unwrap();
+            for (dx, y, dz) in [(0, -64, 0), (7, 70, 9), (15, 319, 15)] {
+                assert_eq!(
+                    chunk.biome_id_at(x * 16 + dx, y, dz - 16),
+                    id(biome),
+                    "{x} {dx} {y} {dz}"
+                );
+            }
+            assert_eq!(chunk.block_name(x * 16 + 8, 70, -8), top, "{x}");
+            let pending: Vec<_> = chunk
+                .block_entities
+                .iter()
+                .map(|(pos, nbt)| (*pos, nbt.get(&"LootTable".into()).cloned()))
+                .collect();
+            assert_eq!(
+                pending,
+                [(
+                    [x * 16 + 3, 71, -11],
+                    Some(Tag::String("minecraft:chests/simple_dungeon".into()))
+                )]
+            );
+        }
+        let refused = open(true).worker().generate_proto(ChunkPos::new(1, -1));
+        assert!(
+            refused
+                .err()
+                .is_some_and(|error| error.to_string().contains("test:nowhere")),
+            "a biome the world does not have refuses the chunk"
         );
     }
 

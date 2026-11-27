@@ -2,14 +2,16 @@ import datetime as dt
 import io
 import os
 import subprocess
-import sys
-import textwrap
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
+from tests.git_fixture import git_in
 from tools import release_train as train
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 NOW = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -285,8 +287,7 @@ class ReleaseTrainTests(unittest.TestCase):
 
     def test_fork_channels_check_the_main_push_gate(self):
         with tempfile.TemporaryDirectory() as folder:
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=folder, text=True, stderr=subprocess.DEVNULL).strip()
+            git = git_in(folder)
             git("init", "-q", "-b", "main")
             git("config", "user.name", "Test")
             git("config", "user.email", "test@example.invalid")
@@ -333,8 +334,7 @@ class ReleaseTrainTests(unittest.TestCase):
 
     def test_a_nightly_ships_only_daily_green_unless_the_owner_granted_an_exception(self):
         with tempfile.TemporaryDirectory() as folder:
-            def git(*args):
-                return subprocess.check_output(["git", *args], cwd=folder, text=True, stderr=subprocess.DEVNULL).strip()
+            git = git_in(folder)
             git("init", "-q", "-b", "main")
             git("config", "user.name", "Test")
             git("config", "user.email", "test@example.invalid")
@@ -379,24 +379,24 @@ class ReleaseTrainTests(unittest.TestCase):
 
     def test_daily_green_is_read_from_origin_never_a_local_tag(self):
         with tempfile.TemporaryDirectory() as folder:
-            def git(cwd, *args):
-                return subprocess.check_output(["git", *args], cwd=cwd, text=True, stderr=subprocess.DEVNULL).strip()
             origin, clone = Path(folder, "origin"), Path(folder, "clone")
-            git(folder, "init", "-q", "-b", "main", str(origin))
+            setup_git = git_in(folder)
+            setup_git("init", "-q", "-b", "main", str(origin))
+            git = git_in(origin)
+            git("config", "user.name", "T")
+            git("config", "user.email", "t@example.invalid")
             for n in range(2):
-                git(origin, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty",
-                    "-m", str(n))
-            first, second = git(origin, "rev-parse", "HEAD~1"), git(origin, "rev-parse", "HEAD")
-            git(origin, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "tag", "-a", "-m", "green",
-                "daily-green", first)
-            git(folder, "clone", "-q", str(origin), str(clone))
+                git("commit", "-q", "--allow-empty", "-m", str(n))
+            first, second = git("rev-parse", "HEAD~1"), git("rev-parse", "HEAD")
+            git("tag", "-a", "-m", "green", "daily-green", first)
+            setup_git("clone", "-q", str(origin), str(clone))
             with mock.patch.object(train, "ROOT", clone):
                 self.assertEqual(train.daily_green_commit(), first, "an annotated tag's commit")
-                git(origin, "tag", "-d", "daily-green")
+                git("tag", "-d", "daily-green")
                 self.assertEqual(train.daily_green_commit(), "", "withdrawn on origin: none, whatever the clone holds")
-                git(origin, "tag", "daily-green", second)
+                git("tag", "daily-green", second)
                 self.assertEqual(train.daily_green_commit(), second)
-                git(clone, "remote", "set-url", "origin", str(Path(folder, "gone")))
+                git_in(clone)("remote", "set-url", "origin", str(Path(folder, "gone")))
                 with self.assertRaises(SystemExit, msg="a failed lookup never falls back to the local tag"):
                     train.daily_green_commit()
 
@@ -448,8 +448,6 @@ class ReleaseTrainTests(unittest.TestCase):
         # A dry run or a by-hand check only reads.
         self.assertEqual(gate([cancelled], [False], publishing=False), (False, []))
         # Only publishing runs (release.yml's decide, nightly-build.yml's pick) set GATE_RERUN, with the right to start the run again.
-        sys.path.insert(0, str(train.ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
-        import yaml
         decide = yaml.safe_load((train.ROOT / ".github/workflows/release.yml").read_text())["jobs"]["decide"]
         self.assertEqual(decide["permissions"]["actions"], "write")
         self.assertEqual(decide["steps"][-1]["env"]["GATE_RERUN"], "${{ steps.mode.outputs.publish == 'true' && '1' || '' }}")

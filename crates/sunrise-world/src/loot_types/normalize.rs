@@ -114,11 +114,6 @@ fn fields(value: &mut Value, tags: &Tags, types: &Types) {
     if let Some(condition) = value.get_mut("condition") {
         typed(condition, false, tags, types);
     }
-    if let Some(conditions) = value.get_mut("conditions").and_then(Value::as_array_mut) {
-        for condition in conditions {
-            typed(condition, false, tags, types);
-        }
-    }
     if let Some(modifier) = value.get_mut("modifier") {
         typed(modifier, true, tags, types);
     }
@@ -159,15 +154,11 @@ fn typed(value: &mut Value, function: bool, tags: &Tags, types: &Types) {
             }
         }
     }
-    if function && conditional {
-        if let Some(condition) = value.get_mut("condition").filter(|value| !value.is_null()) {
-            typed(condition, false, tags, types);
-        }
-        if let Some(conditions) = value.get_mut("conditions").and_then(Value::as_array_mut) {
-            for condition in conditions {
-                typed(condition, false, tags, types);
-            }
-        }
+    if function
+        && conditional
+        && let Some(condition) = value.get_mut("condition").filter(|value| !value.is_null())
+    {
+        typed(condition, false, tags, types);
     }
 }
 

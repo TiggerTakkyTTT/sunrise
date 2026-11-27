@@ -16,8 +16,9 @@ slot in the client layout does not change what the server allows.
 
 Any mod can move, activate, or hide a slot of the open screen for `menu` through
 [`ClientHost::set_screen_slot`](../../how-to/client/screens.md#moving-or-hiding-a-mod-screens-slots)
-while this opening is shown. That change affects only the client; the server can still
-quick-move items into a locally hidden slot, and the slot's acceptance rules still apply.
+while this opening is shown. It addresses the menu's container slots and, after them in menu order, its player
+slots. That change affects only the client and ends when the screen closes; the server never consults it, so
+it can still quick-move items into a locally hidden slot, and the slot's acceptance rules still apply.
 
 ## Mod-created recipe input sets
 
@@ -111,6 +112,10 @@ the slots of the ongoing click. Ask for an answer that includes Parts outside th
 If a part panics, its answers are discarded and that callback is disabled for the session.
 The log and error toast name the mod; other parts still answer the check.
 
+A stack that cannot cross to the API (an item with no API key, count 0, damage out of range) is never
+offered to the part: placing it into a slot of a menu type a part answers is refused, picking it up keeps
+the slot's own answer, and the game logs a warning.
+
 ## Slots that keep what they show
 
 On a mod menu type, `menu_slot_rules` also answers `Slot.mayPickup` in `event.may_pickup`. It arrives true and
@@ -148,6 +153,32 @@ gives up all of its stack or none of it. The slot's own rule comes first, and on
 `may_pickup` together. Vanilla menu types keep their slots' own `mayPickup`, and a shift-click a part answers
 with `menu_quick_move` is asked the pickup rule before that hook. Each live check during a click
 queries the rule directly against the current slots.
+
+### Keeping a slot out of pick-all
+
+`menu_pick_all` is vanilla's `AbstractContainerMenu.canTakeItemForPickAll(carried, slot)` for a mod menu type, on
+its `MenuPart`. A double click's gather asks it for each slot it would take from, on the server and in client
+prediction alike: `event.carried` is the cursor's stack being gathered into, `event.stack` the slot's, and `slot`
+and `container` name the slot as `menu_slot_rules` does. It is asked only once the game's own checks passed (the
+cursor can take the item and the slot's pickup rule allows it), so `event.allowed` arrives true. Set it false to
+leave that slot's stack where it is; the gather goes on to the next slot. A part's refusal stands: a later part
+cannot turn it back. Only registered mod menu types are asked; vanilla menu types keep their own answer. The
+pickup rule above still decides whether a slot gives anything at all, while `menu_pick_all` keeps a slot out of
+the gather alone, such as a locked slot the player may still click.
+
+```rust,ignore
+struct LockedSlots;
+#[mod_api::sunrise_part]
+impl mod_api::MenuPart for LockedSlots {
+    fn menu_pick_all(&self, _: &dyn mod_api::Host, event: &mut mod_api::MenuPickAllEvent<'_>) {
+        if event.container == mod_api::MenuContainer::Main && event.slot < 3 {
+            event.allowed = false;
+        }
+    }
+}
+// In Hooks::register:
+// registrar.menu_part("mymod:workbench", LockedSlots);
+```
 
 ## Taking from a slot
 
@@ -320,7 +351,10 @@ can set `event.valid = item.stack_matches` to close on a mismatch. With no suppl
 is `None`; in either case the game leaves the decision with the part.
 
 For a block menu, `event.pos` is the backing block and `valid` starts as the reach check: the player's
-eyes must be within their block interaction range plus 4 of each backing block. A large machine with a
+eyes must be within their block interaction range plus 4 of each backing block, as the
+`block_interaction_range` hook may answer per block. That hook also decides the reach of use, break and
+pick-block requests and of vanilla's menus, the sign editor and a lectern's book, for any player: a
+remote-access block answers it for the blocks around it. A large machine with a
 core block deep inside it can override that answer:
 
 ```rust,ignore
@@ -393,6 +427,9 @@ screen shows. `menu.click_button(host, button)` presses one of the open menu's b
 (`ContainerButtonClick`, as a loom's pattern list does), for input the screen's own
 buttons don't take; the server's menu decides what it does, and the inventory menu has none.
 
+`menu.destroy_carried(host)` clears a creative player's cursor on the creative inventory screen, as its
+destroy slot does; any other menu's cursor is the server's and is refused. See its rustdoc for the refusals.
+
 ## Writing slot storage
 
 `ItemPlace::MenuSlot { menu, slot }` is slot `slot` of a player's open menu, a `MenuRef` (`player.container_menu(host)`). NeoForge 26.3's `ItemAccess` reaches a player's inventory slot (`forPlayerSlot`) and cursor
@@ -431,7 +468,7 @@ let moved: Result<(), TransactionError<()>> = host.transaction(|host, tx| {
 });
 ```
 
-`MenuPart::menu_clicked` v4 runs directly on parts registered for the open mod menu's type before
+`MenuPart::menu_clicked` v5 runs directly on parts registered for the open mod menu's type before
 default click execution (`ServerGamePacketListenerImpl.handleContainerClick`,
 `AbstractContainerMenu.clicked`). The event names that type and gives the raw slot, button and
 click type. Menu-button clicks, recipe placement and creative set-slot do not reach it. There is
@@ -692,3 +729,5 @@ On the Creative screen, `menu.slot_boxes(host)` keeps the player's inventory men
 Creative's visible order: crafting `0..=4`, armor `5..=8`, main inventory `9..=35`, hotbar `36..=44`,
 and offhand `45`. A hidden index is `None`. The inventory tab hides crafting; item and Search
 tabs show only the hotbar. Creative catalog slots and the trash slot have no entries.
+
+Use `MenuRef::creative_catalog` to read the catalog cells shown on an item or Search tab.

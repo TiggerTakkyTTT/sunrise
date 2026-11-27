@@ -36,6 +36,12 @@ Shader packs and any route that cannot
 take GPU instances bake the same prepared geometry on the CPU instead of dropping the model; a
 `shaders/` pack shades those copies as block entities, as it shades `BlockEntityDrawContext::model`.
 
+`WorldDrawContext::with_pipeline_modifier` pushes a registered `PipelineModifierRef` for the
+duration of its callback (nesting outermost-wins, matching `PipelineModifierStack.apply`),
+applying to `lines`, `quads`, `pipeline_quads`, and `draw_model_instances` (not `name_tag`). Only the
+modifier's `depth` applies to the built-in `lines`, `quads` and `draw_model_instances`; the whole
+modifier applies to a registered pipeline drawn with `pipeline_quads`.
+
 `WorldDrawContext::name_tag(at, &text, NameTagOptions::new(see_through, background, light))` draws
 a label as vanilla draws a name tag (`submitNameTag`): 0.5 above `at`, facing the camera, 0.025
 blocks a font pixel, so it shrinks with distance (scale by distance yourself for a constant size),

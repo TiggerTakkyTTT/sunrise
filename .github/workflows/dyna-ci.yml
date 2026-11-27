@@ -524,7 +524,8 @@ jobs:
   verify:
     needs: changes
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' && (needs.changes.result != 'success' || needs.changes.outputs.heavy == 'true') }}
-    runs-on: ${{ needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.self_hosted == 'true' && 'dyna-large' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
+    # Stopgap for sunrise#5839 on the next line: verify alone on dyna-xlarge, back to dyna-large once the gate's peak line shows the sunrise-client lib-test compile at or under 12 GiB.
+    runs-on: ${{ needs.changes.outputs.rust_required == 'false' && (needs.changes.outputs.self_hosted == 'true' && needs.changes.outputs.trusted == 'true' && 'dyna-small' || 'ubuntu-latest') || needs.changes.outputs.self_hosted == 'true' && 'dyna-xlarge' || !inputs.github-fallback && needs.changes.outputs.forced_github != 'true' && vars.SELF_HOSTED_CI == 'all' && needs.changes.outputs.trusted == 'true' && fromJSON('["self-hosted", "linux", "playsunrise-ci"]') || needs.changes.outputs.hosted_label || 'ubuntu-latest' }}
     timeout-minutes: ${{ needs.changes.outputs.self_hosted == 'true' && 50 || 45 }}
     # GPU device tests belong in the daily on lavapipe, not in verify. Hide Vulkan and disallow GL so that
     # a stray plain GPU test fails on every runner rather than running or silently skipping.
@@ -671,6 +672,15 @@ jobs:
             echo "::error::The --keep-going build passed, but it builds a different graph and does not clear the failed test build: check the errors above, including any 'signal 9' (a compile killed, usually for memory), before rerunning."
           fi
           exit 1
+      # The runner's memory once the test build ends, compiled or killed: its peak against the cap, and what the
+      # cgroup holds (anon: processes; file: page cache; shmem: the tmpfs checkout and /tmp).
+      - name: Memory after the test build
+        if: ${{ !cancelled() && needs.changes.outputs.rust_required != 'false' && needs.changes.outputs.self_hosted == 'true' }}
+        continue-on-error: true
+        run: |
+          echo "memory.max $(cat /sys/fs/cgroup/memory.max) memory.peak $(cat /sys/fs/cgroup/memory.peak)" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep '^oom_kill ' /sys/fs/cgroup/memory.events | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -E '^(anon|file|shmem|file_dirty|file_writeback) ' /sys/fs/cgroup/memory.stat | tee -a "$GITHUB_STEP_SUMMARY"
       # What bounds the build: the slowest compile units, from the report --timings writes.
       - name: Slowest compile units
         if: ${{ !cancelled() && needs.changes.outputs.rust_required != 'false' }}
@@ -693,29 +703,7 @@ jobs:
       - name: Build the source stage generator (test profile)
         id: stage
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false' && (github.event_name == 'pull_request' || inputs.pr != '')) }}
-        run: |
-          started=$SECONDS
-          cargo build $JOBS --locked --profile test -p sunrise-stage --bin sunrise-stage --message-format=json-render-diagnostics > "$RUNNER_TEMP/stage-artifacts.jsonl"
-          echo "Stage generator build: $((SECONDS - started))s"
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          artifacts = [json.loads(line) for line in Path(os.environ["RUNNER_TEMP"], "stage-artifacts.jsonl").read_text().splitlines()]
-          executables = {item["executable"] for item in artifacts
-                         if item.get("reason") == "compiler-artifact"
-                         and item["target"]["name"] == "sunrise-stage"
-                         and "bin" in item["target"]["kind"]
-                         and not item["profile"]["test"] and item.get("executable")}
-          if len(executables) != 1:
-              raise SystemExit(f"expected one normal sunrise-stage executable, got {executables}")
-          executable = str(Path(executables.pop()).resolve(strict=True))
-          if "\r" in executable or "\n" in executable:
-              raise SystemExit("sunrise-stage executable path must not contain CR or LF")
-          with open(os.environ["GITHUB_ENV"], "a") as environment:
-              environment.write(f"SUNRISE_STAGE_TOOL={executable}\n")
-          PY
+        run: python3 tools/ci/surface_report.py --build-tool
       - name: Report the mod API surface change
         id: report_the_mod_api_surface_change
         # Each tree's own sunrise-stage exports its stable API; the head's tool reads both engine catalogs and
@@ -858,6 +846,18 @@ jobs:
       - name: Check generated extension tag catalog
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/ci/surface_extension_tags.py --check
+      # The launcher's copies of game crates move only when the pull request says which copy must follow.
+      - name: Launcher mirrors
+        id: launcher_mirrors
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            python3 tools/ci/check_launcher_mirrors.py --base "$BASE_SHA" --event "$GITHUB_EVENT_PATH"
+          else
+            python3 tools/ci/check_launcher_mirrors.py
+          fi
       - name: Check native hook wiring
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && needs.changes.outputs.rust_required != 'false' }}
         run: bash tools/ci/check_hook_wiring.sh
@@ -899,6 +899,10 @@ jobs:
         id: vocabulary_state_has_explicit_ownership
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/check_mod_vocabulary_state.py
+      - name: Gameplay crates follow layer rules
+        id: gameplay_crates_follow_layer_rules
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_gameplay_layers.py
       # One file per topic in tools/ci/ignored-tests/: well-formed rows, each test in one file, nothing else in the
       # folder, no file at the retired single-list path.
       - name: Ignored-test policy files read cleanly
@@ -936,6 +940,11 @@ jobs:
         id: process_starting_tests_are_daily_tests
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: python3 tools/ci/check_process_tests.py
+      # Its one rustc outgrew the 16 GiB parity runner (#4896): a harness runs a fixture from lab.parity_fixtures().
+      - name: Parity harnesses do not build the client lib test
+        id: parity_harnesses_do_not_build_the_client_lib_test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_parity_harness_builds.py
       # A test that reruns its own test executable by --exact must select it ignored or not, or a daily one checks nothing.
       - name: Test reruns select ignored tests too
         id: test_reruns_select_ignored_tests_too
@@ -947,6 +956,11 @@ jobs:
         id: nested_workspaces_lockfiles_are_current
         if: ${{ !cancelled() && steps.setup.outcome == 'success' && (needs.changes.outputs.rust_required != 'false') }}
         run: python3 tools/ci/check_nested_locks.py
+      # Frame hooks run with Game::renderer taken out (sunrise#5858): their files reach the GPU through Game::mod_gpu().
+      - name: Frame-hook files do not read the renderer
+        id: frame_hook_files_do_not_read_the_renderer
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: python3 tools/ci/check_mod_gpu_access.py
       # docs/layers.md: a crate depends only on its own layer or a lower one; today's exceptions only shrink.
       - name: Crates follow the layers
         id: crates_follow_the_layers

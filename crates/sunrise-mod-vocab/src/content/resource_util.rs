@@ -8,8 +8,8 @@ use crate::content::resource::{
     advance_transfer_index, checked_transfer, in_turn, insert_candidate, uniform_slots_end,
 };
 use crate::{
-    Capability, HostTransaction, Overanswered, ResourceHandler, ServerHost, TransactionContext,
-    TransactionError,
+    Capability, HostTransaction, Overanswered, ResourceHandler, ServerHost, StorageSlot,
+    TransactionContext, TransactionError,
 };
 use std::ops::Range;
 
@@ -119,6 +119,10 @@ impl<R> ResourceHandler<R> for CombinedResourceHandler<R> {
         self.locate(index)
             .is_some_and(|(handler, at)| handler.is_valid(host, at, resource))
     }
+    fn backing(&self, host: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+        let (handler, at) = self.locate(index)?;
+        handler.backing(host, at)
+    }
     fn insert_at(
         &self,
         host: &mut dyn ServerHost,
@@ -210,7 +214,9 @@ impl<R> ResourceHandler<R> for CombinedResourceHandler<R> {
 /// [`ResourceHandler`] on a struct holding the handler and forward to it:
 ///
 /// ```
-/// use mod_api::{Overanswered, ResourceHandler, ServerHost, TransactionContext, TransactionError};
+/// use mod_api::{
+///     Overanswered, ResourceHandler, ServerHost, StorageSlot, TransactionContext, TransactionError,
+/// };
 /// use std::ops::Range;
 ///
 /// struct Delegating<R>(Box<dyn ResourceHandler<R>>);
@@ -236,6 +242,9 @@ impl<R> ResourceHandler<R> for CombinedResourceHandler<R> {
 ///     }
 ///     fn is_valid(&self, host: &mut dyn ServerHost, index: usize, resource: &R) -> bool {
 ///         self.0.is_valid(host, index, resource)
+///     }
+///     fn backing(&self, host: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+///         self.0.backing(host, index)
 ///     }
 ///     fn insert_at(
 ///         &self,
@@ -349,6 +358,10 @@ impl<R> ResourceHandler<R> for RangedResourceHandler<R> {
     fn is_valid(&self, host: &mut dyn ServerHost, index: usize, resource: &R) -> bool {
         self.inner(index)
             .is_some_and(|at| self.handler.is_valid(host, at, resource))
+    }
+    fn backing(&self, host: &mut dyn ServerHost, index: usize) -> Option<StorageSlot> {
+        let at = self.inner(index)?;
+        self.handler.backing(host, at)
     }
     fn insert_at(
         &self,

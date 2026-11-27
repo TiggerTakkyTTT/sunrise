@@ -605,12 +605,6 @@ mod tests {
                 "{ workspace = true }",
                 Some("example: E_SDK_SOURCE: sunrise-mod-api: workspace does not name the SDK"),
             ),
-            (
-                "{ path = '../sunrise/crates/sunrise-mod-api' }",
-                Some(
-                    "example: E_SDK_SOURCE: sunrise-mod-api: the path must be \".sunrise/sdk/api/crates/sunrise-mod-api\"",
-                ),
-            ),
         ] {
             let text = format!(
                 "[package]\nname='example-mod'\nversion='1.0.0'\n[dependencies]\nsunrise-mod-api = {form}\n"
@@ -625,6 +619,14 @@ mod tests {
                 (result, _) => panic!("{form}: {:?}", result.err()),
             }
         }
+        // A path to the engine's own source leaves the package, so reading the package refuses it.
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname='example-mod'\nversion='1.0.0'\n[dependencies]\nsunrise-mod-api = { path = '../sunrise/crates/sunrise-mod-api' }\n",
+        )
+        .unwrap();
+        let error = super::super::bundle_in(&dir).err().unwrap();
+        assert!(error.contains("leaves the package"), "{error}");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -759,9 +761,11 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Project-local Cargo and toolchain files are left out of the staged copy, not refused.
+    /// A project's own Cargo configuration folder is left out of the staged copy, not refused,
+    /// while its other files, a toolchain file among them, are staged: the build runs the
+    /// pinned toolchain's own Cargo, which reads no toolchain file.
     #[test]
-    fn local_cargo_and_toolchain_files_stay_out_of_the_staged_mod() {
+    fn local_cargo_config_stays_out_of_the_staged_mod_and_other_project_files_go_in() {
         let dir = fixture();
         fs::create_dir_all(dir.join(".cargo")).unwrap();
         fs::write(
@@ -780,7 +784,7 @@ mod tests {
         super::super::copy_bundle(&bundle, staged.path()).unwrap();
         assert!(staged.path().join("src/lib.rs").is_file());
         assert!(!staged.path().join(".cargo").exists());
-        assert!(!staged.path().join("rust-toolchain.toml").exists());
+        assert!(staged.path().join("rust-toolchain.toml").is_file());
         fs::remove_dir_all(dir).unwrap();
     }
 

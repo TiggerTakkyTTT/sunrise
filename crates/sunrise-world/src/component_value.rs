@@ -1,6 +1,7 @@
 //! Immutable component codec values shared by item templates and protocol codecs.
 use sunrise_core::nbt::{Compound, JavaString, Tag, discard_tag, with_tree_stack};
 pub mod consume_effects;
+pub mod json;
 pub mod source;
 pub mod types;
 pub use source::from_component_tag;

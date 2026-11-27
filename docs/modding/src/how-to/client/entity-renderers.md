@@ -40,6 +40,10 @@ impl EntityRenderer for Bolt {
 | `partial` | The frame's partial tick, 0 to 1. |
 | `age` | Ticks lived plus the partial tick (`ageInTicks`). |
 | `yaw`, `pitch` | The way it faces, in degrees, interpolated to the frame, except for primed TNT and experience orbs, which supply their current rotation (0 is south, positive pitch looks down). |
+| `position` | The world-space position interpolated to the frame (`EntityRenderState.x/y/z`). |
+| `size` | The bounding box's width and height, in blocks. |
+| `eye_height` | The eye height above `position[1]`, in blocks. |
+| `distance_to_camera_sq` | The squared distance from `position` to the active view's camera. |
 | `living` | A living entity's own frame (`LivingRenderState`, below); none for any other entity. |
 | `tnt_fuse` | Primed TNT's remaining fuse, in ticks, as vanilla draws it (`fuse - partial + 1`); none for any other entity. |
 | `orb_value` | An experience orb's value (`ExperienceOrb.DATA_VALUE`); none for any other entity. |

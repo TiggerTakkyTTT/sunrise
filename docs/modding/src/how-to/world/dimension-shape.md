@@ -190,6 +190,12 @@ Before any of that, `sleep_skip_night` is asked once each tick that enough playe
 `players_sleeping_percentage` rule and how many players sleep and count. Canceling it keeps the night for that tick:
 the clock does not move, nobody is woken and the rain goes on, and `sleep_finished_time` is not asked.
 
+How many is enough is `sleepers_needed`'s: it arrives with vanilla's count (the rule's share of the players that
+count, rounded up, at least 1) and a listener may set its own for the level and tick. The night-skip check and the
+"n/m players sleeping" line both use the answer; below 1 counts as 1.
+
+`sleep_status_announce` is asked when the game is about to show everyone the action-bar line "n/m players sleeping" or "Sleeping through this night". It sees the counts and the needed number, may replace `line`, and canceling it sends nobody the line; who sleeps and when the night skips do not change.
+
 ## Which level a hook is in
 
 The block-behaviour hooks (`neighbor_changed`, `random_tick`, `crop_grow`, `block_changed` and the rest) name their
@@ -428,6 +434,18 @@ the level's `min_y` and `height`, and borrowed immutable `metadata()`. Resolve `
 `state_with` to construct API-owned `BlockState`s before the terrain-writing loop, never once per
 placed block. `set_block` skips a position outside the chunk or build height and answers whether
 it wrote. The chunk starts as air; invalid state ordinals are refused rather than written.
+
+`set_block_entity_nbt(nbt)` is vanilla's `ChunkAccess.setBlockEntityNbt`: a block entity's data
+from generation on, such as a chest's `LootTable` and `LootTableSeed`, at the block the tag's `x`,
+`y` and `z` name. It waits as the chunk's pending data and becomes the block's block entity before
+the chunk first loads, as a structure's chest does; data with no `id`, or for a block that has no
+block entity by then, is dropped.
+
+`create_biomes(chunk)` is vanilla's `ChunkGenerator.createBiomes`, run at the biome step before the
+terrain: `chunk.fill_biomes_from_noise(&mut |[qx, qy, qz]| ...)` gives each 4×4×4 cell the
+`BiomeKey` its quart position resolves to, as `ChunkAccess.fillBiomesFromNoise` does. The chunk
+keeps those biomes; structure placement and carvers still ask the level stem's biome source, as in
+vanilla. A generator that does not answer keeps the source's biomes.
 
 By default the generator gives terrain only: the level has no surface, carvers, structures or
 features, and its biomes come from the level stem's biome source. It does not need

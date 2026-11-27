@@ -21,9 +21,6 @@ impl Renderer {
             self.block_entity_section_revisions
                 .insert(key, next_block_entity_revision());
         }
-        if self.light_blocks.update(key, mesh.lights) {
-            self.light_revision += 1;
-        }
         if !self.lod_retiring.is_empty() {
             self.lod_retiring.remove(&key);
         }

@@ -11,6 +11,10 @@ pub struct HudVertex {
     /// The `GLINT_TEXTURING` UV into the repeating glint texture, unused
     /// unless `uv.x >= 2`.
     pub glint_uv: [f32; 2],
+    /// Optional explicit packed lightmap coordinates and alpha-cutoff flags for special item
+    /// submissions (`0` for normal HUD draws): bit 24 enables frame lightmap sampling (bits
+    /// `0..8` = block byte, bits `8..16` = sky byte), bit 25 selects `0.1` item alpha cutoff.
+    pub light: u32,
     /// 1 for the GUI's text (`RenderPipelines.GUI_TEXT`), which a resource
     /// pack's text shader draws when it has one.
     pub text: u32,
@@ -98,9 +102,9 @@ pub struct HudBatch {
     viewport: [u32; 2],
     /// Glyph pixels to upload into the atlas before drawing.
     pub patches: Vec<crate::font::Patch>,
-    /// Client mods' dynamic textures to upload into their atlas slots before drawing, sharing
-    /// the pixels the game keeps of them.
-    pub image_patches: Vec<dynamic_textures::ImagePatch>,
+    /// The changes to client mods' dynamic textures, applied in order before drawing. Never
+    /// rolled back: a change a refused draw would have followed was still made.
+    pub dynamic_commands: Vec<dynamic_textures::Command>,
     /// Vertex ranges with another blend or depth/scissor state, in order.
     pub blends: Vec<(Range<u32>, Blend)>,
     /// Disjoint, ordered vertex ranges with a screen-space scissor in GUI pixels.
@@ -123,7 +127,6 @@ struct HudTail {
     vertices: usize,
     pictures: usize,
     patches: usize,
-    image_patches: usize,
     inline_profiles: usize,
     blends: usize,
     last_blend: Option<(std::ops::Range<u32>, Blend)>,
@@ -143,7 +146,6 @@ impl Drop for HudDrawRollback<'_> {
         self.batch.truncate_vertices(tail.vertices);
         self.batch.pictures.truncate(tail.pictures);
         self.batch.patches.truncate(tail.patches);
-        self.batch.image_patches.truncate(tail.image_patches);
         self.batch.inline_profiles.truncate(tail.inline_profiles);
         self.batch.blends.truncate(tail.blends);
         // `blend_since` can extend the preceding run instead of appending a new one.
@@ -189,6 +191,8 @@ impl HudPaintCheckpoint {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blend {
     Picture(u64),
+    /// A run sampling the dynamic texture with this handle (`dynamic_textures::Command`).
+    Dynamic(u64),
     /// A run sampling a separately stitched registered atlas page.
     AtlasPage(usize, AtlasBlend),
     /// `BlendFunction.TRANSLUCENT`.
@@ -263,7 +267,7 @@ impl HudBatch {
             height: gui.size[1] as f32,
             viewport: window,
             patches: Vec::new(),
-            image_patches: Vec::new(),
+            dynamic_commands: Vec::new(),
             blends: Vec::new(),
             scissors: SmallVec::new(),
             end_portal: EndPortalFill::default(),
@@ -305,7 +309,6 @@ impl HudBatch {
             vertices: self.vertices.len(),
             pictures: self.pictures.len(),
             patches: self.patches.len(),
-            image_patches: self.image_patches.len(),
             inline_profiles: self.inline_profiles.len(),
             blends: self.blends.len(),
             last_blend: self.blends.last().cloned(),
@@ -418,6 +421,10 @@ impl HudBatch {
         )
     }
     pub fn quad(&mut self, p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: u32) {
+        self.quad_lit(p, uv, color, 0);
+    }
+    /// [`Self::quad`] carrying an explicit [`HudVertex::light`] word for lightmapped GUI items.
+    pub fn quad_lit(&mut self, p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: u32, light: u32) {
         for i in [0, 1, 2, 0, 2, 3] {
             self.vertices.push(HudVertex {
                 pos: p[i],
@@ -425,6 +432,7 @@ impl HudBatch {
                 color,
                 depth: 0.0,
                 glint_uv: [0.0, 0.0],
+                light,
                 text: 0,
             });
         }
@@ -445,11 +453,16 @@ impl HudBatch {
                 color,
                 depth: 0.0,
                 glint_uv: glint_uv[i],
+                light: 0,
                 text: 0,
             });
         }
     }
     pub fn quad_3d(&mut self, p: [[f32; 3]; 4], uv: [[f32; 2]; 4], color: u32) {
+        self.quad_3d_lit(p, uv, color, 0);
+    }
+    /// [`Self::quad_3d`] carrying an explicit [`HudVertex::light`] word for lightmapped GUI items.
+    pub fn quad_3d_lit(&mut self, p: [[f32; 3]; 4], uv: [[f32; 2]; 4], color: u32, light: u32) {
         for i in [0, 1, 2, 0, 2, 3] {
             self.vertices.push(HudVertex {
                 pos: [p[i][0], p[i][1]],
@@ -457,6 +470,7 @@ impl HudBatch {
                 color,
                 depth: p[i][2],
                 glint_uv: [0.0, 0.0],
+                light,
                 text: 0,
             });
         }
@@ -481,6 +495,7 @@ impl HudBatch {
                 color: u32::MAX,
                 depth: p[i][2],
                 glint_uv: glint_uv[i],
+                light: 0,
                 text: 0,
             });
         }
@@ -788,6 +803,7 @@ impl HudBatch {
                 color: c[i],
                 depth: 0.0,
                 glint_uv: [0.0, 0.0],
+                light: 0,
                 text: 0,
             });
         }
@@ -843,6 +859,17 @@ impl HudBatch {
                         tint,
                     );
                 }
+            }
+            InlineObject::Dynamic { handle, size, .. } => {
+                let side = crate::font::INLINE_OBJECT_SIZE;
+                self.dynamic_texture(
+                    *handle,
+                    *size,
+                    [x, y, side, side],
+                    [0.0, 0.0],
+                    [[1, 1], [1, 1]],
+                    tint,
+                );
             }
             InlineObject::Atlas { .. } => {
                 if let Some(rect) = atlas.inline_object_sprite(object) {

@@ -345,7 +345,7 @@ mod vertex_tests {
         // Another face replaces the first.
         assert_eq!(super::fluid_face(super::fluid_face(lit, 5), 1), 0x9D56_3412);
     }
-    /// What `gfx/native_material.rs` reads back from the colour's alpha byte: the face of a
+    /// What the colour's alpha byte holds: the face of a
     /// fluid quad, and the HDR tier.
     fn decoded(color: u32) -> (Option<u32>, u32) {
         let flags = color >> 24;
@@ -468,8 +468,7 @@ pub struct SectionMesh {
     /// each frame by `block_entity_render` like vanilla's per-section
     /// `SectionCompiler.Results.blockEntities`.
     pub block_entities: Vec<([i32; 3], u32)>,
-    /// Blocks that give off light (world position, state id), for the colour of block light
-    /// Sunrise's shader packs read (`gfx::block_light`).
+    /// Blocks that give off light (world position, state id).
     pub lights: Vec<([i32; 3], u32)>,
     /// Sprite layers emitted while building this mesh. Kept distinct before
     /// upload so the renderer does not rescan every terrain vertex.
@@ -819,6 +818,7 @@ pub struct MeshFacts {
     pub overlay: bool,
     pub tint_sources: u8,
 }
+#[derive(Clone)]
 pub struct MeshTables {
     info: Vec<Info>,
     /// `Info::solid` by state, packed apart: the opacity mask of a section
@@ -971,6 +971,14 @@ fn world_tint(tint: Tint, tints: &mut Tints, [x, y, z]: [i32; 3]) -> Option<u32>
     })
 }
 impl MeshTables {
+    /// Returns a copy of these mesh tables with a rebuilt [`FaceVisibility`] (for example
+    /// after synced block tags update tag-based face rules).
+    pub fn with_visibility(&self, visibility: FaceVisibility) -> Self {
+        let mut tables = self.clone();
+        tables.visibility = visibility;
+        tables
+    }
+
     pub fn new(
         assets: &Assets,
         render: &RenderAssets,
@@ -1790,9 +1798,7 @@ pub fn emitting(color: u32, tier: u8) -> u32 {
 }
 /// The high nibble of `TerrainVertex::color`'s alpha byte: 8 plus the face (`Direction`
 /// as usize) on a fluid quad, 0xF on every other. `terrain.wgsl` reads only the low nibble
-/// (the emission), so only the material stage of Sunrise's own packs reads it
-/// (`gfx/native_material.rs`); whether the fluid is water or lava follows from the pass
-/// that draws it.
+/// (the emission); whether the fluid is water or lava follows from the pass that draws it.
 pub const FLUID_FACE_BITS: u32 = 0xF000_0000;
 /// `color` marked as a fluid quad of face `face` (`Direction` as usize, 0 to 5).
 pub fn fluid_face(color: u32, face: usize) -> u32 {
@@ -3310,10 +3316,7 @@ fn bilinear(c: &[(TerrainVertex, [f32; 2]); 4], s: f32, t: f32) -> (TerrainVerte
     (TerrainVertex::new(pos, uv, 0, color, light), uv)
 }
 /// Snapshot of the 3x3 chunk neighbourhood used by a worker job.
-pub type Region = [[Option<Arc<Chunk>>; 3]; 3];
-pub fn borrow(region: &Region) -> [[Option<&Chunk>; 3]; 3] {
-    std::array::from_fn(|z| std::array::from_fn(|x| region[z][x].as_deref()))
-}
+pub use crate::chunk::{Region, borrow};
 #[cfg(test)]
 mod quarter_tests {
     use super::*;

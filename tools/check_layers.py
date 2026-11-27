@@ -10,7 +10,8 @@ optional (behind a feature), for the layer and the portable check alike. The che
 - a normal, build or optional dependency on a layer its crate's layer may not use that `allowed` doesn't list,
   and that isn't an optional dependency listed in `optional`;
 - an `optional` entry whose dependency is no longer optional;
-- with --base, an `allowed` or `optional` entry the branch added from a crate that already had a layer on the base;
+- with --base, an `allowed` or `optional` entry the branch added from a crate that already had a layer on the base,
+  except for an approved transfer of an existing exception;
 - a shipped crate depending on a tool;
 - a portable crate depending on a crate of the repository that isn't portable, or on a `forbidden` library;
 - a `portable.pending` crate doing the same beyond the crates its entry lists, listed as portable too, or (with
@@ -30,6 +31,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 CONFIG = ROOT / "tools" / "layers.json"
 CONFIG_PATH = "tools/layers.json"
 TOOL = "tool"
@@ -37,6 +40,15 @@ DOC = "docs/layers.md"
 # The section of docs/layers.md that says what a layer may depend on.
 SECTION = {"engine": "#engine", "platform": "#platform", "sunrise": "#sunrise", TOOL: "#tools"}
 WHERE = "#where-a-new-feature-goes"
+CLIENT_GAMEPLAY_TRANSFERS = {
+    "sunrise-dualsense": ("allowed", True),
+    "sunrise-friends": ("allowed", True),
+    "sunrise-shaders": ("allowed", False),
+    "sunrise-telemetry": ("allowed", False),
+    "sunrise-optifine": ("optional", True),
+    "sunrise-theme": ("optional", True),
+}
+PORTABLE_GAMEPLAY = {"sunrise-gameplay-common", "sunrise-gameplay"}
 
 
 def load_config(path=CONFIG):
@@ -50,10 +62,7 @@ def base_config(base):
     merge_base = subprocess.run(["git", "merge-base", base, "HEAD"], capture_output=True, text=True, cwd=ROOT)
     if merge_base.returncode != 0:
         return None
-    if __package__:
-        from . import merge_base as shared
-    else:
-        import merge_base as shared
+    from tools import merge_base as shared
     # A baseline that is there but can't be read stops the check (merge_base.text_at).
     text = shared.text_at(merge_base.stdout.strip(), CONFIG_PATH, ROOT)
     return json.loads(text) if text is not None else None
@@ -137,6 +146,23 @@ def side_problems(config, graph):
     return problems
 
 
+def transferred_exception(edge, key, graph, optional, config, base):
+    crate, dependency = edge.split(" -> ")
+    approved = CLIENT_GAMEPLAY_TRANSFERS.get(dependency)
+    if crate != "sunrise-client-gameplay" or approved != (key, edge in optional):
+        return False
+    if dependency not in graph.get(crate, ()):
+        return False
+    previous = f"sunrise-client -> {dependency}"
+    baseline = base.get("allowed", ())
+    if previous not in baseline and (key != "optional" or previous not in optional_rows(base)):
+        return False
+    if dependency == "sunrise-telemetry":
+        return True
+    current = set(config.get("allowed", ())) | optional_rows(config)
+    return previous not in current and dependency not in graph.get("sunrise-client", ())
+
+
 def check(config, graph, base=None, optional=frozenset()):
     """(problems, notes): problems fail the check, notes are only printed. `optional` is optional_edges()."""
     may = config["may_depend"]
@@ -181,7 +207,8 @@ def check(config, graph, base=None, optional=frozenset()):
                 crate, dep = edge.split(" -> ")
                 # A crate new since the base (split out of another, or renamed) may carry its old crate's
                 # exceptions; a new dependency target excuses nothing.
-                if crate in base_layers:
+                transferred = transferred_exception(edge, key, graph, optional, config, base)
+                if not transferred and crate in base_layers:
                     problems.append(f"{edge}: added to '{key}' in {CONFIG_PATH}. The exceptions only shrink; "
                                     f"see {DOC}{SECTION.get(layers.get(crate), '')}")
     notes = [f"{edge}: no longer a dependency; you can remove it from 'allowed' in {CONFIG_PATH}"
@@ -215,6 +242,9 @@ def portable(config, packages, base=None):
             if dep.get("kind") == "dev":
                 continue
             edge = f"{package['name']} -> {dep['name']}"
+            if (package["name"] in PORTABLE_GAMEPLAY and dep["name"] == "sunrise-mod-api-gen"
+                    and dep.get("kind") != "build"):
+                problems.add(f"{edge}: portable gameplay may use the generator only as a build dependency")
             if dep.get("optional") and edge in optional_baselines:
                 continue
             if dep.get("path") and dep["name"] not in crates | pending.get(package["name"], set()):
@@ -234,10 +264,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", help="refuse 'allowed' entries added since this git ref")
     parser.add_argument("--list", action="store_true", help="print each crate's layer and the exceptions")
-    if __package__:
-        from . import merge_base
-    else:
-        import merge_base
+    from tools import merge_base
     parser.add_argument("--pull-request-merge", action="store_true", help=merge_base.PULL_REQUEST_MERGE_HELP)
     args = parser.parse_args(argv)
     if args.base:

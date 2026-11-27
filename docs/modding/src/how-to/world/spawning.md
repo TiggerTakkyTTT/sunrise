@@ -295,6 +295,8 @@ Both configured ordinary spawners and chunk-generation packs lend the real candi
 loads its configured entity data before the position check. Trial spawners post placement checks, but run
 obstruction checks directly without posting a position check.
 
+To keep a monster spawner running with no player near, or idle with one beside it, answer [`spawner_active`](https://github.com/sunrise-org/sunrise/blob/main/crates/sunrise-mod-vocab/src/hooks/spawner_active.rs).
+
 ## Stopping a spawn or leaving a mob plain
 
 `finalize_spawn` has two cancels. Returning `Flow::Cancel` skips finalization: the mob spawns, but with no equipment, attributes or class setup. Setting `event.spawn_cancelled = true` vetoes admission but still runs initialization and its draws. Set both to skip initialization and veto admission. `event.spawner` carries the shared
@@ -497,7 +499,9 @@ the declared box as soon as the row spawns on the client. The ordinary use and
 attack packets name that row, and the existing `entity_interact` and
 `attack_entity` hooks receive its id and declared kind. Without a listener's
 response, use on the row passes and the row declines damage. This does not make
-the box solid or give it a middle-click item. The next argument declares how the
+the box solid or give it a middle-click item. The next argument, `fire_immune`,
+is vanilla's `EntityType.fireImmune()`: with `true`, the row never reads as
+burning and its fire ticks are put out each tick. The argument after it declares how the
 row reacts to pistons: pass `None` for `PushReaction::PushPull`, or
 `Some(PushReaction::IgnoreEntity)` to leave the row in place. The declared
 reaction is readable on either side.

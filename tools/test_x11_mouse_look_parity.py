@@ -20,18 +20,9 @@ from pathlib import Path
 import subprocess
 import sys
 
-try:
-    from . import client_packet_diff as diff
-    from . import client_packet_routes as routes
-    from . import input_recording
-    from . import lab
-    from . import packet_parity_runs
-except ImportError:
-    import client_packet_diff as diff
-    import client_packet_routes as routes
-    import input_recording
-    import lab
-    import packet_parity_runs
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import client_packet_diff as diff, client_packet_routes as routes, input_recording, lab, packet_parity_runs
 
 WITNESS_ENV = "SUNRISE_X11_MOUSE_LOOK_WITNESS"
 WITNESS_DIR_NAME = "x11_mouse_look"
@@ -85,10 +76,7 @@ def ensure_recording(recording_path=None):
 
 def _load_packet_parity():
     # Imported lazily so importing this module in unit tests never mutates sys.path.
-    try:
-        from . import client_packet_parity
-    except ImportError:
-        import client_packet_parity
+    from tools import client_packet_parity
     return client_packet_parity
 
 

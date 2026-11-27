@@ -158,10 +158,12 @@ neighbour updates run as vanilla's do. It runs before the block's own `onPlace` 
 
 `BlockPart::rotate` answers how a structure template turns your block as it places it: world
 generation's structures, `/place template`, the structure block, jigsaw blocks and the host's
-template snapshots. `event.state` is already mirrored, `event.pos` is where it goes and
-`event.rotation` the template's turn. `event.rotated` starts at the game's own turned state; set
+template snapshots. `event.state` is already mirrored (see [Mirroring](#mirroring)), `event.pos`
+is where it goes and `event.rotation` the template's turn. `event.rotated` starts at the game's own turned state; set
 it to another state of the same block, for example
-`context.state_with_property(event.state, "facing", "north")`.
+`context.state_with_property(event.state, "facing", "north")`. Read the value to turn with
+`context.state_property(event.state, "facing")` (vanilla's `state.getValue(FACING)`), an owned
+`String`, or `None` for a key the state does not have.
 
 Jigsaw connector discovery is different from block placement: matching and expansion read
 the connector's plain rotated state, without calling `BlockPart::rotate`, as
@@ -174,8 +176,22 @@ template block writes still call the rotation Part at their placed world positio
 | --- | --- |
 | Context | A worldgen Part method: a `WorldgenHost` on the worldgen workers or the server thread, no `Host`, no writes. Keep it a pure function of the event. |
 | Refusals | A state of another block, or one the game does not have, is refused with a warning; the game's state is placed. |
-| Mirroring | Stays the game's: vanilla's table, or the template's for a mod block. |
+| Mirroring | `BlockPart::mirror`, asked before this one: see [Mirroring](#mirroring). |
 | Panics | A panicking part is contained with a warning, and the game's state is placed. |
+
+## Mirroring
+
+`BlockPart::mirror` answers how a structure template mirrors your block as it places it, as a block
+overriding vanilla's `BlockBehaviour.mirror(BlockState, Mirror)` does: world generation's structures,
+`/place template`, the structure block and the host's template snapshots. `event.state` is the
+template's state, `event.pos` is where it goes and `event.mirror` the template's mirror
+(`LeftRight` flips north and south, `FrontBack` east and west). `event.mirrored` starts at the
+game's own mirrored state; set it to another state of the same block, for example
+`context.state_with_property(event.state, "facing", "south")`. `BlockPart::rotate` then turns the
+state you answer. A template asks it for every block, `StructureMirror::None` included, as
+`StructureTemplate.placeInWorld` calls `mirror(NONE)`; the legacy structure pieces ask it only when
+they mirror. Jigsaw connectors are never mirrored. Context, refusals and panics follow the
+[rotation](#rotation) rules.
 
 ## Step effects
 
@@ -307,7 +323,7 @@ notice, even during a quick move. Another block notifies normally.
 Entity/menu placeholder coordinates are not block notices. Explicit notices may read tentative items:
 
 ```rust,ignore
-{{#include ../../../../../crates/sunrise-client/src/game/blocks/machines/contents_changed_tests.rs:contents_changed_listener}}
+{{#include ../../../../../crates/sunrise-client/src/cut_layout/game/blocks/machines/contents_changed_tests.rs:contents_changed_listener}}
 ```
 
 ## Crop fertility and farmland hydration
@@ -337,6 +353,28 @@ the block. Rain and dry-out are held, not trampling.
 Bookshelf slot-occupancy flags and the last-interacted slot are transactional storage bookkeeping,
 not notification effects. Aborting restores them with the items. Changed observers, comparator
 ticks and data-send requests already issued still survive that abort.
+
+## Climbing and scaffolding
+
+`BlockPart::is_ladder` is asked for the block a living entity stands in, and `BlockPart::is_scaffolding` for the block a
+player on a climbable stands in. Both fire on both sides, are `listen`, and must be pure functions of the event: set the
+field to decide, and a block with no part keeps vanilla's answer.
+
+| Part | Starts as | Effect of the answer |
+|---|---|---|
+| `is_ladder` | The block is in `#minecraft:climbable` | `true` climbs like a ladder, `false` refuses a tagged block |
+| `is_scaffolding` | The state is `minecraft:scaffolding` | While sneaking, `true` lets the player keep sliding down the climbable, `false` stops the slide |
+
+`is_scaffolding` is asked for players only; mobs never ask it. The player's id, the block its position is in and that
+block's state are passed.
+
+## Map colour
+
+`BlockPart::map_color` sets the map colour a block shows at a position, as NeoForge's `IBlockExtension.getMapColor`
+does. It is `collect`, server only, and read-only: set `color` to a `MapColor` id from 0 to 61, starting from the state's
+own colour. Map updates ask it for the dirt and stone noise under a ceiling, for every step of the scan down from the
+surface (0 keeps the scan going) and for the colour a scanned block, or its fluid's block, finally draws as. An answer
+above 61 is refused: the block keeps its own colour, and the refusal is logged once per block.
 
 ## Fluid faces beside a block
 

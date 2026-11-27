@@ -129,6 +129,10 @@ impl dyn Registrar + '_ {
     /// Attach gameplay behavior to `menu`: a mod's, or one of vanilla's that
     /// a mod block opens. Button validation and actions go to the package that registered the
     /// open custom type or the verified stock opener, not to its presentation providers.
+    /// `minecraft:inventory` names the player's own `InventoryMenu`, which every player always
+    /// has open and vanilla gives no `MenuType`: it has no owner, so every mod's Part on it is
+    /// asked, in mod order, by `menu_slot_rules`, `menu_clicked` and `recipe_book_place`, and
+    /// a refusal from any of them stands. The creative picker takes no Parts.
     /// Register the client screen separately with
     /// [`MenusRegistrar::register_menu_screen`].
     pub fn menu_part<P: MenuPart>(&mut self, menu: &str, part: P) {

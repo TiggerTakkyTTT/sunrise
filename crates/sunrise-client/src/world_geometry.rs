@@ -1,5 +1,9 @@
 //! Per-view custom geometry; buffers pre-reserve initial space and grow dynamically.
-use crate::gfx::mod_pipelines::{self, PipelineRun, PipelineVertex};
+use crate::gfx::mod_meshes::ResolvedMeshDraw;
+use crate::gfx::mod_pipelines::{
+    self, IndirectSource, PipelineDraw, PipelineDrawSource, PipelineRun, PipelineVertex,
+    ResolvedDrawBindings, ResolvedSet1Entry,
+};
 use crate::gfx::world_primitives::{
     Batch, DEFAULT_CAPACITY as CAPACITY, DrawRanges, OIT_STAGES, OitBatch,
     STAGE_AFTER_OPAQUE_BLOCKS, STAGE_AFTER_OPAQUE_FEATURES, STAGE_AFTER_TRANSLUCENT_BLOCKS,
@@ -29,6 +33,8 @@ pub struct ModelCopy {
     /// `ModelInstance::color` and `hidden_faces`, as given.
     pub color: u32,
     pub hidden_faces: u8,
+    /// Whether an active pipeline modifier set `WorldDepth::ThroughWalls` on this copy.
+    pub through_walls: bool,
 }
 
 /// The model a batch draws. Resolved once, then applied to every copy.
@@ -57,6 +63,11 @@ struct StageBuffers {
     lines_through: Vec<[f32; 8]>,
     pipeline_vertices: Vec<PipelineVertex>,
     pipeline_runs: Vec<PipelineRun>,
+    pipeline_draws: Vec<PipelineDraw>,
+    transient_vertices: Vec<u8>,
+    transient_indices: Vec<u8>,
+    inline_uniforms: Vec<u8>,
+    texel_data: Vec<u8>,
 }
 impl StageBuffers {
     fn clear(&mut self) {
@@ -66,6 +77,11 @@ impl StageBuffers {
         self.lines_through.clear();
         self.pipeline_vertices.clear();
         self.pipeline_runs.clear();
+        self.pipeline_draws.clear();
+        self.transient_vertices.clear();
+        self.transient_indices.clear();
+        self.inline_uniforms.clear();
+        self.texel_data.clear();
     }
 }
 
@@ -77,6 +93,14 @@ enum ActiveTarget {
     Custom,
     /// Order-independent transparency sub-pass buffers (`OitStage` `0..=2`).
     Oit,
+}
+
+/// Borrowed frame-graph setup surface passed into `native_frame_graph_setup`.
+#[derive(Default)]
+pub struct FrameGraphSurface {
+    pub graph: crate::gfx::mod_frame_graph::RecordedFrameGraph,
+    pub oit_on: bool,
+    pub camera: [f64; 3],
 }
 
 /// Borrowed stage surface passed into `native_render_level_stage`.
@@ -108,6 +132,7 @@ pub struct WorldGeometry {
     view_id: Option<u64>,
     prepared: Vec<(RenderLevelStage, DrawRanges)>,
     stage_draws: Vec<DrawRanges>,
+    frame_graph: FrameGraphSurface,
     camera: [f64; 3],
     view: Mat4,
     white: [f32; 2],
@@ -117,6 +142,24 @@ pub struct WorldGeometry {
     /// a stage.
     pipeline_quads: Vec<PipelineVertex>,
     pipeline_runs: Vec<PipelineRun>,
+    /// Unified mod-pipeline draw commands (`draw_mesh`, `draw_vertices`, `pipeline_quads`).
+    pipeline_draws: Vec<PipelineDraw>,
+    transient_vertices: Vec<u8>,
+    transient_indices: Vec<u8>,
+    inline_uniforms: Vec<u8>,
+    texel_data: Vec<u8>,
+    /// OIT mod-pipeline quads and runs (`RenderLevelStage::OitTranslucent`).
+    oit_pipeline_quads: Vec<PipelineVertex>,
+    oit_pipeline_runs: Vec<PipelineRun>,
+    oit_pipeline_draws: Vec<PipelineDraw>,
+    oit_transient_vertices: Vec<u8>,
+    oit_transient_indices: Vec<u8>,
+    oit_inline_uniforms: Vec<u8>,
+    oit_texel_data: Vec<u8>,
+    /// Currently pushed pipeline modifier slots (outermost first, innermost last).
+    modifier_stack: Vec<u32>,
+    /// Interned modifier stacks referenced by `PipelineRun::modifier_stack`.
+    modifier_stacks: crate::mod_pipelines::ModifierStacks,
     /// Per-frame shader-pack uniform values submitted via `WorldDrawContext::set_pack_uniform`.
     pack_uniforms: Vec<(&'static str, mod_api::PackUniformValue)>,
     /// Geometry submitted in `submit_custom_geometry` and debug renderers before pass stages run.
@@ -159,6 +202,7 @@ impl Default for WorldGeometry {
             view_id: None,
             prepared: Vec::new(),
             stage_draws: Vec::new(),
+            frame_graph: FrameGraphSurface::default(),
             camera: [0.0; 3],
             view: Mat4::IDENTITY,
             white: [0.0; 2],
@@ -166,6 +210,20 @@ impl Default for WorldGeometry {
             quads: std::array::from_fn(|_| Vec::with_capacity(CAPACITY as usize * 4)),
             pipeline_quads: Vec::with_capacity(CAPACITY as usize * 4),
             pipeline_runs: Vec::with_capacity(CAPACITY as usize),
+            pipeline_draws: Vec::new(),
+            transient_vertices: Vec::new(),
+            transient_indices: Vec::new(),
+            inline_uniforms: Vec::new(),
+            texel_data: Vec::new(),
+            oit_pipeline_quads: Vec::new(),
+            oit_pipeline_runs: Vec::new(),
+            oit_pipeline_draws: Vec::new(),
+            oit_transient_vertices: Vec::new(),
+            oit_transient_indices: Vec::new(),
+            oit_inline_uniforms: Vec::new(),
+            oit_texel_data: Vec::new(),
+            modifier_stack: Vec::new(),
+            modifier_stacks: crate::mod_pipelines::ModifierStacks::new(),
             pack_uniforms: Vec::new(),
             custom: StageBuffers::default(),
             oit_quads: Vec::new(),
@@ -194,6 +252,8 @@ impl WorldGeometry {
         self.view_id = None;
         self.prepared.clear();
         self.stage_draws.clear();
+        self.frame_graph.graph.clear();
+        self.frame_graph.oit_on = false;
         self.camera = camera;
         self.view = view;
         self.white = white;
@@ -201,6 +261,20 @@ impl WorldGeometry {
         self.quads.iter_mut().for_each(Vec::clear);
         self.pipeline_quads.clear();
         self.pipeline_runs.clear();
+        self.pipeline_draws.clear();
+        self.transient_vertices.clear();
+        self.transient_indices.clear();
+        self.inline_uniforms.clear();
+        self.texel_data.clear();
+        self.oit_pipeline_quads.clear();
+        self.oit_pipeline_runs.clear();
+        self.oit_pipeline_draws.clear();
+        self.oit_transient_vertices.clear();
+        self.oit_transient_indices.clear();
+        self.oit_inline_uniforms.clear();
+        self.oit_texel_data.clear();
+        self.modifier_stack.clear();
+        self.modifier_stacks.clear();
         self.pack_uniforms.clear();
         self.custom.clear();
         self.oit_quads.clear();
@@ -218,6 +292,21 @@ impl WorldGeometry {
         self.oit_stage_ends = [[0; 4]; OIT_STAGES - 1];
         self.active = ActiveTarget::Primary;
         self.finalized = false;
+    }
+    /// Borrow the frame-graph setup surface for `native_frame_graph_setup`.
+    pub fn frame_graph_surface(&mut self, oit_on: bool) -> &mut FrameGraphSurface {
+        self.frame_graph.graph.clear();
+        self.frame_graph.oit_on = oit_on;
+        self.frame_graph.camera = self.camera;
+        &mut self.frame_graph
+    }
+    /// Take any recorded frame graph passes for compilation and execution.
+    pub fn take_frame_graph(&mut self) -> Option<crate::gfx::mod_frame_graph::RecordedFrameGraph> {
+        if self.frame_graph.graph.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.frame_graph.graph))
+        }
     }
     /// Borrow a stage-scoped surface for `native_render_level_stage`.
     pub fn stage_surface(&mut self, stage: RenderLevelStage) -> StageSurface<'_> {
@@ -278,6 +367,70 @@ impl WorldGeometry {
             _ => {}
         }
     }
+    /// Push a registered pipeline modifier slot onto the active stack. Returns `false` if `slot`
+    /// is out of range of the registered modifiers (without pushing).
+    pub fn push_pipeline_modifier(&mut self, slot: u32) -> bool {
+        if (slot as usize) >= crate::mod_pipelines::registered_modifiers().len() {
+            return false;
+        }
+        self.modifier_stack.push(slot);
+        true
+    }
+
+    /// Pop the most recently pushed pipeline modifier slot.
+    pub fn pop_pipeline_modifier(&mut self) {
+        self.modifier_stack.pop();
+    }
+
+    /// Intern the active modifier stack (`0` when empty).
+    fn active_modifier_stack(&mut self) -> u32 {
+        self.modifier_stacks.intern(&self.modifier_stack)
+    }
+
+    /// The depth the active modifier stack forces, if any (outermost wins).
+    fn depth_override(&self) -> Option<WorldDepth> {
+        if self.modifier_stack.is_empty() {
+            return None;
+        }
+        let defs = crate::mod_pipelines::registered_modifiers();
+        self.modifier_stack
+            .iter()
+            .rev()
+            .filter_map(|&slot| defs.get(slot as usize).and_then(|m| m.depth_compare))
+            .next_back()
+            .map(|cmp| {
+                if cmp == mod_api::DepthCompare::Always {
+                    WorldDepth::ThroughWalls
+                } else {
+                    WorldDepth::Tested
+                }
+            })
+    }
+
+    /// Effective `WorldDepth` after applying the active modifier stack.
+    fn effective_depth(&self, base: WorldDepth) -> WorldDepth {
+        self.depth_override().unwrap_or(base)
+    }
+
+    /// Effective [`mod_api::PrimitiveTopology`] after applying the active modifier stack
+    /// (outermost wins).
+    pub fn effective_topology(
+        &self,
+        base: mod_api::PrimitiveTopology,
+    ) -> mod_api::PrimitiveTopology {
+        if self.modifier_stack.is_empty() {
+            return base;
+        }
+        let defs = crate::mod_pipelines::registered_modifiers();
+        let mut topology = base;
+        for &slot in self.modifier_stack.iter().rev() {
+            if let Some(t) = defs.get(slot as usize).and_then(|m| m.topology) {
+                topology = t;
+            }
+        }
+        topology
+    }
+
     /// Append geometry to a shared CPU stream and return a handle to just the appended ranges.
     /// Only the renderer's prepare hook can call this; stage callbacks can only queue handles.
     pub fn prepare_draw<E>(
@@ -285,28 +438,74 @@ impl WorldGeometry {
         stage: RenderLevelStage,
         append: impl FnOnce(&mut Self) -> Result<(), E>,
     ) -> Result<PreparedWorldDraw, E> {
-        let oit = stage.oit_stage().is_some();
-        self.active = if oit {
+        let prev_active = self.active;
+        let prev_stage = self.stage;
+        let prev_oit_stage = self.oit_stage;
+        let oit = stage.oit_stage();
+        self.active = if oit.is_some() {
             ActiveTarget::Oit
         } else {
             ActiveTarget::Primary
         };
-        let start = if oit {
+        if let Some(oit_stage) = oit {
+            self.oit_stage = match oit_stage {
+                OitStage::DepthBounds => 0,
+                OitStage::Transmittance => 1,
+                OitStage::Accumulate => 2,
+            };
+        } else {
+            self.stage = match stage {
+                RenderLevelStage::AfterOpaqueBlocks => STAGE_AFTER_OPAQUE_BLOCKS,
+                RenderLevelStage::AfterOpaqueFeatures => STAGE_AFTER_OPAQUE_FEATURES,
+                RenderLevelStage::AfterTranslucentFeatures => STAGE_AFTER_TRANSLUCENT_FEATURES,
+                RenderLevelStage::AfterTranslucentBlocks => STAGE_AFTER_TRANSLUCENT_BLOCKS,
+                RenderLevelStage::AfterTranslucentParticles => STAGE_AFTER_TRANSLUCENT_PARTICLES,
+                RenderLevelStage::AfterWeather => STAGE_AFTER_WEATHER,
+                _ => STAGE_CUSTOM_GEOMETRY,
+            };
+        }
+        let start = if oit.is_some() {
             self.oit_counts()
         } else {
             self.counts()
         };
-        append(self)?;
-        let end = if oit {
+        let pipe_start = if oit.is_some() {
+            self.oit_pipeline_runs.len() as u32
+        } else {
+            self.pipeline_runs.len() as u32
+        };
+        let draw_start = if oit.is_some() {
+            self.oit_pipeline_draws.len() as u32
+        } else {
+            self.pipeline_draws.len() as u32
+        };
+        let res = append(self);
+        self.active = prev_active;
+        self.stage = prev_stage;
+        self.oit_stage = prev_oit_stage;
+        res?;
+        let end = if oit.is_some() {
             self.oit_counts()
         } else {
             self.counts()
+        };
+        let pipe_end = if oit.is_some() {
+            self.oit_pipeline_runs.len() as u32
+        } else {
+            self.pipeline_runs.len() as u32
+        };
+        let draw_end = if oit.is_some() {
+            self.oit_pipeline_draws.len() as u32
+        } else {
+            self.pipeline_draws.len() as u32
         };
         let slot = self.prepared.len();
         self.prepared.push((
             stage,
             DrawRanges {
                 primitives: std::array::from_fn(|i| start[i]..end[i]),
+                pipeline_runs: pipe_start..pipe_end,
+                pipeline_draws: draw_start..draw_end,
             },
         ));
         // Issue one identity per view that actually prepares a batch. This also prevents
@@ -349,6 +548,53 @@ impl WorldGeometry {
             .extend_from_slice(&self.custom.pipeline_vertices);
         self.pipeline_runs
             .extend_from_slice(&self.custom.pipeline_runs);
+        let v_base = self.transient_vertices.len() as u64;
+        let i_base = self.transient_indices.len() as u64;
+        let u_base = self.inline_uniforms.len();
+        let t_base = self.texel_data.len();
+        self.transient_vertices
+            .extend_from_slice(&self.custom.transient_vertices);
+        self.transient_indices
+            .extend_from_slice(&self.custom.transient_indices);
+        self.inline_uniforms
+            .extend_from_slice(&self.custom.inline_uniforms);
+        self.texel_data.extend_from_slice(&self.custom.texel_data);
+        for mut cmd in self.custom.pipeline_draws.drain(..) {
+            if let PipelineDrawSource::Transient {
+                ref mut vertex_ranges,
+                ref mut index_range,
+            } = cmd.source
+            {
+                for (_, range) in vertex_ranges.iter_mut() {
+                    range.start += v_base;
+                    range.end += v_base;
+                }
+                if let Some((_, range)) = index_range.as_mut() {
+                    range.start += i_base;
+                    range.end += i_base;
+                }
+            }
+            if let Some(ref mut bindings) = cmd.bindings {
+                for entry in &mut bindings.entries {
+                    match entry {
+                        ResolvedSet1Entry::InlineUniform { byte_range } => {
+                            byte_range.start += u_base;
+                            byte_range.end += u_base;
+                        }
+                        ResolvedSet1Entry::TexelBuffer { byte_range } => {
+                            byte_range.start += t_base;
+                            byte_range.end += t_base;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(ref mut pc) = bindings.push_constants {
+                    pc.start += u_base;
+                    pc.end += u_base;
+                }
+            }
+            self.pipeline_draws.push(cmd);
+        }
         self.custom.clear();
     }
     /// The game time this view's pipeline shaders read, in seconds (`PipelineFrame.time`).
@@ -396,6 +642,7 @@ impl WorldGeometry {
         cull: Option<&impl crate::gfx::Cull>,
         mut stage: impl FnMut(usize, &ModelCopy) -> bool,
     ) {
+        let through_walls = self.effective_depth(WorldDepth::Tested) == WorldDepth::ThroughWalls;
         for (index, instance) in instances.iter().enumerate() {
             if instance.origin.iter().any(|v| !v.is_finite())
                 || instance.transform.iter().any(|v| !v.is_finite())
@@ -423,6 +670,7 @@ impl WorldGeometry {
                 overlay: pack_overlay(instance.overlay),
                 color: instance.color,
                 hidden_faces: instance.hidden_faces,
+                through_walls,
             };
             if !stage(index, &copy) {
                 self.copies.push(copy);
@@ -474,6 +722,7 @@ impl WorldGeometry {
                 return Err(DrawError::InvalidWidth);
             }
         }
+        let depth_override = self.depth_override();
         let (out_tested, out_through) = match self.active {
             ActiveTarget::Primary => {
                 let [tested, through] = &mut self.lines;
@@ -489,7 +738,7 @@ impl WorldGeometry {
                 color: l.color,
                 width: l.width,
             };
-            let out = if l.depth == WorldDepth::ThroughWalls {
+            let out = if depth_override.unwrap_or(l.depth) == WorldDepth::ThroughWalls {
                 &mut *out_through
             } else {
                 &mut *out_tested
@@ -501,6 +750,7 @@ impl WorldGeometry {
     /// Append an entire quad batch or leave the output unchanged on non-finite coordinates.
     pub fn quads(&mut self, quads: &[WorldQuad]) -> Result<(), DrawError> {
         self.validate_positions(quads.iter().flat_map(|q| q.corners))?;
+        let depth_override = self.depth_override();
         let (out_tested, out_through) = match self.active {
             ActiveTarget::Primary => {
                 let [tested, through] = &mut self.quads;
@@ -511,7 +761,7 @@ impl WorldGeometry {
         };
         for q in quads {
             let color = crate::world_primitives::vertex_color(q.color, 255);
-            let out = if q.depth == WorldDepth::ThroughWalls {
+            let out = if depth_override.unwrap_or(q.depth) == WorldDepth::ThroughWalls {
                 &mut *out_through
             } else {
                 &mut *out_tested
@@ -578,6 +828,7 @@ impl WorldGeometry {
     /// skipped individually without rejecting valid quads in the same slice. Accepted quads
     /// that follow the last ones with the same pipeline and stage join their run.
     pub fn pipeline_quads(&mut self, slot: u32, quads: &[PipelineQuad]) {
+        let modifier_stack = self.active_modifier_stack();
         let (vertices, runs, stage) = match self.active {
             ActiveTarget::Primary => (
                 &mut self.pipeline_quads,
@@ -589,7 +840,11 @@ impl WorldGeometry {
                 &mut self.custom.pipeline_runs,
                 STAGE_CUSTOM_GEOMETRY as u32,
             ),
-            ActiveTarget::Oit => return,
+            ActiveTarget::Oit => (
+                &mut self.oit_pipeline_quads,
+                &mut self.oit_pipeline_runs,
+                self.oit_stage as u32,
+            ),
         };
         let mut pushed = 0u32;
         for q in quads {
@@ -614,13 +869,151 @@ impl WorldGeometry {
             return;
         }
         match runs.last_mut() {
-            Some(run) if run.slot == slot && run.stage == stage => run.quads += pushed,
+            Some(run)
+                if run.slot == slot
+                    && run.stage == stage
+                    && run.modifier_stack == modifier_stack =>
+            {
+                run.quads += pushed;
+            }
             _ => runs.push(PipelineRun {
                 slot,
                 stage,
                 quads: pushed,
+                modifier_stack,
             }),
         }
+    }
+    /// Append inline uniform or push-constant bytes into the active target's per-frame byte pool.
+    pub fn push_inline_uniform(&mut self, bytes: &[u8]) -> std::ops::Range<usize> {
+        let pool = match self.active {
+            ActiveTarget::Primary => &mut self.inline_uniforms,
+            ActiveTarget::Custom => &mut self.custom.inline_uniforms,
+            ActiveTarget::Oit => &mut self.oit_inline_uniforms,
+        };
+        let start = pool.len();
+        pool.extend_from_slice(bytes);
+        start..pool.len()
+    }
+
+    /// Append expanded `i32`/`u32` texel-buffer bytes into the active target's per-frame byte pool.
+    pub fn push_texel_data(&mut self, bytes: &[u8]) -> std::ops::Range<usize> {
+        let pool = match self.active {
+            ActiveTarget::Primary => &mut self.texel_data,
+            ActiveTarget::Custom => &mut self.custom.texel_data,
+            ActiveTarget::Oit => &mut self.oit_texel_data,
+        };
+        let start = pool.len();
+        pool.extend_from_slice(bytes);
+        start..pool.len()
+    }
+
+    /// Append a unified transient vertex/index draw command (used by `draw_vertices` and the
+    /// `pipeline_quads` shorthand). Caller has already validated alignment, strides, and bounds.
+    pub fn draw_vertices_slot(
+        &mut self,
+        slot: u32,
+        vertices: &[(u32, &[u8])],
+        indices: Option<(mod_api::IndexFormat, &[u8])>,
+        draw: mod_api::MeshDraw,
+        bindings: Option<ResolvedDrawBindings>,
+    ) {
+        let modifier_stack = self.active_modifier_stack();
+        let (draws, v_pool, i_pool, stage) = match self.active {
+            ActiveTarget::Primary => (
+                &mut self.pipeline_draws,
+                &mut self.transient_vertices,
+                &mut self.transient_indices,
+                self.stage as u32,
+            ),
+            ActiveTarget::Custom => (
+                &mut self.custom.pipeline_draws,
+                &mut self.custom.transient_vertices,
+                &mut self.custom.transient_indices,
+                STAGE_CUSTOM_GEOMETRY as u32,
+            ),
+            ActiveTarget::Oit => (
+                &mut self.oit_pipeline_draws,
+                &mut self.oit_transient_vertices,
+                &mut self.oit_transient_indices,
+                self.oit_stage as u32,
+            ),
+        };
+        let mut vertex_ranges = Vec::with_capacity(vertices.len());
+        for &(binding, bytes) in vertices {
+            let start = v_pool.len() as u64;
+            v_pool.extend_from_slice(bytes);
+            let end = v_pool.len() as u64;
+            vertex_ranges.push((binding, start..end));
+        }
+        let index_range = indices.map(|(fmt, bytes)| {
+            let start = i_pool.len() as u64;
+            i_pool.extend_from_slice(bytes);
+            let end = i_pool.len() as u64;
+            (fmt, start..end)
+        });
+        draws.push(PipelineDraw {
+            slot,
+            stage,
+            modifier_stack,
+            draw,
+            source: PipelineDrawSource::Transient {
+                vertex_ranges,
+                index_range,
+            },
+            bindings,
+        });
+    }
+    /// Record a zero-copy retained [`mod_api::MeshRef`] draw command. Caller has already
+    /// validated the handle, ownership, strides, and bounds.
+    pub fn draw_mesh_slot(
+        &mut self,
+        slot: u32,
+        resolved: ResolvedMeshDraw,
+        draw: mod_api::MeshDraw,
+        bindings: Option<ResolvedDrawBindings>,
+    ) {
+        self.draw_source_slot(slot, draw, PipelineDrawSource::Retained(resolved), bindings);
+    }
+    /// Record a GPU-driven draw command. Caller has already validated the pipeline, the mesh,
+    /// the command buffer and the bindings.
+    pub fn draw_indirect_slot(
+        &mut self,
+        slot: u32,
+        indirect: IndirectSource,
+        bindings: Option<ResolvedDrawBindings>,
+    ) {
+        self.draw_source_slot(
+            slot,
+            mod_api::MeshDraw::vertices(0..0).with_instances(0..1),
+            PipelineDrawSource::Indirect(indirect),
+            bindings,
+        );
+    }
+    fn draw_source_slot(
+        &mut self,
+        slot: u32,
+        draw: mod_api::MeshDraw,
+        source: PipelineDrawSource,
+        bindings: Option<ResolvedDrawBindings>,
+    ) {
+        let modifier_stack = self.active_modifier_stack();
+        let (draws, stage) = match self.active {
+            ActiveTarget::Primary => (&mut self.pipeline_draws, self.stage as u32),
+            ActiveTarget::Custom => (
+                &mut self.custom.pipeline_draws,
+                STAGE_CUSTOM_GEOMETRY as u32,
+            ),
+            ActiveTarget::Oit => (&mut self.oit_pipeline_draws, self.oit_stage as u32),
+        };
+        draws.push(PipelineDraw {
+            slot,
+            stage,
+            modifier_stack,
+            draw,
+            source,
+            bindings,
+        });
     }
     /// Record a per-frame value for a registered shader-pack uniform without heap allocation.
     pub fn set_pack_uniform(&mut self, name: &'static str, value: mod_api::PackUniformValue) {
@@ -650,6 +1043,20 @@ impl WorldGeometry {
                 set: None,
                 vertices: &self.pipeline_quads,
                 runs: &self.pipeline_runs,
+                draws: &self.pipeline_draws,
+                transient_vertices: &self.transient_vertices,
+                transient_indices: &self.transient_indices,
+                inline_uniforms: &self.inline_uniforms,
+                texel_data: &self.texel_data,
+                modifiers: Some(&self.modifier_stacks),
+                modifier_defs: None,
+                oit_vertices: &self.oit_pipeline_quads,
+                oit_runs: &self.oit_pipeline_runs,
+                oit_draws: &self.oit_pipeline_draws,
+                oit_transient_vertices: &self.oit_transient_vertices,
+                oit_transient_indices: &self.oit_transient_indices,
+                oit_inline_uniforms: &self.oit_inline_uniforms,
+                oit_texel_data: &self.oit_texel_data,
                 time: self.time,
             },
             pack_uniforms: &self.pack_uniforms,
@@ -955,16 +1362,19 @@ mod tests {
                     slot: 2,
                     stage: STAGE_AFTER_OPAQUE_BLOCKS as u32,
                     quads: 1,
+                    modifier_stack: 0,
                 },
                 PipelineRun {
                     slot: 3,
                     stage: STAGE_AFTER_WEATHER as u32,
                     quads: 1,
+                    modifier_stack: 0,
                 },
                 PipelineRun {
                     slot: 7,
                     stage: STAGE_CUSTOM_GEOMETRY as u32,
                     quads: 1,
+                    modifier_stack: 0,
                 },
             ]
         );
@@ -1004,7 +1414,7 @@ mod tests {
         draw.quads(&[quad(3.0, WorldDepth::Tested), quad(4.0, WorldDepth::Tested)])
             .unwrap();
         draw.lines(&[line(14.0, WorldDepth::ThroughWalls)]).unwrap();
-        // Pipeline quads are unavailable in OIT sub-passes and leave standard pipeline runs alone.
+        // Pipeline quads in OIT sub-passes populate `oit_runs` and leave standard runs alone.
         draw.pipeline_quads(9, &[pquad(99.0)]);
 
         draw.begin_pass_stage(AfterLevel);
@@ -1025,8 +1435,19 @@ mod tests {
                 slot: 1,
                 stage: STAGE_AFTER_OPAQUE_BLOCKS as u32,
                 quads: 1,
+                modifier_stack: 0,
             }]
         );
+        assert_eq!(
+            batch.pipelines.oit_runs,
+            [PipelineRun {
+                slot: 9,
+                stage: 2,
+                quads: 1,
+                modifier_stack: 0,
+            }]
+        );
+        assert_eq!(batch.pipelines.oit_vertices.len(), 4);
 
         // OIT batch has exact per-OIT-stage ends and primitive order.
         assert!(!batch.oit.is_empty());
@@ -1147,7 +1568,12 @@ mod tests {
         draw.pipeline_quads(4, &[]);
 
         let pipelines = draw.batch().pipelines;
-        let run = |slot, stage, quads| PipelineRun { slot, stage, quads };
+        let run = |slot, stage, quads| PipelineRun {
+            slot,
+            stage,
+            quads,
+            modifier_stack: 0,
+        };
         assert_eq!(
             pipelines.runs,
             [run(4, 0, 3), run(1, 0, 1), run(4, 0, 1), run(4, 5, 1)]

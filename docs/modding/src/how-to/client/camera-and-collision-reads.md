@@ -60,13 +60,10 @@ above 8 is `OutOfRange { slot }`, a client with no world or player is `NoWorld`,
 back with `player_selected_slot` on the local player.
 
 `ClientHost::clipboard_text()` reads the system clipboard (`KeyboardHandler.getClipboard`, empty text when it
-holds none) and `ClientHost::set_clipboard_text(text)` writes it (`setClipboard`; empty text copies nothing). Both
-work only while the game handles a key, mouse or typed-text event, from the window or from the control socket
-(`sunrise-ctl key`, `mouse`, `type` and its clicks): a key, mouse or screen hook that fires inside one, such as
-Ctrl+V into a mod's own field. At any other moment (a tick, a frame, a packet) the read is `None` and the write
-is `false` with nothing copied, so no mod reaches the clipboard without the player doing something. Both are
-`None` and `false` on a server, and take `&self`, so a screen hook can call them. Vanilla's `KeyboardHandler`
-has no such rule: Sunrise adds it.
+holds none) and `ClientHost::set_clipboard_text(text)` writes it (`setClipboard`; empty text is ignored and
+leaves the clipboard unchanged). Both work from any client callback (a tick, a frame, a payload handler, an
+input event, a screen hook), as vanilla's `KeyboardHandler` does. Without a native window (a server or a
+headless host) the read is `None` and the write is `false`. Both take `&self`, so a screen hook can call them.
 
 ## Camera snapshots and perspective
 
@@ -203,10 +200,10 @@ open. Its block reads read the viewed level's own world, never the player's: `bl
 `has_collisions`, `visit_block_collision`, `get_enchant_power_bonus`, and the fluid reads built on `block_state` (`fluid_shape`, `fluid_height`,
 `fluid_height_for_camera`, `fluid_can_be_replaced_with`). So a mod can aim a ray or collide a box
 through a portal. `brightness` also reads the viewed level's own sky or block light, as sent by the
-server, not the light of the shown level. These reads never load a column. Direct block reads return
-`None` for a column the client doesn't hold; `clip` reads missing columns and out-of-height cells as
-air (`ClientChunkCache.getChunk(..., true)`), and `visit_block_collisions` and `has_collisions` skip
-missing columns and keep scanning the loaded ones.
+server, not the light of the shown level. These reads never load a column. Direct block reads return `None` for a column the client doesn't hold; `clip` stops at the first
+cell of a column the client doesn't hold with `ClipOutcome::Unloaded { at }`, reads out-of-height
+cells as air, and returns `Err(ClipError::StaleLevel)` for a stale handle; `visit_block_collisions`
+and `has_collisions` skip missing columns and keep scanning the loaded ones.
 
 `host.level` returns `None` while the server has the level closed, and reads from a retained handle
 return `None`. If the server reopens the level within the same client level, the old handle reads
@@ -295,11 +292,40 @@ These read the local player as the client sees it. They take no mod-controlled n
   `list.copy_header()` and `list.copy_footer()` for the optional header and footer.
   A missing or cleared header or footer is `Ok(None)`; a text conversion error is returned
   only by the copy you request, not by the view or visit. No plaintext is substituted.
+- `ClientHost::client_session().client_waypoints()` is the locator bar's tracked waypoints:
+  `ClientWaypoints { entries }`. Each `ClientWaypointEntry` has the waypoint's `id` (`Uuid` for
+  a player's waypoint, `Name` for a named one), its `target` (`Block`, `Chunk`, `Azimuth` or
+  `Empty`), the icon `style` (`waypoint_style` asset id) and the icon `color` as `0xRRGGBB`
+  (`None` when the server sent none — the bar then colours the dot from the waypoint's id).
+  With a camera entity the entries follow `ClientWaypointManager.forEachWaypoint`: farthest
+  first by the vanilla squared distance, ties in no promised order; without a camera entity,
+  in no promised order. It is what this client has been sent and
+  changes as the server tracks and untracks waypoints; `None` outside a world.
+- `ClientHost::client_session().client_player_skins()` is the listed players' skins as the Tab
+  overlay draws them: `ClientPlayerSkins { entries }`. Each `ClientPlayerSkin` has the player's
+  `uuid`, the skin texture path `skin` (`skins/<hash>` for a downloaded skin, or a default like
+  `entity/player/wide/steve`), and `slim` for the Alex model. Draw the face with a `GuiDraw::Blit`
+  of uv [8, 8], src [8, 8] over tex [64, 64], then the hat at uv [40, 8] — the same blit the tab
+  list uses. Entries come in no order; join on `uuid`. It is what this client has been sent and
+  changes as skins download; `None` outside a world.
+- `ClientHost::client_session().client_titles()` is the title, subtitle and action bar on screen
+  now: `ClientTitles { title, subtitle, action_bar }`. Each is `None` once its timer has run out,
+  and the subtitle shows only with a title. It is `Ok(None)` outside a world; a text conversion
+  error is returned for the failing read, never plain words.
+- `ClientHost::client_session().client_boss_bars()` is every boss bar the client holds, in
+  server order: `Vec<ClientBossBarEntry>` with each bar's `name` and `progress`
+  (0 to 1, as drawn). The HUD draws only those that fit within `guiHeight / 3`.
+  It is `Ok(None)` outside a world; a text conversion error is returned
+  for the failing read, never plain words.
 - `ClientHost::local_item_use()` reports ordinary item use: `ItemUse { hand, ticks_used, ticks_remaining }`
   (`isUsingItem`, `getUsedItemHand`, `getTicksUsingItem`, `getUseItemRemainingTicks`).
   `ticks_used + ticks_remaining` is the use duration. It is `None` when no item is in use or no world
   is open. Track intercepted main-hand input through [`ClientItemUseBehavior` callbacks](../../concepts/parts/item-and-tag-parts.md#intercept-main-hand-client-input)
   instead; interception does not make the player use or block with the item.
+- `ClientHost::client_session().client_fishing_hook()` is the local player's fishing hook:
+  `ClientFishingHook { position, biting }`. `position` is the bobber's position as the client
+  tracks it; `biting` is true while a fish is biting. It is `None` outside a world or when
+  no hook is out.
 - `ClientHost::creative_search_items()` returns the built creative search tab's display order,
   for ranking stacks in inventory sorters. It requests the catalog with the local player's permission
   and Operator Items Tab option. A cache miss can fire the creative build hook, so this read needs a
@@ -362,3 +388,5 @@ against live handles, attackability, reach, held-item range and ordinary block o
 does not mine the block behind it; an empty list on a block or miss keeps the ordinary
 path. Each accepted hit uses normal attack packets and prediction. Server validation
 and cooldowns apply.
+
+`ClientHost::jump_riding_scale()` is how far the local player has charged the jump of its jumpable vehicle (`LocalPlayer.getJumpRidingScale`), 0.0 to 1.0; the jump bar draws the same value.

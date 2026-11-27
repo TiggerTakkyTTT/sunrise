@@ -10,13 +10,13 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
 
-TEST = 'game::nether_portal::cooldown_tests::portal_contact_and_waiting_handoff_match_vanilla_counters'
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+
+TEST = 'game::server_side::nether_portal::cooldown_tests::portal_contact_and_waiting_handoff_match_vanilla_counters'
 
 
 def main():

@@ -146,6 +146,15 @@ draws at and one `Above` it the height after it. A row that is hidden, cancelled
 nothing, and a replacement does not reserve space for the rows after it. Outside the HUD layers
 the read is `None`.
 
+To make room for a row of your own, raise a column with
+`host.set_gui_status_heights([left, right])` (assigning NeoForge's `Hud.leftHeight` and
+`rightHeight`). The vanilla rows that draw after your layer start from the new heights and add
+their own on top: a layer `Above("minecraft:armor_level".into())` that draws a row and raises the
+left column by its height moves the rows drawn after it. A wrapper that sets the heights before
+`ctx.draw_previous()` moves the row it wraps as well. Rows already drawn stay where they are, both
+columns go back to 39 at the start of each HUD pass, and the call returns false, setting nothing,
+outside the HUD layers.
+
 Adding a taller status bar does not move the selected item name or the action bar. The name starts
 59 GUI pixels from the bottom (45 outside survival and adventure); the action bar is centred 68
 pixels from the bottom. A mod that needs to move either can cancel and redraw its layer:
@@ -359,8 +368,9 @@ fn draw_member(draw: &mut dyn DrawContext, member: u128, x: f32, y: f32) -> Resu
 
 `GuiCanvas::texture(id, dst, region, argb)` inside `DrawContext::draw_gui` is vanilla's
 `GuiGraphicsExtractor.blit` with a texture's `Identifier`: a picture that isn't in the GUI atlas, such as a
-guide book's chapter art. It takes `blit`'s arguments: the quad at `dst = [x, y, w, h]` in GUI pixels, showing
-`region.src` texels from `region.uv` of an image `region.tex` texels big, tinted by the ARGB `argb`.
+guide book's chapter art. Unlike `blit`, which takes a GUI-atlas name and a `Blend`, it takes a resource
+`Identifier` and no blend: the quad at `dst = [x, y, w, h]` in GUI pixels, showing `region.src` texels from
+`region.uv` of an image `region.tex` texels big, tinted by the ARGB `argb`.
 
 ```rust,ignore
 use mod_api::{DrawContext, GuiBlitRegion, GuiDrawError, Identifier};
@@ -384,11 +394,12 @@ fn draw_chapter(draw: &mut dyn DrawContext, art: &Identifier) -> Result<(), GuiD
   clamping: past 1 the image repeats (or clamps, below), and a negative `src` or `tex` flips that axis.
 - **Sampler.** As the image's `.png.mcmeta` says, from the image's pack or a pack above it: `"blur": true`
   filters linearly, `"clamp": true` clamps to the edge; otherwise nearest and repeat. No mipmaps.
-- **Missing images.** An id with no image, one that doesn't decode, or one whose `.png.mcmeta` isn't valid JSON or
+- **Missing images.** An id that names no image in the stack and no live dynamic texture when you call is refused
+  (below). One that is there but doesn't decode, or one whose `.png.mcmeta` isn't valid JSON or
   has a `texture` section vanilla's codec refuses, draws vanilla's magenta and black missing texture in its place, in
   order with the other draws. The call isn't refused for it.
-- **Refused.** A NaN or infinite `uv` returns `GuiDrawError::NotFinite` and a `tex` with a zero side
-  `GuiDrawError::BadBlitRegion`; the call draws nothing.
+- **Refused.** A NaN or infinite `uv` returns `GuiDrawError::NotFinite`, a `tex` with a zero side
+  `GuiDrawError::BadBlitRegion`, and an id that names nothing `GuiDrawError::UnknownTexture`; the call draws nothing.
 - **Pose and clip.** The quad follows the canvas's pose and scissor (`GuiCanvas::scope` and
   `DrawContext::with_scissor`), as `blit` does.
 

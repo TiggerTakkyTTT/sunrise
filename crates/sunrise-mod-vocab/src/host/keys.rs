@@ -133,6 +133,12 @@ pub trait KeysBackend {
     /// Returns `None` if the host has no backend or no name for the slot.
     fn entity_type_key_id(&self, key: EntityTypeKey) -> Option<RegistryName>;
     /// Side: both.
+    /// The category of a registered entity type with no entity spawned
+    /// (`EntityType.getCategory`): a mob type's declared category, a mod mob's included,
+    /// `Monster` for the ender dragon and `Misc` for every other type. `None` if the host has
+    /// no backend or no name for the slot.
+    fn entity_type_category(&self, key: EntityTypeKey) -> Option<MobCategory>;
+    /// Side: both.
     /// Pins the canonical menu type id without borrowing the host.
     /// Returns `None` if the host has no backend or no name for the slot.
     fn menu_key_id(&self, key: MenuKey) -> Option<RegistryName>;

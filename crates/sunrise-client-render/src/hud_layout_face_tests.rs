@@ -34,7 +34,7 @@ fn atlas() -> HudAtlas {
         "/nonexistent/sunrise-test-assets".into(),
     ))
     .unwrap();
-    atlas.live.insert(SKIN.to_owned(), slot(512.0, 256.0));
+    atlas.sprites.insert(SKIN.to_owned(), slot(512.0, 256.0));
     atlas
 }
 

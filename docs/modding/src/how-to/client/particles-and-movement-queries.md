@@ -24,6 +24,26 @@ layer particle sprites and resource-pack and stack-component overrides. It retur
 Setup, Reloading and World. Resolve again after resource reloads.
 It allocates a sprite list only when called; it adds no per-tick work.
 
+### Changing particles as they are added
+
+`client_particle_add` (vanilla's `ClientLevel.doAddParticle`) sees every particle the client is
+asked to add, whoever asked: the server, a block's or entity's ambient tick, an explosion or
+another mod's `add_particle`. The listener may move it (`event.pos`), change its velocity
+(`event.velocity`) or return `Flow::Cancel` to drop it; the options are read-only, so a mod that
+wants a different particle cancels this one and adds its own. The 32-block camera check and the
+Particles setting then apply at the position the listener left, and a position or velocity left
+non-finite drops the particle. The listener gets no host: it runs inside the particle engine, so
+keep what it needs (a wind, a limit) in the mod's own state and update it from `client_tick`.
+
+```rust,ignore
+fn client_particle_add(&self, event: &mut ClientParticleAddEvent<'_>) -> Flow {
+    let [wx, wz] = *self.wind.lock().unwrap();
+    event.velocity[0] += wx;
+    event.velocity[2] += wz;
+    Flow::Continue
+}
+```
+
 ### Tinting an item crumb
 
 The item crumbs (`item` and its `item_*` variants) multiply their red, green and blue by
@@ -182,7 +202,8 @@ rotations. Each `frame` is an existing index into the bind-time sprite list. UVs
 sprite: `[0.0, 0.0, 1.0, 1.0]` selects it whole. `color` is `0xAARRGGBB`; for packed light use the
 view's value or vanilla's `LightCoordsUtil.pack`/`smoothPack` layout. The explicit layer wins over
 the group's blend. Opaque quads replace covered pixels after the alpha cut; translucent quads
-blend. Both are depth tested and culled from the back. The group still controls admission of the particle,
+blend; additive quads draw after the translucent layer with depth writes off and additive blending.
+All three are depth tested and culled from the back. The group still controls admission of the particle,
 not the number of quads it emits. The sink ignores an unresolved frame or non-finite geometry/UV
 without dropping other quads.
 
@@ -244,9 +265,8 @@ and world, or for non-finite numbers.
 `PlayerInput`, using the game's movement implementation without replacing the
 live player's body. It returns `SimulatedMove` with position, velocity, ground,
 horizontal-collision and sprinting results. It refuses stale or inaccessible players,
-dead players, spectators, riders and invalid numeric input. The prediction includes the
-local player's ordinary wall-escape nudge, which checks solid collider boxes when a collision
-scene is in scope. A supplied velocity is input to the prediction, not a write to the player.
+dead players, spectators, riders and invalid numeric input. A supplied velocity is
+input to the prediction, not a write to the player.
 
 `LevelRef::visit_block_collisions` lends each intersecting, unclipped world-space `VoxelShape`
 for a finite, ordered axis-aligned box. It uses vanilla's `BlockCollisions` walk, skips missing

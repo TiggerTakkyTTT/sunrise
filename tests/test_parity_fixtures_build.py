@@ -1,5 +1,4 @@
 """lab.parity_fixtures() builds the parity fixtures' binary and runs only it, never another Cargo artifact."""
-import ast
 import json
 import os
 import shutil
@@ -71,26 +70,6 @@ class ParityFixturesBuildTests(unittest.TestCase):
             self.assertEqual(lab._PARITY_FIXTURES, {})
 
 
-class HarnessesUseTheFixturesProgramTests(unittest.TestCase):
-    def test_no_harness_builds_the_client_lib_test(self):
-        """The lib test's one rustc outgrew a parity runner (#4896): a harness runs its sunrise-client fixtures from
-        lab.parity_fixtures(). Flags a `cargo test` argument list naming sunrise-client and `--lib`, and a call of a
-        `*test_binary*` helper naming sunrise-client."""
-        offenders = []
-        for path in sorted((lab.ROOT / 'tools').glob('test_*_parity.py')):
-            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
-                if isinstance(node, (ast.List, ast.Tuple)):
-                    words = {e.value for e in node.elts if isinstance(e, ast.Constant)}
-                    if {'sunrise-client', '--lib'} <= words:
-                        offenders.append(f'{path.name}:{node.lineno}')
-                elif isinstance(node, ast.Call):
-                    name = getattr(node.func, 'id', getattr(node.func, 'attr', ''))
-                    if 'test_binary' in name and any(isinstance(a, ast.Constant) and a.value == 'sunrise-client'
-                                                     for a in node.args):
-                        offenders.append(f'{path.name}:{node.lineno}')
-        self.assertEqual(offenders, [])
-
-
 class ParityFixturesManifestTests(unittest.TestCase):
     def test_the_package_follows_the_clients_manifest(self):
         # Its dependencies and features are sunrise-client's: a client change that misses it breaks only the daily.
@@ -102,17 +81,20 @@ class ParityFixturesManifestTests(unittest.TestCase):
         from tools.ci import parity_fixtures_manifest as manifest
         client = tomllib.loads(manifest.CLIENT.read_text(encoding='utf-8'))
         fixtures = tomllib.loads(manifest.render())
-        names = set(client['dependencies']) | set(client['dev-dependencies'])
-        self.assertEqual(set(fixtures['dependencies']), names)
-        self.assertTrue(all(entry['optional'] for entry in fixtures['dependencies'].values()))
-        enabled = set(fixtures['features']['fixtures'])
-        self.assertTrue({f'dep:{name}' for name, entry in client['dependencies'].items()
-                         if not (isinstance(entry, dict) and entry.get('optional'))} <= enabled)
-        self.assertTrue({f'dep:{name}' for name in client['dev-dependencies']} <= enabled)
-        self.assertEqual(fixtures['features']['client-defaults'], client['features']['default'])
+        expected_deps = {'sunrise-client', 'sunrise-client-gameplay', 'sunrise-gameplay', 'sunrise-gameplay-common'}
+        self.assertEqual(set(fixtures['dependencies']), expected_deps)
+        self.assertTrue(all(entry['optional'] and not entry['default-features']
+                            for entry in fixtures['dependencies'].values()))
+        self.assertEqual(
+            set(fixtures['features']['fixtures']),
+            {'dep:sunrise-gameplay-common', 'dep:sunrise-gameplay',
+             'sunrise-gameplay-common/parity-fixtures', 'sunrise-gameplay/parity-fixtures'},
+        )
+        client_defaults = set(fixtures['features']['client-defaults'])
+        self.assertTrue({'fixtures', 'dep:sunrise-client-gameplay', 'dep:sunrise-client',
+                         'sunrise-client-gameplay/parity-fixtures', 'sunrise-client/parity-fixtures'} <= client_defaults)
+        self.assertTrue({f'sunrise-client/{name}' for name in client['features']['default']} <= client_defaults)
         self.assertNotIn('default', fixtures['features'])
-        self.assertEqual(fixtures['dependencies']['sunrise-client-lib']['features'],
-                         client['dev-dependencies']['sunrise-client-lib']['features'])
 
 
 if __name__ == '__main__':

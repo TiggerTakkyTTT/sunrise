@@ -11,8 +11,12 @@ on:
         description: Which legs to build, `all`, `linux` (both Linux legs) or `windows-macos`
         type: string
         default: all
+      c_source_test:
+        description: Whether the Windows and macOS legs also build a native mod with a C source (the daily's call only, so a Dev SDK publish never waits on it)
+        type: boolean
+        default: false
       dev:
-        description: A Dev release's build (nightly-build.yml kind dev), whose macOS leg BLACKSMITH_DEV_MACOS may move
+        description: A Dev release's build (nightly-build.yml kind dev), whose legs BLACKSMITH_DEV and BLACKSMITH_DEV_MACOS may move and DEV_ON_DYNA_LINUX, DEV_ON_DYNA_WINDOWS and DEV_ON_DYNA_MACOS cross-build on Dyna's runners
         type: boolean
         default: false
     outputs:
@@ -34,6 +38,7 @@ jobs:
       needed: ${{ steps.release.outputs.needed }}
       tag: ${{ env.TAG }}
       matrix: ${{ steps.legs.outputs.matrix }}
+      checks: ${{ steps.legs.outputs.checks }}
     steps:
       - id: release
         env:
@@ -46,15 +51,19 @@ jobs:
       - id: legs
         env:
           LEGS: ${{ inputs.legs }}
+          # The Windows and macOS legs a Dev build cross-builds on Dyna's runners, whose programs `cross-check` runs on
+          # their own platform.
+          CROSS_WINDOWS: ${{ inputs.dev && vars.DEV_ON_DYNA_WINDOWS || '' }}
+          CROSS_MACOS: ${{ inputs.dev && vars.DEV_ON_DYNA_MACOS || '' }}
           # The launcher builds native mods with the windows-gnu toolchain and its own MinGW linker.
           ALL: >-
-            [{"name": "linux", "os": "ubuntu-22.04", "blacksmith": "blacksmith-16vcpu-ubuntu-2204",
+            [{"name": "linux", "dyna": "DEV_ON_DYNA_LINUX", "os": "ubuntu-22.04", "blacksmith": "blacksmith-16vcpu-ubuntu-2204",
               "target": "x86_64-unknown-linux-gnu", "linkage": true},
-            {"name": "linux-server", "os": "ubuntu-22.04", "blacksmith": "blacksmith-16vcpu-ubuntu-2204",
+            {"name": "linux-server", "dyna": "DEV_ON_DYNA_LINUX", "os": "ubuntu-22.04", "blacksmith": "blacksmith-16vcpu-ubuntu-2204",
               "target": "x86_64-unknown-linux-gnu", "server": true},
-            {"name": "windows", "os": "windows-latest", "blacksmith": "blacksmith-16vcpu-windows-2025",
+            {"name": "windows", "dyna": "DEV_ON_DYNA_WINDOWS", "os": "windows-latest", "blacksmith": "blacksmith-16vcpu-windows-2025",
               "target": "x86_64-pc-windows-gnu", "linkage": true},
-            {"name": "macos", "os": "macos-15", "blacksmith": "blacksmith-6vcpu-macos-15", "target": "aarch64-apple-darwin"}]
+            {"name": "macos", "dyna": "DEV_ON_DYNA_MACOS", "os": "macos-15", "blacksmith": "blacksmith-6vcpu-macos-15", "target": "aarch64-apple-darwin"}]
         run: |
           case "$LEGS" in
             all) pick='.' ;;
@@ -63,6 +72,9 @@ jobs:
             *) echo "::error::legs is all, linux or windows-macos, not '$LEGS'"; exit 1 ;;
           esac
           echo "matrix=$(jq -c "{include: $pick}" <<< "$ALL")" >> "$GITHUB_OUTPUT"
+          echo "checks=$(jq -c --arg windows "$CROSS_WINDOWS" --arg macos "$CROSS_MACOS" \
+            "{include: $pick | map(select((.dyna == \"DEV_ON_DYNA_WINDOWS\" and \$windows == \"on\") or (.dyna == \"DEV_ON_DYNA_MACOS\" and \$macos == \"on\")))}" \
+            <<< "$ALL")" >> "$GITHUB_OUTPUT"
 
   build:
     needs: fresh
@@ -73,15 +85,25 @@ jobs:
       matrix: ${{ fromJSON(needs.fresh.outputs.matrix) }}
     # Blacksmith's machines (owner, 2026-11-18): 16 vCPUs for Linux and Windows, the M4 Mac, the same images as
     # GitHub's with the Rust cache beside them. The repository variable BLACKSMITH=off puts every leg back on `os`.
-    # BLACKSMITH_DEV_MACOS=on (the owner's switch; unset or anything else is off) puts a Dev release's macOS leg alone
-    # back on Blacksmith while BLACKSMITH stays off: the leg the whole Dev release waits for (88m36 on GitHub's
-    # macos-15 on 2026-11-25).
+    # BLACKSMITH_DEV=on (the owner's switch; unset or anything else is off) puts every leg of a Dev release back on
+    # Blacksmith while BLACKSMITH stays off (the Windows leg took 68m on GitHub's windows-latest on 2026-11-25);
+    # BLACKSMITH_DEV_MACOS=on does so for its macOS leg alone (88m36 on GitHub's macos-15 the same day).
+    # DEV_ON_DYNA_LINUX (both Linux legs), DEV_ON_DYNA_WINDOWS and DEV_ON_DYNA_MACOS (the owner's switches; unset or
+    # anything but `on` is off) build that leg of a Dev release on Dyna's Linux runners instead (docs/release-flow.md):
+    # Linux against glibc 2.35 with zig, the windows-gnu and macOS legs cross-compiled (tools/ci/cross/). `cross-check`
+    # below runs what needs the leg's own platform, on GitHub's runner.
     runs-on: >-
-      ${{ (vars.BLACKSMITH != 'off' || (inputs.dev && matrix.name == 'macos' && vars.BLACKSMITH_DEV_MACOS == 'on'))
+      ${{ inputs.dev && vars[matrix.dyna] == 'on' && 'dyna-large' ||
+      (vars.BLACKSMITH != 'off' || (inputs.dev && (vars.BLACKSMITH_DEV == 'on' || (matrix.name == 'macos' && vars.BLACKSMITH_DEV_MACOS == 'on'))))
       && matrix.blacksmith || matrix.os }}
     # Hosted macOS runner speed varies: 41 to 90+ minutes observed. Windows without its build cache (the first run after
     # a lock or toolchain change saves it) takes over 85 minutes in "Build and collect" alone.
     timeout-minutes: ${{ (matrix.os == 'macos-15' && 120) || (matrix.os == 'windows-latest' && 180) || 90 }}
+    env:
+      # `on` when this Dev leg is cross-built on Dyna's runner, empty otherwise.
+      CROSS: ${{ inputs.dev && vars[matrix.dyna] == 'on' && 'on' || '' }}
+      # tools/prebuilt_game.py builds for this target, not the computer's (a cross build); empty on a hosted runner.
+      SUNRISE_PREBUILT_TARGET: ${{ inputs.dev && vars[matrix.dyna] == 'on' && matrix.target || '' }}
     defaults:
       run:
         shell: bash
@@ -90,28 +112,87 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.commit }}
+      - name: Build in the runner's persistent target
+        # Dyna's runner points CARGO_TARGET_DIR at its persistent build folder; the steps below read target/.
+        if: env.CROSS == 'on'
+        run: |
+          mkdir -p "${CARGO_TARGET_DIR:?}"
+          if [ ! -e target ] && [ ! -L target ]; then
+            ln -s "$CARGO_TARGET_DIR" target
+          elif [ ! target -ef "$CARGO_TARGET_DIR" ]; then
+            echo '::error::Existing target path does not point to CARGO_TARGET_DIR; refusing to replace it.'
+            exit 1
+          fi
       - name: The launcher's pinned Rust
         id: rust
         run: |
           echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@master
+        if: env.CROSS != 'on'
         with:
           toolchain: ${{ steps.rust.outputs.version }}-${{ matrix.target }}
           components: ${{ matrix.linkage && 'clippy' || '' }}
       - uses: actions/setup-python@v5
+        if: env.CROSS != 'on'
         with:
           python-version: '3.12'
+      # The Apple SDK, placed once by hand in this repository's /keep on the runner host and never in the image, an
+      # artifact, a cache or a log. A missing or different archive stops the job and names the file.
+      - name: Apple SDK from /keep
+        if: env.CROSS == 'on' && matrix.name == 'macos'
+        env:
+          APPLE_SDK: MacOSX15.5.sdk
+          APPLE_SDK_SHA256: 60b9c5dc87ab7bf226eb0041d0b8e7b9f383b57e1cba56100fa1eebdbf9e995c
+        run: |
+          set -euo pipefail
+          archive="$DYNA_CI_KEEP/apple-sdk/$APPLE_SDK.tar.xz"
+          if [ ! -f "$archive" ]; then
+            echo "::error::$archive is missing: the Apple SDK is placed there by hand (sha256 $APPLE_SDK_SHA256)"
+            exit 1
+          fi
+          if ! echo "$APPLE_SDK_SHA256  $archive" | sha256sum -c --status -; then
+            echo "::error::$archive does not have sha256 $APPLE_SDK_SHA256"
+            exit 1
+          fi
+          tar --warning=no-unknown-keyword -C "$RUNNER_TEMP" -xf "$archive"
+          echo "SDKROOT=$RUNNER_TEMP/$APPLE_SDK" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      - name: Cross-compiling tools for ${{ matrix.target }}
+        if: env.CROSS == 'on'
+        run: >-
+          tools/ci/cross/setup.sh ${{ matrix.name == 'windows' && 'x86_64-pc-windows-gnu' || matrix.target }}
       # Saved by main's runs only, which every branch restores from: a branch's copy (about 700 MB a leg) serves no
       # other ref and pushed main's out of the repository's 10 GB, so main's daily legs found no cache at all.
       - uses: Swatinem/rust-cache@v2
+        if: env.CROSS != 'on'
         with:
           shared-key: prebuilt-${{ matrix.name }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Not a Dev build's: saving took 3m56 at the end of the Windows leg the Dev build of 2026-11-25 waited for,
+          # and the daily run's legs save the same keys.
+          save-if: ${{ github.ref == 'refs/heads/main' && !inputs.dev }}
       - name: ALSA and udev headers
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && env.CROSS != 'on'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+      # A Dyna runner keeps its target between jobs: the source snapshot stays true, and the build runs at the runner's
+      # size, not the host's (tools/ci/source_mtimes.py, tools/ci/cargo_jobs.py).
+      - name: Restore unchanged source timestamps
+        if: env.CROSS == 'on'
+        run: python3 tools/ci/source_mtimes.py "${CARGO_TARGET_DIR:-target}/ci-source-mtimes-v2.json"
+      - name: Cap build parallelism to the runner
+        if: env.CROSS == 'on'
+        run: python3 tools/ci/cargo_jobs.py --job-mib 3072 --cap
       - name: Build and collect
         run: python tools/prebuilt_game.py build prebuilt ${{ matrix.server && '--server' || '' }}
+      # zig links its own static libunwind for Rust's -lgcc_s unless tools/ci/cross/zld-linux maps it to the system's
+      # libgcc_s.so.1. A library with its own unwinder aborts a panic from libstd that unwinds through it, so the mod
+      # host could not catch a mod's panic.
+      - name: The cross-built libraries share libgcc_s's unwinder
+        if: env.CROSS == 'on' && (matrix.name == 'linux' || matrix.name == 'linux-server')
+        run: |
+          host=$(find prebuilt -name libsunrise_mod_host.so)
+          readelf -d "$host" | grep -q 'NEEDED.*\[libgcc_s\.so\.1\]' || { echo "::error::$host does not link libgcc_s.so.1"; exit 1; }
+          own=$(find prebuilt -type f \( -name '*.so' -o -path '*/bin/*' \) -exec grep -l 'libunwind: ' {} + || true)
+          [ -z "$own" ] || { echo "::error::these carry their own libunwind: $own"; exit 1; }
       # The staging pass on a clean checkout, with the sunrise-stage `build` compiled from this commit: HEAD's build
       # data, each file headed with its commit, listed internals, and the tracked source
       # untouched. A failure is its own daily issue (tools/ci/daily_summary.py SDK_CHECKS), and the leg's assets
@@ -124,11 +205,14 @@ jobs:
       # Two starter mods, the second calling the first through its library as a mod calls a declared dependency
       # (on windows-gnu through the first's import library); `start` then loads both.
       - name: Two starter mods and the game executable build against the archive alone
+        # A cross-built macOS or Windows leg runs this in cross-check, on that platform.
+        if: env.CROSS != 'on' || matrix.name == 'linux' || matrix.name == 'linux-server'
         run: python tools/prebuilt_game.py smoke prebuilt
       # Runs what smoke built, installed as the launcher installs it, with no game data: it loads the game's
       # libraries and sets up the mods' runtime, and must stop cleanly at the missing prepared files. A crash
       # there (two allocators, #3877) fails this OS's leg, so its archive never publishes.
       - name: The game executable starts and loads the game's libraries
+        if: env.CROSS != 'on' || matrix.name == 'linux' || matrix.name == 'linux-server'
         timeout-minutes: 10
         run: python tools/prebuilt_game.py start prebuilt
       # Warns past 80% of Windows' 65,535 exported names per DLL and fails past 90%.
@@ -139,7 +223,7 @@ jobs:
       # (an emptied check folder without its mark: E_SCRATCH), and its builds made the cache larger for nothing.
       - name: Two mod libraries share the game's exact Rust state
         id: linkage
-        if: matrix.linkage
+        if: matrix.linkage && (env.CROSS != 'on' || matrix.name == 'linux')
         run: python tools/native_dylib_probe.py --sdk prebuilt --output "$RUNNER_TEMP/native-dylib-probe"
       # The archive is the SDK's api-source.tar.xz: sdk-publish.yml's index takes it from here rather than building
       # the same bytes again (same commit, same bytes: tools/sdk_api_source.py).
@@ -157,15 +241,72 @@ jobs:
           fi
       # The leg's assets, named for its target and side; the layout's number is in each identity (package_format).
       # The surface export runs the sunrise-stage that `build` compiled from this commit (target/prebuilt/tools).
+      # A cross leg did not find that tool where `build` left it (run 45672482328): it runs the tool from source, as pack does
+      # when given none (80 to 87 s).
       - name: Pack the SDK's assets
+        if: env.CROSS != 'on'
         run: >-
           python tools/prebuilt_game.py pack prebuilt dist
           --stage-tool target/prebuilt/tools/release/sunrise-stage${{ runner.os == 'Windows' && '.exe' || '' }}
+      - name: Pack the cross-built SDK's assets
+        if: env.CROSS == 'on'
+        run: python tools/prebuilt_game.py pack prebuilt dist
       # Build a native mod library on macOS against the SDK just built, using the release's
       # own `cargo sunrise-mod native-build` tool.
       - name: A native mod builds through the shipped route
-        if: matrix.name == 'macos'
+        if: matrix.name == 'macos' && env.CROSS != 'on'
         run: python tools/ci/native_build_route.py --sdk prebuilt --tool target/release/cargo-sunrise-mod --work "$RUNNER_TEMP/native-route"
+      # macOS's system openssl is LibreSSL, whose `pkeyutl` has no -rawin (daily run 45879175792), which sign_release.sh
+      # needs for the throwaway key below: it reads the OpenSSL it signs with from OPENSSL.
+      - name: OpenSSL 3 for tools/ci/sign_release.sh
+        if: inputs.c_source_test && matrix.name == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew list openssl@3 > /dev/null 2>&1 || brew install openssl@3
+          openssl="$(brew --prefix openssl@3)/bin/openssl"
+          "$openssl" version
+          echo "OPENSSL=$openssl" >> "$GITHUB_ENV"
+      # The mod tool builds a native mod whose build script compiles a C file with `cc`, against this leg's own SDK laid out
+      # as a signed release folder (the Linux legs' run of the same test is book-quickstart.yml's). `cc` must find the
+      # compiler of the leg's target: MinGW's GCC for windows-gnu, the system's clang on macOS.
+      - name: A native mod with a C source builds through the mod tool
+        if: inputs.c_source_test && (matrix.name == 'windows' || matrix.name == 'macos')
+        run: |
+          commit=$(git rev-parse HEAD)
+          scratch="$RUNNER_TEMP/c-source"
+          rm -rf "$scratch"
+          mkdir -p "$scratch/legs"
+          cp -R dist "$scratch/legs/sdk-leg-${{ matrix.name }}"
+          python tools/prebuilt_game.py gather "$scratch/legs" "$scratch/release"
+          python tools/sdk_api_source.py build "$scratch/api-source"
+          python tools/sdk_api_source.py archive "$scratch/api-source" "$scratch/release/api-source.tar.xz"
+          python tools/prebuilt_game.py index "$scratch/release"
+          EPHEMERAL=yes bash tools/ci/sign_release.sh "sdk-$commit" "$scratch"/release/*
+          echo "SUNRISE_SDK_TRUSTED_KEY=$(cat "$scratch/release/ephemeral.pub")" >> "$GITHUB_ENV"
+          rm "$scratch/release/ephemeral.pub"
+          mkdir -p "$scratch/sdk-base/nightly"
+          mv "$scratch/release" "$scratch/sdk-base/sdk-$commit"
+          cp "$scratch/sdk-base/sdk-$commit/sdk.json" "$scratch/sdk-base/nightly/sdk.json"
+          echo "SUNRISE_SDK_BASE=$scratch/sdk-base" >> "$GITHUB_ENV"
+      - name: The mod tool compiles the C source
+        if: inputs.c_source_test && (matrix.name == 'windows' || matrix.name == 'macos')
+        run: >-
+          cargo test --locked -p cargo-sunrise-mod --test build_errors --
+          --ignored --exact a_native_mod_compiles_its_c_source_with_cc_from_its_build_script
+      # What cross-check runs on the leg's own platform: the build folder and the mod tool, in one tar (an artifact
+      # keeps no file modes). The SDK folder holds only what the leg built; nothing of the Apple SDK or Microsoft's.
+      - name: The leg's build for its platform's check
+        if: env.CROSS == 'on' && contains(fromJSON('["macos", "windows"]'), matrix.name)
+        run: tar czf "$RUNNER_TEMP/sdk-check.tar.gz" prebuilt target/${{ matrix.target }}/release/cargo-sunrise-mod*
+      - uses: actions/upload-artifact@v4
+        if: env.CROSS == 'on' && contains(fromJSON('["macos", "windows"]'), matrix.name)
+        with:
+          name: sdk-check-${{ matrix.name }}
+          path: ${{ runner.temp }}/sdk-check.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
       - name: Asset sizes
         run: (cd dist && du -h *) | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -197,3 +338,49 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
+
+  # The checks that run the programs of a cross-built macOS or Windows leg, on GitHub's runner of that platform, from the
+  # build folder the leg uploaded: nothing is rebuilt. `needs.sdk` is red when one fails, so no SDK publishes.
+  cross-check:
+    needs: [fresh, build]
+    if: ${{ !cancelled() && needs.fresh.outputs.needed == 'true' && fromJSON(needs.fresh.outputs.checks).include[0] }}
+    name: check ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.fresh.outputs.checks) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.commit }}
+      - name: The launcher's pinned Rust
+        id: rust
+        run: echo "version=$(cat tools/ci/rust-version)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}-${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-check-${{ matrix.name }}
+          path: ${{ runner.temp }}/check
+      - name: Unpack the leg's build folder and mod tool, unchanged
+        run: tar xzf "$RUNNER_TEMP/check/sdk-check.tar.gz"
+      - name: Two starter mods and the game executable build against the archive alone
+        run: python tools/prebuilt_game.py smoke prebuilt
+      - name: The game executable starts and loads the game's libraries
+        timeout-minutes: 10
+        run: python tools/prebuilt_game.py start prebuilt
+      - name: Two mod libraries share the game's exact Rust state
+        if: matrix.linkage
+        run: python tools/native_dylib_probe.py --sdk prebuilt --output "$RUNNER_TEMP/native-dylib-probe"
+      - name: A native mod builds through the shipped route
+        if: matrix.name == 'macos'
+        run: python tools/ci/native_build_route.py --sdk prebuilt --tool target/${{ matrix.target }}/release/cargo-sunrise-mod --work "$RUNNER_TEMP/native-route"

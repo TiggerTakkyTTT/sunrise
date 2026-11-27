@@ -90,10 +90,13 @@ impl OitBatch<'_> {
 }
 
 /// Batch ranges in the shared frame upload, relative to each stream. Plain primitive ranges
-/// are in quads/lines, not bytes.
+/// are in quads/lines, not bytes. `pipeline_runs` is a range of run indices in `ModPipelines`
+/// (standard or OIT runs, matching the batch's stage).
 #[derive(Clone, Debug, Default)]
 pub struct DrawRanges {
     pub primitives: [std::ops::Range<u32>; 4],
+    pub pipeline_runs: std::ops::Range<u32>,
+    pub pipeline_draws: std::ops::Range<u32>,
 }
 
 /// Extra frame data produced by `submit_custom_geometry`, debug renderers, and
@@ -118,6 +121,13 @@ pub trait FrameHooks {
         true
     }
     fn on_custom_geometry(&mut self, sections: &[mod_api::RenderableSection], oit_on: bool);
+    /// Fire `Hooks::frame_graph_setup` at the start of level rendering to record data-driven
+    /// offscreen passes and transient per-frame targets.
+    fn on_frame_graph_setup(&mut self, _sections: &[mod_api::RenderableSection], _oit_on: bool) {}
+    /// Take the recorded frame graph for compilation and execution during this world frame.
+    fn take_frame_graph(&mut self) -> Option<super::mod_frame_graph::RecordedFrameGraph> {
+        None
+    }
     fn on_after_sky(&mut self, sections: &[mod_api::RenderableSection], oit_on: bool);
     fn on_prepare_render_buffers(
         &mut self,
@@ -160,6 +170,9 @@ pub struct Batch<'a> {
 impl Batch<'_> {
     pub fn is_empty(&self) -> bool {
         self.pipelines.runs.is_empty()
+            && self.pipelines.oit_runs.is_empty()
+            && self.pipelines.draws.is_empty()
+            && self.pipelines.oit_draws.is_empty()
             && self.quads.is_empty()
             && self.quads_through.is_empty()
             && self.lines.is_empty()
@@ -279,7 +292,7 @@ impl VertexPages {
         first_page: usize,
     ) -> usize {
         self.records = Self::limit(super::upload::legal_buffer_limit(device), stride);
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.records == 0 {
             return first_page;
         }
         let page_bytes = self.records as usize * stride as usize;
@@ -749,6 +762,18 @@ impl WorldPrimitives {
         }
     }
 
+    /// Drop cached bind groups of released mod storage buffers (see
+    /// [`mod_pipelines::ModPipelines::forget_storage`]).
+    pub fn forget_storage(&mut self, released: &[u64]) {
+        self.pipelines.forget_storage(released);
+    }
+
+    /// Forget the warnings about released mod render target textures (see
+    /// [`mod_pipelines::ModPipelines::forget_render_targets`]).
+    pub fn forget_render_targets(&mut self, released: &[u64]) {
+        self.pipelines.forget_render_targets(released);
+    }
+
     /// Uploads this frame's `batch`, drawn with `view_proj` (camera-relative world to clip,
     /// jittered as the world is) into a frame `viewport` pixels big, sampling `atlas`. When
     /// `vanilla_blocks` is `Some`, mod GLSL pipelines bind those `core_lines::uniforms` blocks
@@ -876,6 +901,16 @@ impl WorldPrimitives {
         true
     }
 
+    /// Refresh OIT mod-pipeline bind groups (`DepthBoundsSampler`, `Coeff0`, `Coeff1`) when OIT
+    /// targets change generation.
+    pub(super) fn prepare_oit_mod_pipelines(
+        &mut self,
+        device: &wgpu::Device,
+        samples: Option<super::oit::CloudSamples<'_>>,
+    ) {
+        self.pipelines.prepare_oit_groups(device, samples);
+    }
+
     /// Encode a prepared command. No buffer allocation or upload is possible from this path.
     pub(super) fn draw_prepared(
         &self,
@@ -883,12 +918,47 @@ impl WorldPrimitives {
         oit: Option<super::oit::Stage>,
         draws: &[DrawRanges],
     ) -> bool {
-        match oit {
+        let mut drew = match oit {
             Some(stage) => self.oit_pipelines.as_ref().is_some_and(|pipelines| {
                 self.draw_prepared_ranges(pass, &pipelines[stage as usize], true, draws)
             }),
             None => self.draw_prepared_ranges(pass, &self.pipelines_standard, false, draws),
+        };
+        let has_pipeline_runs = draws.iter().any(|d| !d.pipeline_runs.is_empty());
+        if has_pipeline_runs {
+            let ranges = draws
+                .iter()
+                .filter(|d| !d.pipeline_runs.is_empty())
+                .map(|d| d.pipeline_runs.clone());
+            match oit {
+                Some(stage) => self
+                    .pipelines
+                    .draw_prepared_oit(pass, stage, &self.indices, ranges),
+                None => self
+                    .pipelines
+                    .draw_prepared_runs(pass, &self.indices, ranges),
+            }
+            drew = true;
         }
+        let has_pipeline_draws = draws.iter().any(|d| !d.pipeline_draws.is_empty());
+        if has_pipeline_draws {
+            let ranges: Vec<std::ops::Range<u32>> = draws
+                .iter()
+                .filter(|d| !d.pipeline_draws.is_empty())
+                .map(|d| d.pipeline_draws.clone())
+                .collect();
+            match oit {
+                Some(stage) => {
+                    self.pipelines
+                        .draw_prepared_oit_draws(pass, stage, &self.indices, &ranges)
+                }
+                None => self
+                    .pipelines
+                    .draw_prepared_draws(pass, &self.indices, &ranges),
+            }
+            drew = true;
+        }
+        drew
     }
 
     pub(super) fn draw_pack_prepared(
@@ -1089,46 +1159,46 @@ impl WorldPrimitives {
         drew
     }
 
-    /// Draws the OIT primitives for `stage` into the active OIT pass (group 2 is already bound
-    /// by `oit::Oit::run`). Leaves the pass with its own pipeline, bind group 0 and buffers.
+    /// Draws the OIT primitives and OIT mod-pipeline quads for `stage` into the active OIT pass
+    /// (group 2 is already bound by `oit::Oit::run`). Leaves the pass with its own pipeline, bind
+    /// group 0 and buffers.
     pub(super) fn draw_oit(&self, pass: &mut wgpu::RenderPass<'_>, stage: super::oit::Stage) {
-        let Some(oit_pipelines) = &self.oit_pipelines else {
-            return;
-        };
-        let Some(AtlasGroup { group, .. }) = &self.group else {
-            return;
-        };
-        let stage_index = stage as usize;
-        let [quads, quads_through, lines, lines_through] = spans(
-            self.oit_counts,
-            &self.oit_stage_ends,
-            stage_index,
-            stage_index,
-        );
-        if quads.is_empty()
-            && quads_through.is_empty()
-            && lines.is_empty()
-            && lines_through.is_empty()
+        if let (Some(oit_pipelines), Some(AtlasGroup { group, .. })) =
+            (&self.oit_pipelines, &self.group)
         {
-            return;
-        }
-        let stage_pipelines = &oit_pipelines[stage_index];
-        pass.set_bind_group(0, group, &[]);
-        for (through, (quad_range, line_range)) in [(quads, lines), (quads_through, lines_through)]
-            .into_iter()
-            .enumerate()
-        {
-            Self::draw_pages(
-                pass,
-                &self.indices,
-                (
-                    &stage_pipelines.quad_pipelines[through],
-                    &stage_pipelines.line_pipelines[through],
-                ),
-                (&self.oit_quads, 0, quad_range),
-                (&self.oit_lines, 0, line_range),
+            let stage_index = stage as usize;
+            let [quads, quads_through, lines, lines_through] = spans(
+                self.oit_counts,
+                &self.oit_stage_ends,
+                stage_index,
+                stage_index,
             );
+            if !(quads.is_empty()
+                && quads_through.is_empty()
+                && lines.is_empty()
+                && lines_through.is_empty())
+            {
+                let stage_pipelines = &oit_pipelines[stage_index];
+                pass.set_bind_group(0, group, &[]);
+                for (through, (quad_range, line_range)) in
+                    [(quads, lines), (quads_through, lines_through)]
+                        .into_iter()
+                        .enumerate()
+                {
+                    Self::draw_pages(
+                        pass,
+                        &self.indices,
+                        (
+                            &stage_pipelines.quad_pipelines[through],
+                            &stage_pipelines.line_pipelines[through],
+                        ),
+                        (&self.oit_quads, 0, quad_range),
+                        (&self.oit_lines, 0, line_range),
+                    );
+                }
+            }
         }
+        self.pipelines.draw_oit(pass, stage, &self.indices);
     }
 
     /// Draws the stages from `*next` to `stage` that [`Self::prepare`] uploaded into a pass
@@ -1172,6 +1242,23 @@ impl WorldPrimitives {
         }
         self.pipelines
             .draw_excluding(pass, &self.indices, first, last, &self.bound_mod_slots);
+    }
+
+    /// Execute one mod-owned offscreen render pass (`OffscreenPass`) into `data.target`.
+    pub fn execute_offscreen_pass(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        data: &super::mod_pipelines::OffscreenPassData<'_>,
+    ) {
+        let upload: Upload<'_> = &mut |buffer, bytes| queue.write_buffer(buffer, 0, bytes);
+        let needed_quads = self.pipelines.offscreen_needed_quads(data.draws);
+        if needed_quads > 0 {
+            self.reserve_indices(device, upload, needed_quads);
+        }
+        self.pipelines
+            .execute_offscreen_pass(device, queue, encoder, &self.indices, data);
     }
 }
 
@@ -1776,6 +1863,7 @@ mod tests {
                 None,
                 &[DrawRanges {
                     primitives: [0..2, 0..1, 0..2, 0..2],
+                    ..Default::default()
                 }]
             ));
         }

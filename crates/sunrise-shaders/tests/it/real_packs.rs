@@ -77,9 +77,9 @@ fn real_packs_read() {
                         };
                         let p = preprocess(&pack, &path, &macros);
                         stages += 1;
-                        lines += p.lines.len();
+                        lines += p.lines().len();
                         diagnostics.extend(p.diagnostics.iter().map(|d| {
-                            let file = &p.files[d.origin.file as usize];
+                            let file = &p.files()[d.origin.file as usize];
                             format!("{file}:{}: {}", d.origin.line, d.message)
                         }));
                     }

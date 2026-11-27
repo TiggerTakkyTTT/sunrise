@@ -160,6 +160,21 @@ pub struct BlockEntityInRange<'a> {
     pub near: bool,
 }
 
+/// The normal stream of the arena page a run's `key` names (`draw_sections_paged`): the
+/// translucent arena's past `flat::TRANSLUCENT_KEYS`, as far as its vertices are bound. Only
+/// while the arenas keep one (`follow_arena_layout`).
+pub(super) fn normals_binding_in<'a>(
+    arena: &'a arena::Arena,
+    translucent_arena: &'a Option<arena::Arena>,
+    key: u32,
+) -> wgpu::BufferSlice<'a> {
+    let normals = match (translucent_arena, key.checked_sub(flat::TRANSLUCENT_KEYS)) {
+        (Some(arena), Some(page)) => arena.normals_binding(page),
+        _ => arena.normals_binding(key),
+    };
+    normals.expect("every page has a normal stream while a pack reads it")
+}
+
 impl Renderer {
     /// Whether `upload_mesh` puts `mesh`'s solid quads in the compact layout: where the
     /// mesher made it and the passes read it (`packed_quads`).
@@ -486,19 +501,6 @@ impl Renderer {
         page: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
     ) {
         self.draw_sections_with(pass, indirect, 0, first..first + count, false, page);
-    }
-    /// The normal stream of the arena page a run's `key` names (`draw_sections_paged`): the
-    /// translucent arena's past `flat::TRANSLUCENT_KEYS`, as far as its vertices are bound.
-    /// Only while the arenas keep one (`follow_arena_layout`).
-    pub(super) fn normals_binding(&self, key: u32) -> wgpu::BufferSlice<'_> {
-        let normals = match (
-            &self.translucent_arena,
-            key.checked_sub(flat::TRANSLUCENT_KEYS),
-        ) {
-            (Some(arena), Some(page)) => arena.normals_binding(page),
-            _ => self.arena.normals_binding(key),
-        };
-        normals.expect("every page has a normal stream while a pack reads it")
     }
     /// `draw_sections` through the solid pipelines that read the arena page themselves
     /// (`vs_section`): each page's group is bound as their group 1.
@@ -1014,8 +1016,7 @@ impl Renderer {
             self.pack_reads_pages(),
             // A pack still building draws what its programs will (`pack_pending`).
             pending.terrain || pack.is_some_and(|p| p.has_terrain()),
-            // One of Sunrise's own packs with `[shadow]` draws from the same lists (`shadow_view`).
-            pending.shadow || pack.is_some_and(|p| p.has_shadow()) || self.native_shadow(),
+            pending.shadow || pack.is_some_and(|p| p.has_shadow()),
         );
         if split == self.translucent_arena.is_some() {
             return;
@@ -1298,9 +1299,6 @@ impl Renderer {
                 block_entities |= self.block_entities.remove(&key);
                 self.block_entity_section_revisions.remove(&key);
                 self.block_entity_membership_revisions.remove(&key);
-                if self.light_blocks.remove(&key) {
-                    self.light_revision += 1;
-                }
                 self.section_uploaded.remove(&key);
                 if retiring {
                     // Distant tiles still leave its column out: drawn until they don't.
@@ -1338,9 +1336,6 @@ impl Renderer {
         if self.block_entities.len() != before {
             self.block_entity_revision = next_block_entity_revision();
         }
-        let before = self.light_blocks.len();
-        self.light_blocks.retain(kept);
-        self.light_revision += (before - self.light_blocks.len()) as u64;
         self.section_uploaded.retain(|key, _| kept(key));
         let released = self.sections.remove_columns(&gone);
         self.release_meshes(released);

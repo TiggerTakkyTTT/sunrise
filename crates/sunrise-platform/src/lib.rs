@@ -38,6 +38,10 @@ pub mod world {
 #[cfg(feature = "server-files")]
 pub use sunrise_server_files as server_files;
 
+/// Online account lookups and Minecraft Services public-key fetches over HTTPS (`sunrise-server-profiles-http`).
+#[cfg(feature = "server-files")]
+pub use sunrise_server_profiles_http as server_profiles_http;
+
 /// `java.util.Properties` and the JDK's date text, for the files a server keeps in that format.
 #[cfg(feature = "server-files")]
 pub use sunrise_java_properties as java_properties;
@@ -78,6 +82,11 @@ pub mod lang {
 /// Rows a crate adds to the Mods screen (docs/layers.md, "Platform registries").
 pub mod mod_rows {
     pub use sunrise_hooks::mod_rows::{Row, register};
+}
+
+/// Vanilla's own item catalogs, as the engine loaded them (docs/layers.md, "Item catalog").
+pub mod items {
+    pub use sunrise_hooks::items::creative_order;
 }
 
 /// Proxy selection and connection pooling for HTTP requests to caller-supplied URLs.

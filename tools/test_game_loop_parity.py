@@ -8,10 +8,12 @@ all driven with identical synthetic input and time sequences."""
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 
 def timer_cases(rng):
@@ -154,7 +156,7 @@ def main():
              'FramerateLimiter and vsync present-mode selection are covered by Rust unit tests only.')
     harness.differential(
         'rust-game-loop-parity', 'VanillaGameLoopOracle', 'game_loop_probe', make_cases, scope,
-        sources=[lab.ROOT / 'crates/sunrise-client/src/clock.rs']
+        sources=[lab.ROOT / 'crates/sunrise-sim/src/clock.rs']
         + [lab.ROOT / f'crates/sunrise-client-input/src/{name}.rs' for name in ('mouse', 'window', 'keymapping')])
 
 

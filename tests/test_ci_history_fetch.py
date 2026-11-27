@@ -1,5 +1,4 @@
 """Execute both gate history-fetch steps with controlled Git/network results, and the slot mirror with real Git."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,12 +8,14 @@ import sys
 import tempfile
 import unittest
 
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 
 
 def steps():
-    import yaml
     workflow = yaml.load((ROOT / ".github/workflows/dyna-ci.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
     for job, name in [("changes", "Fetch this commit's history for selection"),
                       ("verify-static", "Fetch this commit's history")]:
@@ -22,7 +23,6 @@ def steps():
 
 
 @unittest.skipIf(os.name == "nt", "executes Bash and executable test doubles")
-@unittest.skipIf(importlib.util.find_spec("yaml") is None, "requires PyYAML")
 class HistoryFetchTests(unittest.TestCase):
     def test_bounded_fetch_retries_and_fails_closed(self):
         for job, name, step in steps():

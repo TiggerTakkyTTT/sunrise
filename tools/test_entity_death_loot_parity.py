@@ -18,11 +18,11 @@ from pathlib import Path
 import platform
 import random
 import subprocess
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 # Living entity types with an entity loot table that the corpus skips: players
 # and stands are not mobs, the dragon dies over 200 ticks, and the giant is
@@ -132,7 +132,7 @@ def main():
     types = sorted('minecraft:' + p.stem for p in tables.glob('*.json') if p.stem not in SKIPPED)
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaEntityDeathLootOracle.java'
     sources = [oracle, Path(__file__), lab.ROOT / 'crates/sunrise-client/examples/probe/entity_death_loot_fixture.rs',
-               lab.ROOT / 'crates/sunrise-client/src/mobs/drops.rs', lab.ROOT / 'crates/sunrise-client/src/mobs/enderman.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/mobs/drops.rs', lab.ROOT / 'crates/sunrise-sim/src/mobs/enderman.rs',
                lab.ROOT / 'crates/sunrise-world/src/loot.rs']
     tested = base.source_hashes(sources)
     inputs = build / 'inputs.txt'

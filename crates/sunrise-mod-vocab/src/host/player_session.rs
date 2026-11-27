@@ -38,12 +38,14 @@ pub trait PlayerSessionBackend {
     /// Displaced online players keep their profile. An offline-mode player has no
     /// properties. None for a stale or unavailable player.
     fn player_profile(&self, player: PlayerRef) -> Option<GameProfile<'_>>;
-    /// Side: server.
+    /// Side: both.
     /// The player's permission level, 0 to 4 (`Player.permissions()`,
     /// `PlayerList.getProfilePermissions`): an op's level, the
     /// single-player owner's 4 with commands allowed. A displaced connected
     /// player keeps their permission level even while their body is unavailable.
-    /// None for a stale or unavailable player.
+    /// On a client, the local player's level as the server last sent it (entity events 24 to
+    /// 28, `LocalPlayer.setPermissions`), so a mod can tell whether a command it would send
+    /// is allowed; None there for any other player. None for a stale or unavailable player.
     fn player_permission_level(&self, player: PlayerRef) -> Option<u8>;
     /// Side: server.
     /// `MinecraftServer.isSingleplayerOwner`: whether the player is the integrated server's

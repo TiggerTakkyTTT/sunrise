@@ -31,14 +31,10 @@ import sys
 import tempfile
 import time
 
-try:
-    from . import lab, test_locator_bar_parity as locator, test_rust_parity as base
-    from .test_dedicated_server_parity import Server
-except ImportError:
-    import lab
-    import test_locator_bar_parity as locator
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_locator_bar_parity as locator, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server
 
 NAME = 'bounced-projectile-tick-order-parity'
 TICKS = 5

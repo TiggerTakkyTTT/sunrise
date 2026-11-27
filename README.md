@@ -10,7 +10,10 @@
   <a href="#download"><b>Download</b></a> ·
   <a href="https://playsunrise.net/docs/"><b>Docs</b></a> ·
   <a href="ROADMAP.md"><b>Roadmap</b></a> ·
-  <a href="#contributing"><b>Contributing</b></a>
+  <a href="#contributing"><b>Contributing</b></a> ·
+  <a href="https://x.com/sunriserust"><b>X</b></a> ·
+  <a href="https://www.instagram.com/sunrise.rust/"><b>Instagram</b></a> ·
+  <a href="https://www.youtube.com/@playsunrise"><b>YouTube</b></a>
 </p>
 
 <p align="center">
@@ -86,7 +89,7 @@ Get **the Sunrise launcher** from [playsunrise.net/download](https://playsunrise
 - **Content mods** (`.smod`): blocks, items, recipes, loot, models and textures, with no code.
 - **Native mods** (also `.smod`, whose manifest has a `[native]` table): Rust that the launcher compiles into the game for you, with nothing to install.
 - **Java mods** (Fabric, NeoForge, Forge) don't run: Sunrise has no Java. The launcher carries over the data and assets inside their jars, and imports modpacks (`.mrpack`, CurseForge zips, Prism instances) the same way ([modpacks](https://playsunrise.net/docs/modpacks)).
-- **Shader packs**: Iris/OptiFine-format packs (`shaders/` folders) and Sunrise's own WGSL packs, under Sunrise Graphics → Shaders → Shader Packs ([pack format](docs/shaders.md)).
+- **Shader packs**: Iris/OptiFine-format packs (`shaders/` folders), under Sunrise Graphics → Shaders → Shader Packs ([pack format](docs/shaders.md)).
 
 Mods are off by default: a fresh install plays exactly like vanilla 26.3. The launcher's Mods page browses Sunrise's registry and Modrinth. [Mods](https://playsunrise.net/docs/mods) · [make a mod](docs/modding/src/introduction.md).
 

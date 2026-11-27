@@ -1,7 +1,7 @@
 //! Untextured, unlit geometry submitted for one world view.
 
 /// Whether world geometry is hidden by nearer world surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 // no wire: local depth policy for world geometry.
 pub enum WorldDepth {
@@ -321,10 +321,15 @@ impl RenderableSection {
 pub struct WorldRenderView<'a> {
     /// Frame camera state (position, eye height, rotation, projection and dimension).
     pub camera: &'a crate::Camera,
+    /// The camera entity's interpolated eye position (`Entity.getEyePosition`), or `None` when
+    /// no camera entity exists (screen scenes, title screen).
+    pub camera_entity_eye: Option<[f64; 3]>,
     /// World partial tick (`alpha`), distinct from `camera.partial_tick` while paused or frozen.
     pub partial_tick: f32,
     /// Level game time in ticks.
     pub game_time: i64,
+    /// The client's animation clock in ticks (`BlockEntityDrawContext::animation_time`).
+    pub animation_time: f64,
     /// Whether vanilla 26.3 order-independent transparency (improved transparency) is active this frame.
     pub improved_transparency: bool,
     /// Visible chunk sections in the current view (NeoForge 26.3 `IRenderableSection` list).
@@ -334,15 +339,19 @@ impl<'a> WorldRenderView<'a> {
     /// Borrow the frame camera and visible sections for one world view.
     pub fn new(
         camera: &'a crate::Camera,
+        camera_entity_eye: Option<[f64; 3]>,
         partial_tick: f32,
         game_time: i64,
+        animation_time: f64,
         improved_transparency: bool,
         sections: &'a [RenderableSection],
     ) -> Self {
         Self {
             camera,
+            camera_entity_eye,
             partial_tick,
             game_time,
+            animation_time,
             improved_transparency,
             sections,
         }
@@ -351,6 +360,47 @@ impl<'a> WorldRenderView<'a> {
     /// Camera position in world-space blocks.
     pub fn camera_position(&self) -> [f64; 3] {
         self.camera.position
+    }
+
+    /// Camera yaw, pitch and roll in degrees, after camera angle hooks.
+    pub fn camera_rotation(&self) -> [f32; 3] {
+        [self.camera.yaw, self.camera.pitch, self.camera.roll]
+    }
+
+    /// Unit vector pointing in the camera's forward look direction (`Camera.getLookVector`),
+    /// derived from `camera.yaw`, `camera.pitch` and `camera.roll` matching vanilla 26.3's
+    /// `Camera.setRotation`.
+    pub fn camera_forward(&self) -> [f32; 3] {
+        camera_basis_transform(
+            self.camera.yaw,
+            self.camera.pitch,
+            self.camera.roll,
+            [0.0, 0.0, -1.0],
+        )
+    }
+
+    /// Unit vector pointing in the camera's local up direction (`Camera.getUpVector`),
+    /// derived from `camera.yaw`, `camera.pitch` and `camera.roll` matching vanilla 26.3's
+    /// `Camera.setRotation`.
+    pub fn camera_up(&self) -> [f32; 3] {
+        camera_basis_transform(
+            self.camera.yaw,
+            self.camera.pitch,
+            self.camera.roll,
+            [0.0, 1.0, 0.0],
+        )
+    }
+
+    /// Unit vector pointing in the camera's local left direction (`Camera.getLeftVector`),
+    /// derived from `camera.yaw`, `camera.pitch` and `camera.roll` matching vanilla 26.3's
+    /// `Camera.setRotation`.
+    pub fn camera_left(&self) -> [f32; 3] {
+        camera_basis_transform(
+            self.camera.yaw,
+            self.camera.pitch,
+            self.camera.roll,
+            [-1.0, 0.0, 0.0],
+        )
     }
 
     /// Camera-relative model-view matrix in column-major order.
@@ -362,6 +412,63 @@ impl<'a> WorldRenderView<'a> {
     pub fn projection_matrix(&self) -> [f32; 16] {
         self.camera.projection
     }
+}
+
+/// Vanilla `Camera.setRotation` (`Quaternionf.rotationYXZ(PI - yaw, -pitch, -roll)`) applied to
+/// a local camera basis vector (`FORWARDS`, `UP`, `LEFT`), matching `sunrise-client-render::camera`
+/// and JOML's non-FMA trig paths.
+fn camera_basis_transform(yaw: f32, pitch: f32, roll: f32, v: [f32; 3]) -> [f32; 3] {
+    use sunrise_core::geometry::trig::DEG_TO_RAD;
+    const PI: f32 = std::f32::consts::PI;
+    const TAU: f32 = std::f32::consts::TAU;
+    const HALF_PI: f32 = std::f32::consts::FRAC_PI_2;
+
+    let joml_sin = |rad: f32| sunrise_core::jmath::sin(f64::from(rad)) as f32;
+    let joml_cos = |sin: f32, angle: f32| {
+        let cos = (1.0 - sin * sin).sqrt();
+        let a = angle + HALF_PI;
+        let mut b = a - (a / TAU) as i32 as f32 * TAU;
+        if f64::from(b) < 0.0 {
+            b += TAU;
+        }
+        if b >= PI { -cos } else { cos }
+    };
+
+    let angle_y = PI - yaw * DEG_TO_RAD;
+    let angle_x = -pitch * DEG_TO_RAD;
+    let angle_z = if roll == 0.0 { 0.0 } else { -roll * DEG_TO_RAD };
+    let sx = joml_sin(angle_x * 0.5);
+    let cx = joml_cos(sx, angle_x * 0.5);
+    let sy = joml_sin(angle_y * 0.5);
+    let cy = joml_cos(sy, angle_y * 0.5);
+    let sz = joml_sin(angle_z * 0.5);
+    let cz = joml_cos(sz, angle_z * 0.5);
+    let qx = cy * sx;
+    let qy = sy * cx;
+    let qz = sy * sx;
+    let qw = cy * cx;
+    let x = qx * cz + qy * sz;
+    let y = qy * cz - qx * sz;
+    let z = qw * sz - qz * cz;
+    let w = qw * cz + qz * sz;
+
+    let [vx, vy, vz] = v;
+    let xx = x * x;
+    let yy = y * y;
+    let zz = z * z;
+    let ww = w * w;
+    let xy = x * y;
+    let xz = x * z;
+    let yz = y * z;
+    let xw = x * w;
+    let zw = z * w;
+    let yw = y * w;
+    let k = 1.0 / (xx + yy + zz + ww);
+    [
+        (xx - yy - zz + ww) * k * vx + (2.0 * (xy - zw) * k * vy + 2.0 * (xz + yw) * k * vz),
+        2.0 * (xy + zw) * k * vx + ((yy - xx - zz + ww) * k * vy + 2.0 * (yz - xw) * k * vz),
+        2.0 * (xz - yw) * k * vx + (2.0 * (yz + xw) * k * vy + (zz - xx - yy + ww) * k * vz),
+    ]
 }
 
 #[cfg(test)]
@@ -503,7 +610,15 @@ mod tests {
             [[16.0, 64.0, -32.0], [32.0, 80.0, -16.0]],
             false,
         )];
-        let view = WorldRenderView::new(&camera, 0.5, 42, true, &sections);
+        let view = WorldRenderView::new(
+            &camera,
+            Some([1.0, 3.62, 3.0]),
+            0.5,
+            42,
+            100.25,
+            true,
+            &sections,
+        );
         dispatch_prepare_render_buffers(&Empty, &view, &mut Empty);
         dispatch_submit_custom_geometry(&Empty, &view, &mut Empty);
         assert_eq!(PREPARE_CALLS.load(Ordering::Relaxed), 1);
@@ -513,5 +628,63 @@ mod tests {
         dispatch_submit_custom_geometry(&Empty, &view, &mut Empty);
         assert_eq!(PREPARE_CALLS.load(Ordering::Relaxed), 1);
         assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn world_render_view_camera_basis_matches_vanilla_rotation_and_roll() {
+        let make = |yaw: f32, pitch: f32, roll: f32| Camera {
+            position: [1.0, 2.0, 3.0],
+            eye_height: 1.62,
+            partial_tick: 0.25,
+            yaw,
+            pitch,
+            roll,
+            fov_degrees: 70.0,
+            near: 0.05,
+            far: 128.0,
+            view: [0.0; 16],
+            projection: [0.0; 16],
+            dimension: "minecraft:overworld".into(),
+        };
+        let assert_vec = |got: [f32; 3], expected: [f32; 3]| {
+            for i in 0..3 {
+                assert!(
+                    (got[i] - expected[i]).abs() < 1e-5,
+                    "got {got:?}, expected {expected:?}"
+                );
+            }
+        };
+        // Yaw 0 faces south (+Z), up is +Y, left is east (+X).
+        let south = make(0.0, 0.0, 0.0);
+        let view = WorldRenderView::new(&south, Some([1.0, 3.62, 3.0]), 0.5, 42, 10.5, false, &[]);
+        let copied = view;
+        assert_eq!(copied.camera_rotation(), [0.0, 0.0, 0.0]);
+        assert_eq!(copied.camera_entity_eye, Some([1.0, 3.62, 3.0]));
+        assert_eq!(copied.animation_time, 10.5);
+        assert_vec(view.camera_forward(), [0.0, 0.0, 1.0]);
+        assert_vec(view.camera_up(), [0.0, 1.0, 0.0]);
+        assert_vec(view.camera_left(), [1.0, 0.0, 0.0]);
+
+        // Yaw 90 faces west (-X), up is +Y, left is south (+Z).
+        let west = make(90.0, 0.0, 0.0);
+        let view = WorldRenderView::new(&west, None, 0.0, 0, 0.0, false, &[]);
+        assert_vec(view.camera_forward(), [-1.0, 0.0, 0.0]);
+        assert_vec(view.camera_up(), [0.0, 1.0, 0.0]);
+        assert_vec(view.camera_left(), [0.0, 0.0, 1.0]);
+
+        // Pitch 90 looks straight down (-Y); up points south (+Z), left stays east (+X).
+        let down = make(0.0, 90.0, 0.0);
+        let view = WorldRenderView::new(&down, None, 0.0, 0, 0.0, false, &[]);
+        assert_vec(view.camera_forward(), [0.0, -1.0, 0.0]);
+        assert_vec(view.camera_up(), [0.0, 0.0, 1.0]);
+        assert_vec(view.camera_left(), [1.0, 0.0, 0.0]);
+
+        // Roll 90 clockwise about view axis: facing south (+Z), up tilts west (-X), left tilts up (+Y).
+        let rolled = make(0.0, 0.0, 90.0);
+        let view = WorldRenderView::new(&rolled, None, 0.0, 0, 0.0, false, &[]);
+        assert_eq!(view.camera_rotation(), [0.0, 0.0, 90.0]);
+        assert_vec(view.camera_forward(), [0.0, 0.0, 1.0]);
+        assert_vec(view.camera_up(), [-1.0, 0.0, 0.0]);
+        assert_vec(view.camera_left(), [0.0, 1.0, 0.0]);
     }
 }

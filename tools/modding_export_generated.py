@@ -6,8 +6,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-if __name__ == "__main__" and not __package__:
-    sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT))
 
 from tools import modding_hook_notes as notes, modding_sdk_tables as tables
 

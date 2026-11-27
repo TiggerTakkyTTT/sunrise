@@ -39,10 +39,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 WORK = lab.LOCAL / "shader-fuzz"
 

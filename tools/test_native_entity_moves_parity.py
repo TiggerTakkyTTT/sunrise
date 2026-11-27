@@ -7,10 +7,11 @@ import re
 import subprocess
 import tempfile
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, integration_env
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, integration_env
 
 
 def rows(path):
@@ -53,7 +54,7 @@ def main():
             env[key] = str(directory)
         with (build / 'rust.log').open('w') as output:
             subprocess.run([executable,
-                            'game::native_entity_moves::tests::move_boundaries_match_vanilla',
+                            'game::server_side::native_entity_moves::tests::move_boundaries_match_vanilla',
                             '--exact', '--test-threads=1', '--nocapture'], cwd=scratch, env=env,
                            stdout=output, stderr=subprocess.STDOUT, check=True, timeout=900)
         text = (build / 'rust.log').read_text()

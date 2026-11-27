@@ -18,11 +18,9 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 COMPONENT_TYPES = 122
 
@@ -247,7 +245,7 @@ def main():
     wire_log = build / 'tooltip-style-wire-test.log'
     with wire_log.open('w', encoding='utf-8') as log:
         result = subprocess.run(
-            ['cargo', 'test', '--locked', '-p', 'sunrise-client-lib', '--lib', '--', '--ignored', '--exact',
+            ['cargo', 'test', '--locked', '-p', 'sunrise-sim', '--lib', '--', '--ignored', '--exact',
              TOOLTIP_STYLE_WIRE_TEST],
             cwd=lab.ROOT, timeout=3600, stdout=log, stderr=subprocess.STDOUT,
             env={**os.environ, 'SUNRISE_TOOLTIP_STYLE_WIRE_WITNESS': str(witness.resolve())},

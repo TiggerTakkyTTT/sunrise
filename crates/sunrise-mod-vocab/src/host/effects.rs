@@ -18,6 +18,24 @@ pub trait EffectsClientHost {
     /// `namespace:path`. API @API:muffle_sounds@.
     fn muffle_sounds(&mut self, amount: f32, lowpass: f32, ticks: u32, exempt: &[&str]) -> bool;
     /// Side: client.
+    /// Scales `source`'s volume by `scale` (0 to 1, clamped), the sounds playing now included
+    /// (music, a record), as the Options volume sliders update live channels
+    /// (`SoundEngine.updateCategoryVolume`). It multiplies the player's slider, which keeps its
+    /// own value and is never saved with the scale; the master's scale scales every source.
+    /// 1 undoes it. One scale per source for all mods: the last call wins. A mod may lower the
+    /// volume while the window is in the background, for example.
+    fn set_sound_source_scale(&mut self, source: SoundSource, scale: f32);
+    /// Side: client.
+    /// A mod's scale over `source`'s volume (`set_sound_source_scale`), 1 when none is set. For
+    /// a source other than the master, the master's scale is included.
+    fn sound_source_scale(&self, source: SoundSource) -> f32;
+    /// Side: client.
+    /// Pauses every playing sound, music and the interface's included, until `false` resumes
+    /// them (`Channel.pause`, `unpause`); a pause the game holds itself (its pause menu) stays
+    /// held. It takes effect on the next client tick, as the game's own pause does. New sounds
+    /// still start while paused. One switch for all mods: the last call wins.
+    fn set_sounds_paused(&mut self, paused: bool);
+    /// Side: client.
     /// Plays `sound` for this player only (`SoundPlay`'s event: `minecraft:ui.button.click`,
     /// or a mod's own from its `assets/<id>/sounds.json`): nothing is sent to the server, and
     /// other players don't hear it. It takes `&self`, so a screen, key or mouse hook can play

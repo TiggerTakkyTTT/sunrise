@@ -57,7 +57,7 @@ doesn't know is refused (exit 2).
 | `package` | `runtime`, `api` and `engine`: the folders the SDK's three slices for this host and side are unpacked into. The API route reads only `runtime` and `api`. |
 | `mods` | A native mod's folder, or a folder of mod folders, read in path order. Directories without `sunrise-mod.toml` are not packages. The [package reader](../manifest.md) validates any manifest it finds; only native packages are compiled. A caller leaves a native mod out by not putting it there. |
 | `target` | `client` (the game) or `server` (the headless engine). |
-| `registry` | Optional. `true` or `false` answers in advance whether registry crates may be added (their build scripts and procedural macros run while compiling). Absent, the tool asks with a `consent` event. |
+| `registry` | Optional. `true` or `false` answers in advance whether registry crates may be added and the mods' build scripts run (the build scripts, the mods' own among them, and procedural macros run while compiling). Absent, the tool asks with a `consent` event. |
 | `mixins_from_source` | Optional, `false` by default. Builds horizon-mixins from its pinned source instead of downloading its release. |
 
 ## The events
@@ -67,9 +67,9 @@ Each line is an object whose `event` names it.
 | Event | Fields | When |
 |---|---|---|
 | `mod` | `id`, `done`, `total` | A mod's own library starts compiling, `done` of `total`. Only the API and direct rustc routes emit this event. |
-| `consent` | `added_crates`, `build_scripts`, `proc_macros` | Registry crates need a yes and the plan gave no `registry`. The caller answers with one line on standard input: `true` agrees, anything else refuses. |
+| `consent` | `added_crates`, `build_scripts`, `proc_macros` | Registry crates or build scripts, the mods' own included, need a yes and the plan gave no `registry`. The caller answers with one line on standard input: `true` agrees, anything else refuses. |
 | `built` | `route`, `binary`, `libraries`, `records`, `mods`, `internals`, `mixins`, `used` | The executable and the libraries to install beside it, in load order; `records` is each library's identity, the build record's `libraries`: one row per library, the patch library included, whose `identity` is `<build id> <mod id> <version> <rustc release> <source> <dependencies> unwind`: `source` is the digest of the mod's files (`none` for the patch library), followed, when the build compiles crates.io dependencies, by `+` and the digest of the crates.io packages the library is compiled with as the build resolved them (name, version, source and the features of each compilation unit, target and host apart), since one build unifies them across all its mods; `dependencies` names each native mod the library links as `<id>=<SHA-256 of its identity>`, sorted and joined by `,` (`none` when it links none), and `unwind` is the panic strategy the library's entry reports (the loader refuses `abort`). The loader refuses, before loading any library, one whose file does not carry the identity its row names, or whose dependencies field doesn't match the identities installed beside it; `route` is `prebuilt-api` or `prebuilt`, as the record names it; `mods` is the compiled mods in dependency order. `internals` has each compiled mod's `[[internals]]` by mod id, every absent `hash` taken from the SDK's catalog, as the build record keeps them; `mixins` is the horizon-mixins revision the build ran; `used` lists the kept folders and files under `work` it used, for a caller's cache to count as used. |
-| `failed` | `error`, `blame`, `used` | Why it did not build, as the build log ends with it. `blame` is `null`, or the mod the error is that mod's own and how: `{"mod": id, "kind": "compile" \| "build-script" \| "features"}`, the one a caller leaves out next time. `used` as for `built`. |
+| `failed` | `error`, `blame`, `used` | Why it did not build, as the build log ends with it. `blame` is `null`, or the mod the error is that mod's own and how: `{"mod": id, "kind": "compile" \| "features"}`, the one a caller leaves out next time. `used` as for `built`. |
 
 `mod` is optional per-mod progress, not per-crate Cargo progress. For registry builds, read `build.log` for
 compiler diagnostics and use `built` or `failed` together with the subprocess exit status to determine the outcome.
@@ -145,10 +145,12 @@ source and caches), `toolchain` (as for `native-build`) and `mods` (the mod's fo
 | `native-lock` | `update`, optional: resolve again when the mod has a lock | `{"lock": path}`: the mod's registry dependencies pinned in its `Cargo.lock`, starting from the versions the pinned game locks | `lock` |
 
 `native-lock` reads the pinned game's `Cargo.lock`, kept as `game-lock/<commit>.lock` in `work` and downloaded from
-that commit of the game's repository the first time; with no network, put the file there. It creates `work` when it
-is missing. A shared crates.io package keeps the game's version on the same semver line. If a direct or transitive
-requirement excludes that version or requests a feature it lacks, `native-lock` refuses without replacing the mod's
-`Cargo.lock`.
+that commit of the game's repository the first time; with no network, put the original file there. It creates `work`
+when it is missing. The same 16 MiB limit applies to the kept and downloaded copies. Fully pinned Git packages in
+that game lock are treated as game-local packages, not as sources for Cargo to fetch. This does not allow Git
+sources in a mod's lock. A shared crates.io package keeps the game's version on the same semver line. If a direct or
+transitive requirement excludes that version or requests a feature it lacks, `native-lock` refuses without replacing
+the mod's `Cargo.lock`.
 
 `native-discover` checks the mod against the pinned game's source with the deprecation lint forced on the mod alone;
 it runs the tool itself as Cargo's rustc wrapper for that.

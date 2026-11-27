@@ -4,10 +4,12 @@ import itertools
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 
 def corpus():
@@ -56,9 +58,9 @@ def main():
         "item may be tried afterward. "
         "Game-mode side effects and world simulation are controlled fixtures.",
         sources=[lab.ROOT / "crates/sunrise-client-input/src/interaction_input.rs",
-                 lab.ROOT / "crates/sunrise-client/src/game/network/remote/mod.rs",
-                 lab.ROOT / "crates/sunrise-client/src/game/network/remote/interaction_actions.rs",
-                 lab.ROOT / "crates/sunrise-client/src/game/items/hand.rs",
+                 lab.ROOT / "crates/sunrise-gameplay-common/src/game/network/remote/mod.rs",
+                 lab.ROOT / "crates/sunrise-gameplay-common/src/game/network/remote/interaction_actions.rs",
+                 lab.ROOT / "crates/sunrise-client-gameplay/src/game/items/hand.rs",
                  lab.ROOT / "mods/sunrise/src/test/java/dev/sunriselab/parity/ParityData.java"])
 
 

@@ -51,11 +51,13 @@ empty tag has no members and membership is `Some(false)`. Lookup does not
 allocate or do I/O. Reload and sync publish a new snapshot, so one callback
 cannot mix generations.
 
-`RegistrationContext` does not resolve `TagKey`s. Resolve the name with
-`r.tag_key("minecraft:logs")` on the `Registrar` in `Hooks::register` and store the
-returned key in the registered kind. The key does not need the tag to have members yet.
-A hook with a `Host`, such as `tags_updated`, can resolve the same key with
-`host.tags().key(&id)`. Keep the key across reloads; only the generation's membership changes.
+`RegistrationContext` does not resolve `TagKey`s. Resolve a dynamic name with
+`r.tag_key("minecraft:logs")` on the `Registrar` in `Hooks::register`, bind it to
+items with `.typed()`, and store the resulting `TagKey<ItemKey>` in the registered
+kind (or use a typed built-in constant from `mod_api::tags::c::items`). The key does
+not need the tag to have members yet. A hook with a `Host`, such as `tags_updated`,
+can resolve the same key with `host.tags().key(&id)` followed by `.typed()`. Keep
+the key across reloads; only the generation's membership changes.
 
 `default_remainder(cell)` reads that cell's original, **pre-take** stack and runs
 the caller's existing default rule, including `ItemPart::crafting_remainder` on

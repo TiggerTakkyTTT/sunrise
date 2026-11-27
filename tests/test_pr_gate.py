@@ -6,13 +6,16 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 import unittest
 from pathlib import Path
 
+from tests.os_support import needs_runner_shell
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
+
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools/ci/vendor/pyyaml-6.0.3.zip"))
 spec = importlib.util.spec_from_file_location("pr_gate", ROOT / "tools/ci/pr_gate.py")
 pr_gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pr_gate)
@@ -149,7 +152,7 @@ class WorkflowTests(unittest.TestCase):
         # The control: the same expressions do reach our runners for a trusted head.
         trusted = {"rust_required": "true", "forced_github": "false", "hosted_label": "",
                    "self_hosted": "true", "trusted": "true", "heavy": "true"}
-        self.assertEqual(self.runs_on("verify", trusted, "all"), "dyna-large")
+        self.assertEqual(self.runs_on("verify", trusted, "all"), "dyna-xlarge")  # dyna-large again once sunrise#5839 lands
         self.assertEqual(self.runs_on("verify-static", trusted, "all"), "dyna-medium")
 
     def test_a_pull_request_outside_the_gate_gets_githubs_runner_for_verify_static(self):
@@ -160,8 +163,11 @@ class WorkflowTests(unittest.TestCase):
             with self.subTest(rust=rust, label=label, pool=pool):
                 self.assertEqual(self.runs_on("verify-static", outputs, pool), "ubuntu-latest")
 
-    def test_the_runner_script_hears_the_gates_trust(self):
+    def test_the_runner_script_is_given_the_gates_trust(self):
         self.assertIn("SAME_REPO: ${{ steps.gate.outputs.trusted || (", self.job("changes"))
+
+    @needs_runner_shell
+    def test_the_runner_script_hears_the_gates_trust(self):
         lease = str(int(time.time()) + 3600)
         for same_repo, expected in (("false", "self_hosted=false"), ("true", "self_hosted=true")):
             env = {"PATH": os.environ["PATH"], "ENABLED": "true", "SAME_REPO": same_repo,
@@ -186,8 +192,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("|| needs.changes.outputs.trusted != 'true' && 'github' ||", static)
 
     def test_windows_jobs_run_daily_and_by_dispatch_only(self):
-        import yaml
-
         workflow = yaml.safe_load((ROOT / ".github/workflows/windows-runtime-leases.yml").read_text())
         # GitHub's Windows runners: no push, pull request, rollup or sync waits on them; the daily run calls it.
         self.assertEqual(set(workflow[True]), {"workflow_call", "workflow_dispatch"})
@@ -203,12 +207,14 @@ class WorkflowTests(unittest.TestCase):
                     body = re.search(rf"^  {name}:\n(.*?)(?=^  [a-z0-9_-]+:\n|\Z)", text, re.M | re.S)[1]
                     self.assertIn(f"if: {SAME_REPO}\n", body)
 
-    def test_a_pull_request_builds_the_mod_tool_for_linux_only(self):
-        import yaml
-
+    def test_the_mod_tool_build_is_only_called(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         # Every other archive is the daily run's (and a tag's): a pull request push holds no macOS or Windows runner.
         self.assertEqual(set(workflow[True]), {"workflow_call"})
+
+    @needs_runner_shell
+    def test_a_pull_request_builds_the_mod_tool_for_linux_only(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         step = next(step for step in workflow["jobs"]["plan"]["steps"] if step.get("id") == "platforms")
         def targets(event):
             import tempfile
@@ -222,8 +228,6 @@ class WorkflowTests(unittest.TestCase):
 
 
     def test_only_a_version_tag_push_publishes_the_mod_tool_archives(self):
-        import yaml
-
         build = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod-build.yml").read_text())
         entry = yaml.safe_load((ROOT / ".github/workflows/cargo-sunrise-mod.yml").read_text())
         daily = yaml.safe_load((ROOT / ".github/workflows/daily.yml").read_text())

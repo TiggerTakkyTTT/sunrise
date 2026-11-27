@@ -194,3 +194,11 @@ metadata fails encoding.
 The escape preserves explicit zero damage, default-component removals and opaque component
 NBT. It does not apply resident maxima or materialize prototype defaults. Those remain the
 responsibility of the metadata service and game write boundary respectively.
+
+## JSON serialization
+
+`host.item_to_json(Option<&ItemStack>)` and `host.item_from_json(&str)` encode and decode
+optional stacks with vanilla's `ItemStack.OPTIONAL_CODEC` over `JsonOps` on either side:
+`None` encodes as `{}`, and a non-empty stack encodes as `{"id","count","components":{...}}`
+with prototype-equal defaults elided and explicit removals written `"!id":{}`. Errors return
+`ItemJsonError`, naming the failing field when a top-level field or component key is invalid.

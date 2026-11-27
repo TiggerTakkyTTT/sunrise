@@ -1,6 +1,7 @@
 //! LivingEntity water/lava travel and fluid escape/buoyancy velocity updates.
 use crate::living_air::{LivingAirWorld, TravelInput, move_relative};
 use crate::move_gate::MoveGate;
+use crate::travel::TravelMode;
 use sunrise_core::geometry::Vec3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +81,8 @@ pub fn travel_in_water<W: LivingFluidWorld>(
         slowdown = 0.96;
     }
     let input_changed = move_relative(world, input, speed)?;
-    world.move_self(gate, world.velocity())?;
+    let made = world.move_self(gate, world.velocity())?;
+    world.travel_moved(TravelMode::Water, made)?;
     let mut velocity = world.velocity();
     if world.horizontal_collision() && world.on_climbable()? {
         velocity.y = 0.2;
@@ -104,7 +106,8 @@ pub fn travel_in_lava<W: LivingFluidWorld>(
     old_y: f64,
 ) -> Result<bool, W::Error> {
     let input_changed = move_relative(world, input, 0.02)?;
-    world.move_self(gate, world.velocity())?;
+    let made = world.move_self(gate, world.velocity())?;
+    world.travel_moved(TravelMode::Lava, made)?;
     let height = world.fluid_height(TravelFluidTag::Lava)?;
     if height <= world.fluid_jump_threshold()? {
         let velocity = world.velocity();

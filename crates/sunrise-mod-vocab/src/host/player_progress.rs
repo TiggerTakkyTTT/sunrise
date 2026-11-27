@@ -1,4 +1,4 @@
-//! The `player_progress` area: statistics and criteria triggers. Host method declarations; access defaults and game forwarders are generated.
+//! The `player_progress` area: statistics, advancement progress and criteria triggers. Host method declarations; access defaults and game forwarders are generated.
 #![allow(unused_variables)]
 use crate::*;
 /// The handles' reads of the `player_progress` area, implemented by the game and reached through [`Backend`].
@@ -18,12 +18,84 @@ pub trait PlayerProgressBackend {
     /// A reachable player without counters has an empty `stats` map. Returns `None` on
     /// a client or for a stale or unavailable player.
     fn player_statistics(&self, player: PlayerRef) -> Option<String>;
+    /// Side: server.
+    /// An owned snapshot of the player's live progress on advancement `id`, mirroring
+    /// `ServerPlayer.getAdvancements().getOrStartProgress(holder)`.
+    ///
+    /// A loaded advancement the player has never touched answers with every criterion
+    /// unobtained (`obtained_at: None`), `completed_requirements == 0`, and `done == false`.
+    /// Reads live state rather than the save file, including inside
+    /// `player_advancement_progress` and `player_advancement_done` (after the criterion
+    /// change) and when a nested player turn has displaced the player.
+    ///
+    /// Returns `None` for an unknown advancement id, a stale, offline or unavailable
+    /// player, or a client host, and until the engine has loaded the player's
+    /// advancements, which happens by the player's first tick.
+    fn player_advancement_progress(
+        &self,
+        player: PlayerRef,
+        id: &Identifier,
+    ) -> Option<AdvancementProgress>;
 }
 /// The handles' writes of the `player_progress` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
 #[doc(hidden)]
 #[sunrise_mod_api_macros::host_area]
 pub trait PlayerProgressBackendMut {
+    /// Side: server.
+    /// Awards an advancement or one of its criteria to `player`, mirroring
+    /// `PlayerAdvancements.award(holder, criterion)` (and `AdvancementCommands.Action.GRANT`
+    /// when `criterion` is `None`).
+    ///
+    /// With `Some(name)`, grants that criterion. With `None`, grants every remaining
+    /// criterion if the advancement is not yet done. Routes through the same engine path
+    /// as triggers and `/advancement grant`, so completion grants rewards, announces in chat
+    /// according to the advancement's display and `show_advancement_messages`, shows the
+    /// toast, fires `player_advancement_progress` and `player_advancement_done`, and queues
+    /// the client's progress update.
+    ///
+    /// Inside a transaction, validation runs immediately and the returned `bool` reports
+    /// whether the change would alter current progress, while the change itself—along with
+    /// its rewards, messages, hooks and client updates—happens when the outermost
+    /// transaction commits and is dropped if it aborts; until then reads see the old
+    /// progress.
+    ///
+    /// Returns `Ok(true)` when progress changed (or would change inside a transaction) and
+    /// `Ok(false)` when nothing changed (such as an already-obtained criterion or an
+    /// already-done advancement with `None`). Refuses clients (`NotServer`), stale, offline,
+    /// dead, displaced or unreachable players (`PlayerUnavailable`), unknown advancements
+    /// (`UnknownAdvancement`), and unknown criterion names (`UnknownCriterion`).
+    fn player_award_advancement(
+        &mut self,
+        player: PlayerRef,
+        id: &Identifier,
+        criterion: Option<&str>,
+    ) -> Result<bool, AdvancementError>;
+    /// Side: server.
+    /// Revokes an advancement or one of its criteria from `player`, mirroring
+    /// `PlayerAdvancements.revoke(holder, criterion)` (and `AdvancementCommands.Action.REVOKE`
+    /// when `criterion` is `None`).
+    ///
+    /// With `Some(name)`, revokes that criterion. With `None`, revokes every obtained
+    /// criterion. Routes through the same engine path as `/advancement revoke`, firing
+    /// `player_advancement_progress` for each revoked criterion and queueing the client's
+    /// progress update.
+    ///
+    /// Inside a transaction, validation runs immediately and the returned `bool` reports
+    /// whether the change would alter current progress, while the change itself—along with
+    /// its messages, hooks and client updates—happens when the outermost transaction
+    /// commits and is dropped if it aborts; until then reads see the old progress.
+    ///
+    /// Returns `Ok(true)` when progress changed (or would change inside a transaction) and
+    /// `Ok(false)` when nothing was obtained. Refuses clients (`NotServer`), stale, offline,
+    /// dead, displaced or unreachable players (`PlayerUnavailable`), unknown advancements
+    /// (`UnknownAdvancement`), and unknown criterion names (`UnknownCriterion`).
+    fn player_revoke_advancement(
+        &mut self,
+        player: PlayerRef,
+        id: &Identifier,
+        criterion: Option<&str>,
+    ) -> Result<bool, AdvancementError>;
     /// Side: server.
     /// Fires the mod's criteria trigger `trigger` (`mymod:pipe_connected`)
     /// for `player`: vanilla's

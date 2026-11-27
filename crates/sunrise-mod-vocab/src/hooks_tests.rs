@@ -2,6 +2,26 @@ use super::*;
 use crate::testing::FakeHost;
 
 #[test]
+fn a_clip_with_no_game_behind_the_host_is_a_stale_level() {
+    struct NoWorld;
+    impl Host for NoWorld {}
+    mod_api::impl_host_areas!(NoWorld);
+
+    let level = LevelRef::new(WorldEpoch::new(1), DimensionKey::OVERWORLD);
+    assert_eq!(
+        level.clip(
+            &NoWorld,
+            [0.0, 64.0, 0.0],
+            [4.0, 64.0, 0.0],
+            ClipBlock::Collider,
+            ClipFluid::None,
+            CollisionContext::Empty,
+        ),
+        Err(ClipError::StaleLevel)
+    );
+}
+
+#[test]
 fn resident_visitors_refuse_without_calling_a_listener_when_the_backend_is_absent() {
     struct NoWorld;
     impl Host for NoWorld {}
@@ -984,6 +1004,15 @@ fn menu_slot_boxes_take_a_client_host(
     menu.slot_boxes(host)
 }
 
+/// Compile-only: a client mod reads the creative catalog's cells through its menu handle.
+#[allow(dead_code)]
+fn menu_creative_catalog_takes_a_client_host(
+    host: &dyn ClientHost,
+    menu: MenuRef,
+) -> Option<Vec<([f32; 4], Option<ItemStack>)>> {
+    menu.creative_catalog(host)
+}
+
 /// Compile-only: the world data, tick, sky and sight queries as a mod calls them, the reads on any
 /// host and the writes (which move the level's random or its saved data) on a server host.
 #[allow(dead_code)]
@@ -1000,6 +1029,14 @@ fn world_data_and_tick_queries_take_their_hosts(
         });
     let _: Option<bool> = level.can_see_sky(read, [0, 64, 0]);
     let _: Option<bool> = level.line_of_sight(read, [0.0, 65.0, 0.0], [8.0, 65.0, 0.0]);
+    let _: Result<ClipOutcome, ClipError> = level.clip(
+        read,
+        [0.0, 65.0, 0.0],
+        [8.0, 65.0, 0.0],
+        ClipBlock::Collider,
+        ClipFluid::None,
+        CollisionContext::Empty,
+    );
     let _: bool = level.set_respawn_data(server, [0, 64, 0], 90.0, 0.0);
     let _: bool = level.set_map_data(server, 0, &[0; 128 * 128]);
     let _: bool = level.block_tick(server, [0, 64, 0]);
@@ -1096,8 +1133,9 @@ fn level_queries_take_their_hosts(
 fn entity_queries_take_a_shared_host(read: &dyn Host, entity: EntityRef) {
     let _: Option<[f64; 3]> = entity.up_vector(read);
     let _: Option<[i32; 3]> = entity.on_block(read);
-    let _: Option<ClipHit> = entity.pick(read, 4.5);
+    let _: Option<ClipHit> = entity.pick(read, 4.5, true);
     let _: Option<bool> = entity.is_multipart(read);
+    let _: Option<ItemStack> = entity.pick_result(read);
     use core::ops::ControlFlow;
     let _: Result<ControlFlow<()>, EntityReadError> =
         entity.visit_parts(read, &mut |_: EntityRef| ControlFlow::Break(()));

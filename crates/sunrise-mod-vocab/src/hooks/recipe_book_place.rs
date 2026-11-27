@@ -38,13 +38,22 @@ pub trait Hooks {
     /// the callback's nested transaction and discards its `placement`. Only a panic
     /// disables the callback for the session, naming the mod in logs and error
     /// toasts. When no part listens, the click is refused.
+    ///
+    /// On the player's own `InventoryMenu` (`minecraft:inventory`, vanilla's
+    /// `AbstractCraftingMenu.handlePlacement`) the game places a recipe itself unless a Part
+    /// attached to it listens here; the Parts then take the placement over, every mod's in mod
+    /// order. `Nothing` places nothing, which refuses the 2×2 grid; `Ghost` sends the ghost; and
+    /// `Grid` is accepted only as that grid (`width` and `height` 2, `slots` `[1, 2, 3, 4]`,
+    /// `clear` among them), which runs the game's own placement as a Java menu's
+    /// `super.handlePlacement` does. Any other `Grid` is refused with a warning and places
+    /// nothing.
     #[hook(
         dispatch = "api_carrier",
         side = "server",
         contract = "listen",
         scope = "menu",
         key = "menu",
-        version = 2,
+        version = 3,
         neoforge = "none (vanilla RecipeBookMenu.handlePlacement, which each menu overrides; no event)"
     )]
     fn recipe_book_place(

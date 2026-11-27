@@ -837,6 +837,21 @@ fn breaking_changes_come_first_and_notes_declare_them() {
 }
 
 #[test]
+fn a_stale_note_id_is_offered_the_changed_id_it_likely_meant() {
+    let old = functions(vec![function("visit_properties", "fn visit_properties()")]);
+    let new = functions(vec![function("visit_property", "fn visit_property()")]);
+    let d = diff(&old, &new);
+    // The same name under another record kind wins over a closer spelling.
+    assert_eq!(
+        d.nearest("method:visit_properties"),
+        Some("fn:visit_properties")
+    );
+    assert_eq!(d.nearest("fn:visit_propertes"), Some("fn:visit_properties"));
+    assert_eq!(d.nearest("fn:visit_propert"), Some("fn:visit_property"));
+    assert_eq!(d.nearest("behaviour:native_package_files"), None);
+}
+
+#[test]
 fn a_note_may_name_a_folded_member() {
     let old = types(vec![enumeration("Hand", true, &["Main"])]);
     let new = types(vec![enumeration("Hand", true, &["Main", "Off"])]);

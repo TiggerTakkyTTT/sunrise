@@ -51,7 +51,7 @@ impl FluidKey {
     /// Whether this fluid is in `tag` (`FluidState.is(TagKey)`), over `tags`'s current
     /// authoritative snapshot. An unknown tag is `Some(false)`; unavailable tags or mappings
     /// return `None`.
-    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey) -> Option<bool> {
+    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey<FluidKey>) -> Option<bool> {
         tags.fluid_in_tag(self, tag)
     }
     /// Whether this fluid and `other` are the same fluid (`Fluid.isSame`): a source and its
@@ -192,7 +192,7 @@ impl FluidState {
     /// Whether this state's fluid is in `tag` (`FluidState.is(TagKey)`), delegating through
     /// `self.fluid`. An unknown tag is `Some(false)`; unavailable tags or mappings return
     /// `None`.
-    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey) -> Option<bool> {
+    pub fn is_in_tag(self, tags: &dyn Tags, tag: TagKey<FluidKey>) -> Option<bool> {
         self.fluid.is_in_tag(tags, tag)
     }
     /// Match carried vanilla properties locally. Unknown names or noncanonical values
@@ -1288,7 +1288,7 @@ pub enum Despawn {
     Deny,
 }
 
-/// Block shape used by an empty-context level ray.
+/// Block shape used by a level ray (`ClipContext.Block`).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
 pub enum ClipBlock {
@@ -1296,18 +1296,33 @@ pub enum ClipBlock {
     Collider,
     /// Outline.
     Outline,
+    /// `ClipContext.Block.VISUAL`: the visual shape (`BlockState.getVisualShape`), the one
+    /// vanilla's third-person camera stops on. It is the collision shape except where vanilla
+    /// overrides `getVisualShape`: glass, stained and tinted glass, copper grates
+    /// (`TransparentBlock`), iron and copper bars and glass panes (`IronBarsBlock`) and powder
+    /// snow have none, so the ray passes; soul sand and mud are a full block; snow layers and
+    /// fences are their outline (`getShape`). A mod block on one of these templates follows
+    /// its template. NeoForge adds nothing here.
+    Visual,
 }
 
-/// Fluid mode for a level ray. Only the listed modes are supported.
+/// Fluid mode for a level ray (`ClipContext.Fluid`).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
 pub enum ClipFluid {
-    /// None.
+    /// `NONE`: ignore fluids.
     None,
+    /// `SOURCE_ONLY`: stop at source fluids (`FluidState.isSource`), including waterlogged blocks.
+    SourceOnly,
+    /// `ANY`: stop at every non-empty fluid (`!FluidState.isEmpty`), including waterlogged blocks.
+    Any,
+    /// `WATER`: stop at fluids in the `minecraft:water` fluid tag (`FluidState.is(FluidTags.WATER)`), including tagged mod fluids and waterlogged blocks.
+    Water,
 }
 
-/// Result of a block ray (`BlockGetter.clip`), including the vanilla miss result
-/// (`BlockHitResult.miss`).
+/// Result of a block ray (`BlockGetter.clip`). `LevelRef::clip` returns it in
+/// [`ClipOutcome::Hit`] with `miss` unset; `EntityRef::pick` also returns the vanilla miss result
+/// (`BlockHitResult.miss`) with it set.
 #[derive(Clone, Copy, Debug, PartialEq)]
 // exhaustive: the game builds it with a literal; mods only read it
 #[derive(sunrise_mod_api_macros::Wire)]
@@ -1327,6 +1342,56 @@ pub struct ClipHit {
     /// Whether the hit is the world border (`false` for `LevelRef::clip`, which follows
     /// `BlockGetter.clip`, not `CollisionGetter.clipIncludingBorder`).
     pub world_border: bool,
+}
+
+/// Whose collision context a level ray reads block shapes with (`CollisionContext.empty()` or
+/// `CollisionContext.of(entity)`). It is the part of vanilla's `ClipContext` that varies for a
+/// mod; the ray's endpoints, block shape and fluid mode are `LevelRef::clip`'s other arguments.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sunrise_mod_api_macros::Wire)]
+pub enum CollisionContext {
+    /// `CollisionContext.empty()`: no entity, so shapes that depend on who asks (scaffolding,
+    /// powder snow, a mod `BlockPart::collision_shape`) answer their default.
+    Empty,
+    /// `CollisionContext.of(entity)`: shapes answer for this entity, as for its own movement.
+    Entity(EntityRef),
+}
+
+/// What a level ray found (`BlockGetter.clip`), or where it had to stop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ClipOutcome {
+    /// The ray stopped on a block or fluid.
+    Hit(ClipHit),
+    /// The ray reached its end through loaded columns and out-of-height cells and hit nothing
+    /// (`BlockHitResult.miss`).
+    Miss,
+    /// The ray entered a column that is not loaded before it found a hit or its end. Nothing
+    /// is loaded and no answer is guessed past it.
+    Unloaded {
+        /// The first cell of the ray inside the unloaded column.
+        at: [i32; 3],
+    },
+}
+
+/// Why `LevelRef::clip` could not run the ray at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(sunrise_mod_api_macros::Wire)]
+pub enum ClipError {
+    /// The level handle (or the entity of the `CollisionContext`) is gone or belongs to an
+    /// earlier open of the world, the level is not readable from this host, or the ray reached a
+    /// shape the level cannot answer (no outline implementation for a dynamic block).
+    StaleLevel,
+    /// An endpoint has a NaN or infinite coordinate.
+    NonFiniteRay,
+}
+
+impl crate::NoBackend for ClipError {
+    fn no_backend() -> Self {
+        Self::StaleLevel
+    }
 }
 
 /// The world's respawn data (`LevelData.RespawnData`): where a player without a spawn point of
@@ -1734,16 +1799,15 @@ pub trait LevelHost {
     fn has_item_capability(&self, _pos: [i32; 3], _side: Option<Direction>) -> Option<bool> {
         None
     }
-    /// The number of slots on this side, as [`ItemsBackend::container_size`](crate::prelude::ItemsBackend::container_size) reads it.
-    /// Never generates loot or loads chunks. None for unloaded positions, clients or
+    /// The number of slots on this side, using local resident storage on client views.
+    /// Never generates loot or loads chunks. None for unloaded positions or
     /// unsupported storage. Owning game thread only, never in worker hook bodies.
     fn container_size(&self, _at: BlockSide) -> Option<usize> {
         None
     }
-    /// Lend the resident stack in this side-local slot once, as
-    /// [`ItemsBackend::lend_container_stack`](crate::prelude::ItemsBackend::lend_container_stack) reads it.
-    /// Never loads chunks or generates loot; unopened slots remain empty. Does not invoke `read` for empty or unreadable slots or when storage is unavailable
-    /// in this view, including at unloaded positions and on clients. Owning game thread only.
+    /// Lend the resident stack in this side-local slot once, using the local copy on clients.
+    /// Never loads chunks or generates loot. Unopened slots remain empty.
+    /// Invokes `read` only for a readable, nonempty slot in supported storage. Owning game thread only.
     /// Use `with_container_stack` on `&dyn LevelHost` to return a value from the loan.
     fn lend_container_stack(
         &self,

@@ -5,7 +5,8 @@
 //! block registry or item table does not know the name (`Game::emit_model_ambient`). Vanilla's
 //! codecs make the same lookup while the biome file is decoded: `Registry.byNameCodec` refuses
 //! a block outside the registry, and `Item.CODEC` an item outside it or air. The attribute
-//! files are read before a level's registries exist, so the check waits for the level.
+//! files are read before a level's registries exist, so the registry check waits for the level;
+//! air needs no registry, so `Item.CODEC`'s air check refuses it here, while decoding.
 
 use crate::{
     chunk::BlockState,
@@ -104,6 +105,10 @@ impl ParticleOptions {
             T::Item => {
                 let item = value.get("item")?;
                 let name = id(item.as_str().or_else(|| item.get("id")?.as_str())?)?;
+                // `Item.CODEC`: "Item must not be minecraft:air".
+                if name == "minecraft:air" {
+                    return None;
+                }
                 let count = item.get("count").map_or(Some(1), integer)?;
                 if !(1..=99).contains(&count) {
                     return None;

@@ -40,7 +40,7 @@ start line has had no result for the same 60 s kills the binary and is named. Su
 tier's FAIL limit already. A network-guard diagnosis rerun is watched the same way.
 
 `--no-data-skips` (verify) fails the run when a test that ran prints the `skipped: no vanilla data; test=NAME` line of
-the shared helper (`crates/sunrise-client/src/test_fixtures.rs`, `report_missing`): such a test returns early and is
+the shared helper (`crates/sunrise-sim/src/test_fixtures.rs`, `report_missing`): such a test returns early and is
 counted as passed, though verify has no prepared resources. Every one is listed with its package and the fix. The
 daily run has the data, so those tests print nothing there and do not pass the flag.
 """
@@ -58,7 +58,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import network_guard
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from tools.ci import network_guard
 
 
 def package_identity(package_id: str) -> tuple[str, str]:

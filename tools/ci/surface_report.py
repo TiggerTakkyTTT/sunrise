@@ -1,17 +1,29 @@
 """The mod API surface report: what a pull request changes in what mods can name.
 
-In CI, each tree's `sunrise-stage` exports its own SDK surface. The head's tool reads both trees' engine catalogs,
-compares the surfaces and writes the classified report to the job summary. CI compares published loops, not listed
+In CI, each tree's `sunrise-stage` exports its own SDK surface. Catalog readers must match the source layout.
+The head's tool compares the surfaces and writes the classified report to the job summary. CI compares published loops, not listed
 internals. On `pull_request`, the checkout is GitHub's merge commit, whose first parent is the base, and a dispatch
 with `pr` checks out that pull request's test merge the same way (tools/ci/pr_gate.py). CI builds
-the base's tool from a full archive of that commit (into target/surface-base, which a Dyna slot keeps), including
-`crates/`, `tools/layering`, Cargo manifests, and workspace members outside `crates/` (such as `docs/modding/examples/`).
+the base's tool from a full archive of that commit, including `crates/`, `tools/layering`, Cargo manifests, and
+workspace members outside `crates/` (such as `docs/modding/examples/`). A Dyna slot keeps `target/surface-base-v3`:
+its Cargo target, build directory, mtime snapshot and lock share one protocol version. Under that lock, the
+archive's Git objects reconcile the snapshot before Cargo builds. Older writers keep their own directory, so
+an older build cannot leave artifacts that the current snapshot doesn't describe.
 Only that one commit is fetched (`--depth 1`, in CI's shallow checkout; a full clone is never fetched shallow).
+
+Locally, `--base SHA` compares this checkout against that commit exactly as CI compares against its base (the base's
+own sunrise-stage, the landed-note check, the "Base" line); tools/pr_ready.py runs it with the branch's merge base.
+Without SUNRISE_STAGE_TOOL the head's tool is built by `build_tool`: `cargo build --locked --profile test -p
+sunrise-stage --bin sunrise-stage` in this checkout, with the extra cargo arguments in $JOBS. CI's "Build the source
+stage generator" step runs `--build-tool`, which does the same, appends SUNRISE_STAGE_TOOL to $GITHUB_ENV for the
+report step, and prints the path. `--base` and `--trees` are two ways to pick the base, so they do not go together,
+and neither goes with `--build-tool`.
 
 Use --with-internals to audit listed internals too. With --trees BASE HEAD, use --build-base-tool when the generator
 changed: it always builds and uses BASE's own `sunrise-stage`, even if HEAD's could read the old sources. Only pass
-it for a whole checkout you trust: it compiles and runs BASE's code, build scripts included. Without the flag,
---trees is a source-only comparison for two trees that use the same generator.
+it for a whole checkout you trust: it compiles and runs BASE's code, build scripts included. The build uses the audit's
+scratch target, not the shared archive cache. Without the flag, --trees is a source-only comparison for two trees that
+use the same generator.
 
 It passes when the CI base cannot be found or fetched, saying so in one line. It fails if either export cannot be
 compared, for a new change note that names an id that did not change or cannot be read, and, with `gate = true` in
@@ -27,7 +39,7 @@ exported, fails naming the note and the sha.
 """
 
 from argparse import ArgumentParser
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -40,8 +52,13 @@ import time
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools import file_lock
+from tools.ci.source_mtimes import restore_tree_mtimes
+
 ROOT = Path(__file__).resolve().parents[2]
 NOTES = "crates/sunrise-mod-vocab/changes"
+SOURCE_LAYOUT = "crates/sunrise-mod-api-gen/source-layout"
 # Remove this audit and its gate branch after the first complete schema-3 SDK publishes.
 SCHEMA_RESET = "tools/ci/surface-schema-3-reset.json"
 # GitHub refuses a step summary over 1 MiB; the full report stays in the step log.
@@ -90,56 +107,86 @@ def fetch_commit(sha: str, depth: int, git_text=git) -> None:
         git_text("fetch", "-q", "--no-tags", "origin", sha)
 
 
-def archive_paths(sha: str) -> tuple[str, ...]:
-    """The source needed to export a surface at `sha`, including libraries outside crates/."""
-    manifest = tomllib.loads(git("show", f"{sha}:Cargo.toml"))
+def archive_paths(tree: str) -> tuple[str, ...]:
+    """The source needed to export a surface at `tree`, including libraries outside crates/."""
+    manifest = tomllib.loads(git("show", f"{tree}:Cargo.toml"))
     members = manifest.get("workspace", {}).get("members", [])
     extras = sorted({member for member in members if not member.startswith("crates/")})
     return ("crates", "tools/layering", ":(glob)**/Cargo.toml", *extras)
 
 
-def unpack(sha: str, into: Path, paths: tuple[str, ...] | None = None) -> None:
+def unpack(sha: str, into: Path, paths: tuple[str, ...] | None = None) -> str:
+    """Extract the selected paths (empty tuple for the full tree) and return the exact tree ID."""
     fetch_commit(sha, 1)
+    tree = git("rev-parse", "--verify", f"{sha}^{{tree}}").strip()
     if paths is None:
-        paths = archive_paths(sha)
-    with subprocess.Popen(["git", "archive", sha, *paths], cwd=ROOT, stdout=subprocess.PIPE) as archive:
-        # `-m`: files take the time of this extraction, not the commit's. Cargo decides a unit is fresh by source
-        # mtime, and the surface-base target is shared by trees of different commits, so an older commit's tree must
-        # not look unchanged beside a newer one's build of the same paths.
-        subprocess.run(["tar", "-x", "-m", "-C", str(into)], stdin=archive.stdout, check=True)
+        paths = archive_paths(tree)
+    with subprocess.Popen(["git", "archive", tree, *paths], cwd=ROOT, stdout=subprocess.PIPE) as archive:
+        subprocess.run(["tar", "-x", "-C", str(into)], stdin=archive.stdout, check=True)
     if archive.returncode != 0:
         raise subprocess.CalledProcessError(archive.returncode, "git archive")
+    return tree
 
 
-def base_tool(sha: str, work: Path) -> str:
-    """The base commit's own sunrise-stage: its whole tree, built as verify builds the head's (test profile)."""
-    tree = work / f"base-tool-{sha[:12]}"
-    tree.mkdir()
-    unpack(sha, tree, ())
-    return tree_tool(tree, work)
-
-
-def tree_tool(tree: Path, work: Path) -> str:
-    """The sunrise-stage of the whole source tree `tree`, built in the test profile in target/surface-base and
-    copied into this run's `work`. The build directory is shared (and cached), so a lock held from the build to the
-    copy keeps another audit's build from replacing the binary before this one has its copy."""
-    try:
-        import fcntl  # Only this build needs it: a source-only audit runs anywhere.
-    except ImportError:
-        raise RuntimeError("building sunrise-stage from another tree requires POSIX file locking") from None
-
-    target = ROOT / "target" / "surface-base"
+def base_tool(sha: str, work: Path, *, archive_name: str | None = None) -> list[str]:
+    """Build a commit's own exporter from a fresh full archive, the only source allowed in the kept target."""
+    # Version the whole cache together: a writer that doesn't update this snapshot must not share its artifacts.
+    target = ROOT / "target" / "surface-base-v3"
     target.mkdir(parents=True, exist_ok=True)
-    tool = work / f"base-stage-{len(list(work.glob('base-stage-*')))}"
-    with open(target / "surface-report.lock", "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        built = subprocess.run(["cargo", "build", "--locked", "--profile", "test",
-                                "--bin", "sunrise-stage", "--target-dir", str(target)],
-                               cwd=tree, capture_output=True, text=True)
-        if built.returncode != 0:
-            raise RuntimeError(f"building that tree's sunrise-stage failed: {last_line(built.stderr)}")
-        shutil.copy2(target / "debug" / "sunrise-stage", tool)
-    return str(tool)
+    with open(target / "surface-report.lock", "a") as lock:
+        file_lock.lock(lock)
+        tree = work / (archive_name or f"base-tool-{sha[:12]}")
+        tree.mkdir()
+        identity = unpack(sha, tree, ())
+        restore_tree_mtimes(ROOT, identity, tree, target / "ci-source-mtimes-v3.json")
+        return tree_tool(tree, work, target)
+
+
+def tree_tool(tree: Path, work: Path, target: Path) -> list[str]:
+    """Build a tree's sunrise-stage and copy it into the audit's scratch directory."""
+    target = target.resolve()
+    suffix = ".exe" if sys.platform == "win32" else ""  # Cargo names the program so on Windows, and Windows runs only that
+    tool = work / f"base-stage-{len(list(work.glob('base-stage-*')))}{suffix}"
+    built = subprocess.run(["cargo", "build", "--locked", "--profile", "test",
+                            "--bin", "sunrise-stage", "--target-dir", str(target)],
+                           cwd=tree, capture_output=True, text=True,
+                           env={**os.environ, "CARGO_BUILD_BUILD_DIR": str(target)})
+    if built.returncode != 0:
+        raise RuntimeError(f"building that tree's sunrise-stage failed: {last_line(built.stderr)}")
+    shutil.copy2(target / "debug" / f"sunrise-stage{suffix}", tool)
+    return [str(tool)]
+
+
+def build_tool(jobs: list[str]) -> str:
+    """The head's sunrise-stage, built in the test profile in this checkout (`jobs`: extra cargo arguments, CI's
+    $JOBS), as the path of the one normal executable the compiler reports; this is the only place that picks it."""
+    built = subprocess.run(["cargo", "build", *jobs, "--locked", "--profile", "test", "-p", "sunrise-stage",
+                            "--bin", "sunrise-stage", "--message-format=json-render-diagnostics"],
+                           cwd=ROOT, stdout=subprocess.PIPE, text=True)
+    if built.returncode != 0:
+        raise SystemExit("building the head's sunrise-stage failed")
+    artifacts = [json.loads(line) for line in built.stdout.splitlines()]
+    executables = {item["executable"] for item in artifacts
+                   if item.get("reason") == "compiler-artifact"
+                   and item["target"]["name"] == "sunrise-stage"
+                   and "bin" in item["target"]["kind"]
+                   and not item["profile"]["test"] and item.get("executable")}
+    if len(executables) != 1:
+        raise SystemExit(f"expected one normal sunrise-stage executable, got {executables}")
+    executable = str(Path(executables.pop()).resolve(strict=True))
+    if "\r" in executable or "\n" in executable:
+        raise SystemExit("sunrise-stage executable path must not contain CR or LF")
+    return executable
+
+
+def source_layout(tree: Path) -> str:
+    try:
+        layout = (tree / SOURCE_LAYOUT).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return "legacy"
+    if layout not in ("legacy", "split"):
+        raise ValueError(f"{tree / SOURCE_LAYOUT}: unknown source layout {layout!r}")
+    return layout
 
 
 def last_line(text: str) -> str:
@@ -147,41 +194,40 @@ def last_line(text: str) -> str:
     return lines[-1] if lines else "no message"
 
 
-def export_surface(tool: str, tree: Path, output: Path, *flags: str) -> subprocess.CompletedProcess:
-    return subprocess.run([tool, "surface", str(tree), str(output), *flags], capture_output=True, text=True)
+def export_surface(tool: Sequence[str], tree: Path, output: Path, *flags: str) -> subprocess.CompletedProcess:
+    return subprocess.run([*tool, "surface", str(tree), str(output), *flags], capture_output=True, text=True)
 
 
-def audited_checkpoint(reset_path: Path, work: Path, old_hash: str) -> tuple[Path | None, str]:
+def audited_checkpoint(reset_path: Path, work: Path, old_hash: str) -> tuple[Path | None, str, str | None]:
     """Verify the one-time transition using both plain SDK exports, before adding any engine catalogs."""
     reset = json.loads(reset_path.read_text())
     plain = reset["plain"]
     if old_hash != plain["old"]:
-        return None, f"The schema-2 base {old_hash} is not the audited schema-reset base.\n"
+        return None, f"The schema-2 base {old_hash} is not the audited schema-reset base.\n", None
     missing = [change["id"] for change in reset["diff"]["changes"]
                if change["class"] == "breaking" and not change.get("notes")]
     if missing:
-        return None, f"The schema-reset audit lacks change notes for {', '.join(missing)}.\n"
+        return None, f"The schema-reset audit lacks change notes for {', '.join(missing)}.\n", None
     checkpoint = work / "schema-reset"
-    checkpoint.mkdir()
     output = work / "base.json"
     commit = reset["checkpoint"]
     try:
-        unpack(commit, checkpoint, ())
-        done = export_surface(tree_tool(checkpoint, work), checkpoint, output)
+        tool = base_tool(commit, work, archive_name=checkpoint.name)
+        done = export_surface(tool, checkpoint, output)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
-        return None, f"Could not export the schema-reset checkpoint: {error}.\n"
+        return None, f"Could not export the schema-reset checkpoint: {error}.\n", None
     if done.returncode != 0:
-        return None, f"Could not export the schema-reset checkpoint: {last_line(done.stderr)}.\n"
+        return None, f"Could not export the schema-reset checkpoint: {last_line(done.stderr)}.\n", None
     actual = json.loads(output.read_text())
     if (actual["schema"], actual["hash"]) != (3, plain["new"]):
-        return None, "The schema-reset checkpoint does not reproduce the audited schema-3 surface.\n"
+        return None, "The schema-reset checkpoint does not reproduce the audited schema-3 surface.\n", None
     return checkpoint, (f"Audited schema 2 → 3 reset: {plain['old']} → {plain['new']} ({SCHEMA_RESET}).\n"
-                        "Checking all subsequent changes against that checkpoint.\n")
+                        "Checking all subsequent changes against that checkpoint.\n"), tool
 
 
-def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
-           with_internals: bool = False, own_base_tool: Callable[[], str] | None = None,
-           own_head_tool: Callable[[], str] | None = None,
+def report(tool: Sequence[str], base: Path, head: Path, work: Path, gate_on: bool, *,
+           with_internals: bool = False, own_base_tool: Callable[[], Sequence[str]] | None = None,
+           own_head_tool: Callable[[], Sequence[str]] | None = None,
            notes: tuple[Path, Path] | None = None, landed: str | None = None,
            covered: tuple[Path, Path] | None = None) -> tuple[int, str]:
     """Export and compare the trees; return (exit code, report text).
@@ -191,31 +237,42 @@ def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
     is the (new, base) pair whose new notes count only as coverage (the merge's own).
     """
     catalogs = "--with-internals" if with_internals else "--with-loops"
+    reader_layout = source_layout(ROOT)
+    if own_base_tool is None and landed is None and source_layout(base) != reader_layout:
+        def own_base_tool():
+            return tree_tool(base, work, work / "base-target")
+
     own_exports = []
     if own_base_tool is not None or landed is not None:
         own_exports.append(("base", base, own_base_tool))
     if landed is not None:
         own_exports.append(("head", head, own_head_tool))
-    else:
+    elif source_layout(head) != reader_layout:
+        def head_tool():
+            return tree_tool(head, work, work / "head-target")
+
+        own_exports.append(("head", head, head_tool))
+    if landed is None:
         with ThreadPoolExecutor(max_workers=1) as pool:
             # Only source-only audits read both sides with the head's generator. Reading different sources
             # successfully does not prove it generated the same types and signatures as the base's generator.
             base_export = (pool.submit(export_surface, tool, base, work / "base.json", catalogs)
                            if own_base_tool is None else None)
-            head_export = export_surface(tool, head, work / "head.json", catalogs)
-        if head_export.returncode != 0:
+            head_export = (export_surface(tool, head, work / "head.json", catalogs)
+                           if source_layout(head) == reader_layout else None)
+        if head_export is not None and head_export.returncode != 0:
             return 1, f"The surface export of this tree failed: {last_line(head_export.stderr)}.\n"
         if base_export is not None and (done := base_export.result()).returncode != 0:
             return 1, f"No surface report: the head's sunrise-stage cannot read the base tree ({last_line(done.stderr)}).\n"
     note = ""
+    diff_tool = tool
     for name, tree, own_tool in own_exports:
         if own_tool is None:
             return 1, f"No surface report: the landed {name} must be exported in its original schema.\n"
         try:
             output = work / f"{name}.json"
-            # The plain SDK export is shared across tool versions. Use the current catalog reader
-            # for both trees so an older generator does not have to know the current audit options.
-            own = export_surface(own_tool(), tree, output)
+            endpoint_tool = own_tool()
+            own = export_surface(endpoint_tool, tree, output)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
             return 1, f"No surface report: the {name}'s own sunrise-stage could not be used: {error}.\n"
         if own.returncode != 0:
@@ -232,29 +289,32 @@ def report(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
         elif name == "base" and not with_internals and reset_path.is_file():
             old = json.loads(output.read_text())
             if old.get("schema") == 2:
-                checkpoint, text = audited_checkpoint(reset_path, work, old["hash"])
+                checkpoint, text, endpoint_tool = audited_checkpoint(reset_path, work, old["hash"])
                 note += text
                 if checkpoint is None:
                     return 1, note
                 base = tree = checkpoint
-        catalogs_command = [tool, "surface-catalogs", str(tree), str(output)]
+        catalog_tool = tool if source_layout(tree) == reader_layout else endpoint_tool
+        if name == "head" and landed is None:
+            diff_tool = catalog_tool
+        catalogs_command = [*catalog_tool, "surface-catalogs", str(tree), str(output)]
         if with_internals:
             catalogs_command.append("--with-internals")
         audited = subprocess.run(catalogs_command, capture_output=True, text=True)
         if audited.returncode != 0:
             return 1, f"No surface report: could not audit the {name} catalogs ({last_line(audited.stderr)}).\n"
-    code, text = compare(tool, base, head, work, gate_on, with_internals=with_internals, notes=notes, landed=landed,
+    code, text = compare(diff_tool, base, head, work, gate_on, with_internals=with_internals, notes=notes, landed=landed,
                          covered=covered)
     return code, note + text
 
 
-def compare(tool: str, base: Path, head: Path, work: Path, gate_on: bool, *,
+def compare(tool: Sequence[str], base: Path, head: Path, work: Path, gate_on: bool, *,
             with_internals: bool, notes: tuple[Path, Path] | None = None,
             landed: str | None = None, covered: tuple[Path, Path] | None = None) -> tuple[int, str]:
     """Run the gate on the exported documents and the change notes (the trees' own unless `notes` is given);
     `covered` is a (new, base) pair of note folders whose new notes count as coverage only."""
     new_notes, base_notes = notes or (head / NOTES, base / NOTES)
-    command = [tool, "surface-diff", str(work / "base.json"), str(work / "head.json"),
+    command = [*tool, "surface-diff", str(work / "base.json"), str(work / "head.json"),
                "--notes", str(new_notes), "--base-notes", str(base_notes), "--json", str(work / "diff.json")]
     if landed:
         command += ["--landed", landed]
@@ -292,8 +352,8 @@ def landed_notes(head: Path, base: Path) -> dict[str, list[str]]:
     return found
 
 
-def landed_check(tool: str, head: Path, base: Path, work: Path, shas: dict[str, list[str]], *,
-                 git_text=None, fetch=None, own_tool: Callable[[str], str] | None = None) -> tuple[int, str]:
+def landed_check(tool: Sequence[str], head: Path, base: Path, work: Path, shas: dict[str, list[str]], *,
+                 git_text=None, fetch=None, own_tool: Callable[[str], Sequence[str]] | None = None) -> tuple[int, str]:
     """Check each merge's notes against that merge's first parent and the merge; (exit code, text)."""
     git_text, fetch = git_text or git, fetch or unpack
     code, text = 0, ""
@@ -354,26 +414,49 @@ def main(argv=None) -> int:
     parser.add_argument("--trees", nargs=2, metavar=("BASE", "HEAD"), type=Path,
                         help="compare two local trees with the same generator instead of fetching the CI base; "
                              "use --build-base-tool if the generator changed")
+    parser.add_argument("--base", metavar="COMMIT",
+                        help="compare against this commit (a sha or a ref such as origin/main) as CI compares "
+                             "against its base, including the base's own sunrise-stage (a local run)")
+    parser.add_argument("--build-tool", action="store_true",
+                        help="only build the head's sunrise-stage (cargo arguments from $JOBS), append "
+                             "SUNRISE_STAGE_TOOL=<path> to $GITHUB_ENV when that is set, and print the path")
     parser.add_argument("--build-base-tool", action="store_true",
                         help="with --trees: always build and use BASE's own sunrise-stage "
                              "(runs BASE's code; a whole, trusted checkout only)")
     args = parser.parse_args(argv)
     if args.build_base_tool and not args.trees:
         parser.error("--build-base-tool goes with --trees; CI builds the base commit's own tool by itself")
+    if args.base and args.trees:
+        parser.error("--base and --trees both pick the base; use one")
+    if args.build_tool and (args.base or args.trees):
+        parser.error("--build-tool only builds the tool; it goes with neither --base nor --trees")
+    jobs = os.environ.get("JOBS", "").split()
+    if args.build_tool:
+        built_at = time.monotonic()
+        tool = build_tool(jobs)
+        print(f"Stage generator build: {int(time.monotonic() - built_at)}s")
+        if environment_file := os.environ.get("GITHUB_ENV"):
+            with open(environment_file, "a") as environment:
+                environment.write(f"SUNRISE_STAGE_TOOL={tool}\n")
+        print(tool)
+        return 0
+    tool = [os.environ.get("SUNRISE_STAGE_TOOL") or build_tool(jobs)]
     started = time.monotonic()
-    tool = os.environ["SUNRISE_STAGE_TOOL"]
     gate_on = gate(ROOT / "tools/ci/surface.toml")
     with tempfile.TemporaryDirectory(dir=os.environ.get("RUNNER_TEMP")) as directory:
         work = Path(directory)
         if args.trees:
             base, head = args.trees
-            own = (lambda: tree_tool(base, work)) if args.build_base_tool else None
+            own = (lambda: tree_tool(base, work, work / "base-target")) if args.build_base_tool else None
             code, text = report(tool, base, head, work, gate_on, with_internals=args.with_internals,
                                 own_base_tool=own)
         else:
             base = work / "base"
             try:
-                sha, why = base_commit(os.environ.get("EVENT", ""), os.environ.get("PR", ""), git)
+                # The base's tool tree and the report's last line take the commit's sha, so a ref such as
+                # origin/main is resolved first; a full sha resolves to itself, fetched or not.
+                sha, why = (git("rev-parse", "--verify", args.base).strip(), "") if args.base else base_commit(
+                    os.environ.get("EVENT", ""), os.environ.get("PR", ""), git)
                 if sha:
                     base.mkdir()
                     unpack(sha, base)
@@ -381,9 +464,9 @@ def main(argv=None) -> int:
                 sha, why = None, f"the base could not be fetched: {error}"
             if sha:
                 fetched = time.monotonic() - started
-                built: dict[str, str] = {}
+                built: dict[str, Sequence[str]] = {}
 
-                def own(commit: str) -> str:
+                def own(commit: str) -> Sequence[str]:
                     """A commit's own sunrise-stage, built once per run: a landed note may name the base itself."""
                     if commit not in built:
                         built[commit] = base_tool(commit, work)
@@ -396,7 +479,8 @@ def main(argv=None) -> int:
                     code, text = code or landed_code, text + landed_text
                 text += f"Base {sha}; fetch {fetched:.1f}s, total {time.monotonic() - started:.1f}s\n"
             else:
-                code, text = 0, f"No surface report: {why}.\n"
+                # CI passes without a base it can find; a base named with --base that cannot be read is an error.
+                code, text = (1 if args.base else 0), f"No surface report: {why}.\n"
     print(text, end="")
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary_path, "a") as out:

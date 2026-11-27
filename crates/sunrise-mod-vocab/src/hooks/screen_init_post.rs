@@ -6,7 +6,8 @@ pub trait Hooks {
     /// or mount buttons, text fields, and custom widgets. A layout-only resize keeps the existing
     /// children and focus and does not fire this hook. A new chat instance initializes once even
     /// when it replaces one with the same ID and rectangle. A vetoed opening does not initialize
-    /// a screen. A panicking listener publishes no edits.
+    /// a screen. A panicking listener publishes no edits. The pause and title screens list their
+    /// own controls first, in vanilla's order.
     #[hook(
         receiver = "read",
         dispatch = "flat",

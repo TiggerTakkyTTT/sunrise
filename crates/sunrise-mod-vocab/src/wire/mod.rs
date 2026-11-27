@@ -18,7 +18,7 @@ use std::sync::Arc;
 pub(crate) mod limits;
 mod schema;
 
-use limits::{Budget, PAYLOAD_MAX_DEPTH, PAYLOAD_MAX_LIST_ENTRIES, PAYLOAD_MAX_STRING_BYTES};
+use limits::{Budget, PAYLOAD_MAX_DEPTH, PAYLOAD_MAX_STRING_BYTES};
 
 pub use schema::WireSchema;
 
@@ -86,6 +86,9 @@ pub struct Writer {
 struct PayloadLimits {
     ceiling: usize,
     budget: Budget,
+    /// The shortest body the reader accepts after the zero-width lists written so far: it
+    /// refuses a count the rest of the body cannot hold at one byte per entry.
+    zero_width_end: usize,
 }
 
 impl Writer {
@@ -99,6 +102,7 @@ impl Writer {
             payload: Some(PayloadLimits {
                 ceiling: limit,
                 budget: Budget::payload(),
+                zero_width_end: 0,
             }),
             ..Self::default()
         }
@@ -107,6 +111,9 @@ impl Writer {
     /// payload the enclosing limits, budget already spent and first failure stay in force.
     pub fn clear(&mut self) {
         self.bytes.clear();
+        if let Some(limits) = &mut self.payload {
+            limits.zero_width_end = 0;
+        }
         self.limit = self.payload.as_ref().map(|limits| limits.ceiling);
         if self.payload.is_none() {
             self.error = None;
@@ -118,11 +125,12 @@ impl Writer {
         self.clear();
     }
     pub(crate) fn finish_payload(self) -> Result<Vec<u8>, WireError> {
-        if self.payload.is_none() {
+        let Some(limits) = &self.payload else {
             return Err(WireError::Invalid("payload writer was replaced"));
-        }
+        };
         match self.error {
             Some(error) => Err(error),
+            None if self.bytes.len() < limits.zero_width_end => Err(WireError::Length),
             None => Ok(self.bytes),
         }
     }
@@ -190,7 +198,10 @@ impl Writer {
                 let Some(len) = out.list_len(items.len()) else {
                     return;
                 };
+                // The reader refuses a count whose entries, at one byte each at least,
+                // could not fit in the rest of the body; refuse the same lists here.
                 let Some(size) = min
+                    .max(1)
                     .checked_mul(items.len())
                     .and_then(|size| size.checked_add(4))
                 else {
@@ -206,6 +217,13 @@ impl Writer {
                     out.bytes.reserve(size);
                 }
                 out.bytes.extend_from_slice(&len.to_le_bytes());
+                // Every other entry writes at least the one byte the reader counts for it.
+                if min == 0
+                    && let Some(limits) = &mut out.payload
+                {
+                    limits.zero_width_end =
+                        limits.zero_width_end.max(out.bytes.len() + items.len());
+                }
             } else {
                 out.put_len(items.len());
             }
@@ -221,10 +239,6 @@ impl Writer {
         }
     }
     fn list_len(&mut self, len: usize) -> Option<u32> {
-        if self.payload.is_some() && len > PAYLOAD_MAX_LIST_ENTRIES {
-            self.fail(WireError::Length);
-            return None;
-        }
         match u32::try_from(len) {
             Ok(len) => Some(len),
             Err(_) => {
@@ -384,18 +398,13 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
     /// A length read before `items` values of at least `min` bytes each: refused when the rest
-    /// of the buffer could not hold them, so no allocation outruns its input.
+    /// of the buffer could not hold them, counting a zero-width value as one byte, so no
+    /// allocation outruns its input. Vanilla's collection codecs have no count limit of their
+    /// own (`ByteBufCodecs.collection` defaults to `Integer.MAX_VALUE`); the packet's size
+    /// bounds them.
     pub fn take_len(&mut self, min: usize) -> Result<usize, WireError> {
         let len = u32::take(self)? as usize;
-        let min = if self.budget.is_some() {
-            if len > PAYLOAD_MAX_LIST_ENTRIES {
-                return Err(WireError::Length);
-            }
-            min // Zero-width entries are safe when their count is capped independently.
-        } else {
-            min.max(1)
-        };
-        match len.checked_mul(min) {
+        match len.checked_mul(min.max(1)) {
             Some(needed) if needed <= self.data.len() => Ok(len),
             _ => Err(WireError::Length),
         }

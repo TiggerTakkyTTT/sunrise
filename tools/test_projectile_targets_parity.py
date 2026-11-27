@@ -20,11 +20,9 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 PARITY = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity'
 ORACLES = [
@@ -38,7 +36,7 @@ TESTS = [
     'game::creatures::projectile_targets_tests::witness_item_frame_targets',
     'game::creatures::projectile_targets_tests::witness_leash_knot_targets',
     'game::creatures::projectile_targets_tests::witness_falling_block_targets',
-    'game::fishing::fishing_targets_tests::witness_fishing_bobber_targets',
+    'game::server_side::fishing::fishing_targets_tests::witness_fishing_bobber_targets',
     'game::creatures::projectiles_120_124_tests::witness_spectator_player_120',
     'game::creatures::projectiles_120_124_tests::witness_wind_charge_end_crystal_121',
     'game::creatures::projectiles_120_124_tests::witness_trident_enderman_dodge_122',

@@ -5,9 +5,12 @@ items cannot introduce phantom types. Run directly to print the inventory.
 """
 from pathlib import Path
 import re
-from rust_tokens import code_tokens
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools.rust_tokens import code_tokens
+
 
 
 def recursive_types(root=ROOT / "crates/sunrise-mod-vocab/src", extra_paths=()):

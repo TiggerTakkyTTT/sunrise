@@ -12,10 +12,9 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
 
 TESTS = [
     'game::remote::abilities::gamemode_split_tests::change_game_mode_updates_only_local_mode_and_abilities_26_3',

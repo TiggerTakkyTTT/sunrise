@@ -13,18 +13,16 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab
-    from .command_exec_corpus import cmd, setup
-except ImportError:
-    import lab
-    from command_exec_corpus import cmd, setup
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
+from tools.command_exec_corpus import cmd, setup
 
 INITIAL_COOLDOWN = 20
 MERGED_COOLDOWN = 50
 WITNESS_ENV = 'SUNRISE_MOB_PORTAL_COOLDOWN_WITNESS'
 WITNESS_NAME = 'mob_portal_cooldown.json'
-TEST = 'game::commands::data::portal_cooldown_tests::a_mob_saves_its_live_portal_cooldown'
+TEST = 'game::server_side::commands::data::portal_cooldown_tests::a_mob_saves_its_live_portal_cooldown'
 ORACLE_PATH = 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCommandExecOracle.java'
 
 

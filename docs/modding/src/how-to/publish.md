@@ -67,6 +67,10 @@ workflow, commits the version bump signed off (`Signed-off-by`, from your Git `u
 at the repository root or `<id>/v<version>` for a subfolder package. GitHub Actions builds and attests both the
 `.smod` and its page bundle, with no signing key for you to manage.
 
+`release` reads your repository's ID from GitHub's API. Set `GH_TOKEN` or `GITHUB_TOKEN` when you release
+many packages in an hour: with a token GitHub allows far more than the 60 requests an hour it allows without one.
+The token is sent to `api.github.com` alone.
+
 If your default branch accepts changes only through pull requests, add `--pull-request`:
 
 ```sh
@@ -91,7 +95,7 @@ updates your caller in the release commit when it has moved, so you never edit t
 2. The registry bot watches registered repositories. For a new release it opens a pull request on
    sunrise-org/sunrise-mods that adds the release and updates the project's page. A release whose package is of
    another kind than the project (a content mod that gained `[native]` code, or the reverse) changes the project's
-   kind in the same pull request and removes the project's earlier releases; `release` says so before it tags.
+   kind in the same pull request and removes the project's earlier releases.
 3. The bot's checks run on that pull request. They are static checks plus a compile, and never load the mod in the
    game:
    - the files' format, sizes and SHA-256 hashes, and both attestations against the registered repository, the

@@ -16,7 +16,9 @@ pub trait Hooks {
     /// that block. Another block notifies normally. Double containers notify each backing
     /// component, not the other half merely refreshed for comparators.
     /// Vehicle/menu placeholder coordinates are excluded. The source level, pos and state
-    /// always name the changed backing block. `observer` is `None` for its own Parts, or `Some`
+    /// always name the changed backing block: `level` and `pos` are the `StorageSlot::level` and
+    /// `StorageSlot::pos` of any slot of the container that changed, so a double chest notifies
+    /// the owning half's `pos`. `observer` is `None` for its own Parts, or `Some`
     /// for Parts of a block entity watching that source through `watch_contents`. Source Parts
     /// run first, then a snapshot of observers in registration order; a stale observer is skipped.
     /// A self-watch never duplicates the source callback. Registration changes affect the next

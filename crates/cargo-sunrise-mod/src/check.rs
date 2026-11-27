@@ -64,8 +64,6 @@ impl Report {
         if let Some(side) = f.side {
             let side = serde_json::to_value(side).unwrap_or_default();
             out += &format!(", API {}, {}", f.api, side.as_str().unwrap_or("?"));
-        } else if self.kind == Kind::Shader {
-            out += &format!(", shader API {}", f.api);
         } else if !f.api.is_empty() {
             out += &format!(", format {}", f.api);
         }
@@ -126,7 +124,6 @@ pub fn kind_of(path: &Path) -> Option<Kind> {
         "smod" => Some(Kind::Mod),
         "spack" => Some(Kind::Modpack),
         "zip" => Some(sunrise_mod_package::index::zip_kind(path)),
-        "sshader" => Some(Kind::Shader),
         _ => None,
     }
 }
@@ -360,6 +357,9 @@ pub fn references(root: &Path, manifest: &sunrise_mod_package::Manifest) -> Resu
     }
 }
 
+/// The include that opts a program into the order-independent transparency passes.
+const OIT_INCLUDE: &str = "minecraft:shaders/include/oit.glsl";
+
 /// Translates and validates every GLSL core shader program in a mod's `files`
 /// (`assets/<namespace>/shaders/core/<path>.vsh` and `.fsh`) through `sunrise_mod_pipeline`
 /// (the same code the game uses), returning how many programs were checked and each refusal as
@@ -370,12 +370,48 @@ pub fn references(root: &Path, manifest: &sunrise_mod_package::Manifest) -> Resu
 /// (§6 & §13 Q3: nothing from Mojang's files is shipped in the SDK). When a `.fsh` has no
 /// matching `.vsh` beside it in `files`, `minecraft:shaders/core/position_tex_color.vsh` is used
 /// as the default vertex stage (matching the common `.vertex_shader("minecraft:core/position_tex_color")`
-/// case). Whether a pipeline is textured is in the mod's Rust code, so a program that references
-/// `sampleSprite`, `pipeline_sprite.glsl`, `SpriteRect`, or `Sampler0` is checked as textured.
+/// case). A vertex-only file is checked with a stand-in fragment shader. Whether a pipeline is
+/// textured is in the mod's Rust code, so a program that uses `sampleSprite`, `SpriteRect` or
+/// `Sampler0` (or includes `pipeline_sprite.glsl`) in the text the translator reads, with its
+/// `#include`s inlined and its comments removed, is checked as textured; a name only in a
+/// comment is not. The vertex inputs are those of the vertex stage with its includes inlined
+/// ([`sunrise_mod_pipeline::ProgramBindings::vertex_inputs`]), and a program that includes
+/// `oit.glsl`, in its own text or through another include, is also checked against the
+/// order-independent transparency passes. A program whose includes cannot be expanded is refused.
 pub fn pipeline_shaders(
     files: &BTreeMap<String, Vec<u8>>,
     resources: Option<&Path>,
 ) -> (usize, Vec<String>) {
+    let programs = pair_programs(files);
+    let assets = Assets { files, resources };
+    let mut refused = Vec::new();
+    for program in &programs {
+        if let Err(problems) = check_program(program, &assets) {
+            refused.extend(problems);
+        }
+    }
+    (programs.len(), refused)
+}
+
+/// The fragment stage of a vertex-only file: it only lets the vertex stage be validated.
+const STAND_IN_FRAGMENT: &str =
+    "#version 330\nout vec4 fragColor;\nvoid main() { fragColor = vec4(1.0); }\n";
+
+/// One program [`pipeline_shaders`] checks: the two stage files of a `shaders/core` stem and the
+/// folders their quoted includes are relative to.
+struct Program {
+    vertex_file: String,
+    vertex_dir: String,
+    fragment_file: String,
+    fragment_dir: String,
+    /// The file has no `.fsh`: the fragment stage is [`STAND_IN_FRAGMENT`] (a vertex stage shared
+    /// across pipelines via `.vertex_shader(...)`) and is no OIT program.
+    stand_in: bool,
+}
+
+/// Pairs the `.vsh` and `.fsh` files of `files` by namespace and stem. A fragment-only file takes
+/// `minecraft:core/position_tex_color` as its vertex stage.
+fn pair_programs(files: &BTreeMap<String, Vec<u8>>) -> Vec<Program> {
     let mut stems: BTreeMap<(String, String), (Option<String>, Option<String>)> = BTreeMap::new();
     let folder = sunrise_mod_pipeline::CORE_FOLDER;
     for name in files.keys() {
@@ -393,14 +429,46 @@ pub fn pipeline_shaders(
             stems.entry((ns.to_owned(), stem.to_owned())).or_default().1 = Some(name.clone());
         }
     }
+    stems
+        .into_iter()
+        .map(|((ns, stem), (vsh_file, fsh_file))| {
+            let folder_part = stem.rfind('/').map_or("", |i| &stem[..=i]);
+            let dir = format!("{ns}:{folder}/{folder_part}");
+            let (vertex_file, vertex_dir) = vsh_file.map_or_else(
+                || {
+                    (
+                        "assets/minecraft/shaders/core/position_tex_color.vsh".to_owned(),
+                        "minecraft:shaders/core/".to_owned(),
+                    )
+                },
+                |file| (file, dir.clone()),
+            );
+            Program {
+                stand_in: fsh_file.is_none(),
+                fragment_file: fsh_file.unwrap_or_else(|| vertex_file.clone()),
+                fragment_dir: dir,
+                vertex_file,
+                vertex_dir,
+            }
+        })
+        .collect()
+}
 
-    let read_asset = |asset: &str| -> Result<Option<String>, String> {
-        if let Some(bytes) = files.get(asset) {
+/// Where a program's files and includes come from: the mod's own `files`, then prepared vanilla
+/// `resources`, and finally Sunrise's interface-only stubs for `minecraft:*`.
+struct Assets<'a> {
+    files: &'a BTreeMap<String, Vec<u8>>,
+    resources: Option<&'a Path>,
+}
+
+impl Assets<'_> {
+    fn asset(&self, asset: &str) -> Result<Option<String>, String> {
+        if let Some(bytes) = self.files.get(asset) {
             return std::str::from_utf8(bytes)
                 .map(|s| Some(s.to_owned()))
                 .map_err(|e| format!("{asset}: {e}"));
         }
-        if let Some(dir) = resources {
+        if let Some(dir) = self.resources {
             let path = dir.join(asset);
             match std::fs::read_to_string(&path) {
                 Ok(text) => return Ok(Some(text)),
@@ -415,134 +483,82 @@ pub fn pipeline_shaders(
             return Ok(Some(stub.to_owned()));
         }
         Ok(None)
-    };
+    }
 
-    let include = |id: &str| -> Result<Option<String>, String> {
+    /// The text of an `#include <ns:path>`, `None` when no source has it.
+    fn include(&self, id: &str) -> Result<Option<String>, String> {
         let Some((ns, rest)) = id.split_once(':') else {
             return Ok(None);
         };
-        read_asset(&format!("assets/{ns}/{rest}"))
-    };
-
-    let mut count = 0;
-    let mut refused = Vec::new();
-    for ((ns, stem), (vsh_file, fsh_file)) in stems {
-        let Some(fsh_file) = fsh_file else {
-            // Vertex-only files may be shared across pipelines via `.vertex_shader(...)`;
-            // pair with a trivial fragment shader so the vertex stage is still validated.
-            let vsh_file = vsh_file.expect("stem has at least one stage");
-            count += 1;
-            let vsh_text = match read_asset(&vsh_file) {
-                Ok(Some(t)) => t,
-                Ok(None) => {
-                    refused.push(format!("{vsh_file}: not found"));
-                    continue;
-                }
-                Err(e) => {
-                    refused.push(e);
-                    continue;
-                }
-            };
-            let folder_part = stem.rfind('/').map_or("", |i| &stem[..=i]);
-            let dir = format!("{ns}:{folder}/{folder_part}");
-            let dummy_fsh =
-                "#version 330\nout vec4 fragColor;\nvoid main() { fragColor = vec4(1.0); }\n";
-            let textured = vsh_text.contains("Sampler0")
-                || vsh_text.contains("SpriteRect")
-                || vsh_text.contains("sampleSprite")
-                || vsh_text.contains("pipeline_sprite.glsl");
-            let sources = sunrise_mod_pipeline::ProgramSources {
-                vertex_file: &vsh_file,
-                vertex_dir: &dir,
-                vertex: &vsh_text,
-                fragment_file: &vsh_file,
-                fragment_dir: &dir,
-                fragment: dummy_fsh,
-            };
-            let options = sunrise_mod_pipeline::Options {
-                textured,
-                check_backends: true,
-                ..Default::default()
-            };
-            if let Err(problems) = sunrise_mod_pipeline::translate(&sources, &options, &include) {
-                refused.extend(problems.into_iter().map(|p| p.to_string()));
-            }
-            continue;
-        };
-
-        count += 1;
-        let fsh_text = match read_asset(&fsh_file) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                refused.push(format!("{fsh_file}: not found"));
-                continue;
-            }
-            Err(e) => {
-                refused.push(e);
-                continue;
-            }
-        };
-        let (vertex_file, vertex_dir, vsh_text) = match vsh_file {
-            Some(vsh_path) => {
-                let text = match read_asset(&vsh_path) {
-                    Ok(Some(t)) => t,
-                    Ok(None) => {
-                        refused.push(format!("{vsh_path}: not found"));
-                        continue;
-                    }
-                    Err(e) => {
-                        refused.push(e);
-                        continue;
-                    }
-                };
-                let folder_part = stem.rfind('/').map_or("", |i| &stem[..=i]);
-                (vsh_path, format!("{ns}:{folder}/{folder_part}"), text)
-            }
-            None => {
-                let default_vsh = "assets/minecraft/shaders/core/position_tex_color.vsh";
-                let text = match read_asset(default_vsh) {
-                    Ok(Some(t)) => t,
-                    Ok(None) => {
-                        refused.push(format!("{default_vsh}: not found"));
-                        continue;
-                    }
-                    Err(e) => {
-                        refused.push(e);
-                        continue;
-                    }
-                };
-                (
-                    default_vsh.to_owned(),
-                    "minecraft:shaders/core/".to_owned(),
-                    text,
-                )
-            }
-        };
-        let folder_part = stem.rfind('/').map_or("", |i| &stem[..=i]);
-        let fragment_dir = format!("{ns}:{folder}/{folder_part}");
-        let textured = fsh_text.contains("sampleSprite")
-            || fsh_text.contains("pipeline_sprite.glsl")
-            || fsh_text.contains("SpriteRect")
-            || fsh_text.contains("Sampler0")
-            || vsh_text.contains("Sampler0");
-        let sources = sunrise_mod_pipeline::ProgramSources {
-            vertex_file: &vertex_file,
-            vertex_dir: &vertex_dir,
-            vertex: &vsh_text,
-            fragment_file: &fsh_file,
-            fragment_dir: &fragment_dir,
-            fragment: &fsh_text,
-        };
-        let options = sunrise_mod_pipeline::Options {
-            textured,
-            check_backends: true,
-            ..Default::default()
-        };
-        if let Err(problems) = sunrise_mod_pipeline::translate(&sources, &options, &include) {
-            refused.extend(problems.into_iter().map(|p| p.to_string()));
-        }
+        self.asset(&format!("assets/{ns}/{rest}"))
     }
-    (count, refused)
+
+    /// The text of a stage file, which must exist.
+    fn stage(&self, file: &str) -> Result<String, String> {
+        self.asset(file)?
+            .ok_or_else(|| format!("{file}: not found"))
+    }
+}
+
+/// Reads, translates and validates one program, as [`pipeline_shaders`] documents: every refusal
+/// as `<file>[:<line>:<column>]: [<stage> shader: ]<message>` when its position and stage
+/// are known.
+///
+/// The check has no `RenderPipeline`, so it cannot know which vertex format the mod registers:
+/// the game's registration decides that. It takes the vertex `in`s the program declares, each on
+/// its own, and refuses only one of a type no vertex attribute format supplies; which of them the
+/// game binds, and from which vertex bindings, the pipeline's registered format decides at
+/// registration.
+fn check_program(program: &Program, assets: &Assets<'_>) -> Result<(), Vec<String>> {
+    let fragment = if program.stand_in {
+        STAND_IN_FRAGMENT.to_owned()
+    } else {
+        assets.stage(&program.fragment_file).map_err(|e| vec![e])?
+    };
+    let vertex = assets.stage(&program.vertex_file).map_err(|e| vec![e])?;
+    let sources = sunrise_mod_pipeline::ProgramSources {
+        vertex_file: &program.vertex_file,
+        vertex_dir: &program.vertex_dir,
+        vertex: &vertex,
+        fragment_file: &program.fragment_file,
+        fragment_dir: &program.fragment_dir,
+        fragment: &fragment,
+    };
+    let include = |id: &str| assets.include(id);
+    // Whether a pipeline is textured is in the mod's Rust code; the program says so in the
+    // text the translator reads.
+    let bindings = sunrise_mod_pipeline::extract_program_bindings(&sources, &[], &include)
+        .map_err(|e| vec![e.to_string()])?;
+    let mod_bindings: Vec<sunrise_mod_pipeline::ModBinding<'_>> = bindings
+        .bindings
+        .iter()
+        .map(|(name, kind)| sunrise_mod_pipeline::ModBinding {
+            name: name.as_str(),
+            kind: *kind,
+        })
+        .collect();
+    let vertex_inputs: Vec<(&str, &str)> = (bindings.vertex_inputs.iter())
+        .map(|(name, ty)| (name.as_str(), ty.as_str()))
+        .collect();
+    let options = sunrise_mod_pipeline::Options {
+        textured: bindings.textured,
+        vertex_inputs: &vertex_inputs,
+        mod_bindings: &mod_bindings,
+        push_constant_size: bindings.push_constant_size,
+        check_backends: true,
+        ..Default::default()
+    };
+    let refusals = |problems: Vec<sunrise_mod_pipeline::check::Problem>| {
+        problems.iter().map(ToString::to_string).collect::<Vec<_>>()
+    };
+    sunrise_mod_pipeline::translate(&sources, &options, &include).map_err(refusals)?;
+    // A program joins the OIT passes by including `oit.glsl`, directly or through another
+    // include: `bindings.includes` lists every file its stages' expansion read.
+    if !program.stand_in && bindings.includes.iter().any(|id| id == OIT_INCLUDE) {
+        sunrise_mod_pipeline::translate_oit(&sources, &options, false, &include)
+            .map_err(refusals)?;
+    }
+    Ok(())
 }
 
 /// One line per data folder that holds files under 26.2's name for a folder 26.3 reads under
@@ -642,6 +658,300 @@ mod tests {
         );
     }
 
+    /// A uniform block and a sampler that an `#include` file declares are the program's own, as
+    /// they are once the game inlines the include: the check takes them as the mod's bindings
+    /// rather than refusing them (#5905).
+    #[test]
+    fn a_block_and_sampler_an_include_declares_are_the_programs() {
+        let vsh = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            #include <minecraft:projection.glsl>\n\
+            in vec3 Position;\nin vec2 UV0;\nin vec4 Color;\n\
+            out vec2 texCoord0;\nout vec4 vertexColor;\n\
+            void main() { gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0); texCoord0 = UV0; vertexColor = Color; }\n";
+        let fsh = "#version 330\n#include <m:params.glsl>\n\
+            in vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() { fragColor = vertexColor * Strength * texture(Noise, texCoord0); }\n";
+        let files: BTreeMap<String, Vec<u8>> = [
+            (
+                "assets/m/shaders/include/params.glsl",
+                "layout(std140) uniform Params {\n    vec4 Strength;\n};\nuniform sampler2D Noise;\n",
+            ),
+            ("assets/m/shaders/core/blur.vsh", vsh),
+            ("assets/m/shaders/core/blur.fsh", fsh),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+        .into();
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!((count, refused), (1, Vec::<String>::new()));
+    }
+
+    /// A vertex shader of the default format that writes what the fragment shaders below read.
+    const MOD_VSH: &str = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+        #include <minecraft:projection.glsl>\n\
+        in vec3 Position;\nin vec2 UV0;\nin vec4 Color;\n\
+        out vec2 texCoord0;\nout vec4 vertexColor;\n\
+        void main() { gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0); texCoord0 = UV0; vertexColor = Color; }\n";
+
+    /// The files of one program `m:core/blur` with the vertex shader above and `fsh`.
+    fn blur_program(fsh: &str) -> BTreeMap<String, Vec<u8>> {
+        [
+            ("assets/m/shaders/core/blur.vsh", MOD_VSH),
+            ("assets/m/shaders/core/blur.fsh", fsh),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+        .into()
+    }
+
+    /// A fragment shader whose set-1 uniform block and sampler stand as the mod's own layout
+    /// declares them passes, as the game binds them; the same shader with a syntax error in
+    /// `main` is refused at that line, and not for its bindings (#6022).
+    #[test]
+    fn a_set_1_block_and_sampler_pass_and_a_syntax_error_is_still_refused() {
+        let fsh = |statement_end: &str| {
+            format!(
+                "#version 330\nlayout(set = 1, binding = 0, std140) uniform Params {{ vec4 Strength; }};\n\
+                uniform sampler2D Noise;\n\
+                in vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+                void main() {{ fragColor = vertexColor * Strength * texture(Noise, texCoord0){statement_end} }}\n"
+            )
+        };
+        let (count, refused) = pipeline_shaders(&blur_program(&fsh(";")), None);
+        assert_eq!((count, refused), (1, Vec::<String>::new()));
+
+        let (count, refused) = pipeline_shaders(&blur_program(&fsh("")), None);
+        assert_eq!(count, 1);
+        assert!(!refused.is_empty(), "a syntax error must be refused");
+        assert!(
+            refused[0].starts_with("assets/m/shaders/core/blur.fsh:7:"),
+            "{refused:?}"
+        );
+        assert!(
+            refused
+                .iter()
+                .all(|r| !r.contains("not a block or sampler")),
+            "{refused:?}"
+        );
+    }
+
+    /// The game binds a declaration whatever else is on its line and whatever qualifier stands
+    /// before `uniform`, so the check takes each as the mod's (#6022).
+    #[test]
+    fn declarations_the_game_binds_are_the_mods_whatever_their_line_looks_like() {
+        let programs = [
+            (
+                "a qualifier before uniform",
+                "uniform Scene { vec4 tint; };\nhighp uniform sampler2D Tex;",
+                "tint * texture(Tex, texCoord0)",
+            ),
+            (
+                "two samplers on one line",
+                "uniform sampler2D TexA; uniform sampler2D TexB;",
+                "texture(TexA, texCoord0) * texture(TexB, texCoord0)",
+            ),
+            (
+                "a block after a sampler on one line",
+                "uniform sampler2D TexA; uniform Scene { vec4 tint; };",
+                "tint * texture(TexA, texCoord0)",
+            ),
+            (
+                "a storage buffer after a sampler on one line",
+                "uniform sampler2D TexA; layout(std430) readonly buffer Data { vec4 d[]; };",
+                "d[0] * texture(TexA, texCoord0)",
+            ),
+        ];
+        for (what, declarations, colour) in programs {
+            let fsh = format!(
+                "#version 330\n{declarations}\nin vec2 texCoord0;\nin vec4 vertexColor;\n\
+                out vec4 fragColor;\nvoid main() {{ fragColor = vertexColor * {colour}; }}\n"
+            );
+            let (count, refused) = pipeline_shaders(&blur_program(&fsh), None);
+            assert_eq!((count, refused), (1, Vec::<String>::new()), "{what}");
+        }
+    }
+
+    /// The same authored include position can fail in either stage; the CLI names which one.
+    #[test]
+    fn a_shared_include_error_names_the_stage_that_failed() {
+        let include = "#include <m:shared.glsl>\n";
+        let shared = "#ifdef BROKEN\nvec4 sharedColor() {\n    return missing_color;\n}\n\
+                      #else\nvec4 sharedColor() { return vec4(1.0); }\n#endif\n";
+        for (vertex_define, fragment_define, failing_stage) in [
+            ("#define BROKEN\n", "", "vertex"),
+            ("", "#define BROKEN\n", "fragment"),
+        ] {
+            let vertex = format!(
+                "#version 330\n{vertex_define}{include}void main() {{ gl_Position = sharedColor(); }}\n"
+            );
+            let fragment = format!(
+                "#version 330\n{fragment_define}{include}out vec4 fragColor;\n\
+                 void main() {{ fragColor = sharedColor(); }}\n"
+            );
+            let files = BTreeMap::from([
+                (
+                    "assets/m/shaders/core/shared.vsh".to_owned(),
+                    vertex.into_bytes(),
+                ),
+                (
+                    "assets/m/shaders/core/shared.fsh".to_owned(),
+                    fragment.into_bytes(),
+                ),
+                (
+                    "assets/m/shaders/include/shared.glsl".to_owned(),
+                    shared.as_bytes().to_vec(),
+                ),
+            ]);
+            let (count, refused) = pipeline_shaders(&files, None);
+            assert_eq!((count, refused.len()), (1, 1), "{refused:?}");
+            let prefix =
+                format!("assets/m/shaders/include/shared.glsl:3:12: {failing_stage} shader: ");
+            assert!(refused[0].starts_with(&prefix), "{refused:?}");
+        }
+    }
+
+    /// A program is textured when the text the translator reads uses a sprite name, as it does
+    /// once the game inlines the includes: a fragment shader that reaches `sampleSprite` only
+    /// through its own include file is checked as textured, not refused for a missing sprite
+    /// texture.
+    #[test]
+    fn a_sprite_an_include_samples_makes_the_program_textured() {
+        let fsh = "#version 330\n#include <m:tinted.glsl>\n\
+            in vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() { fragColor = tintedSprite(texCoord0) * vertexColor; }\n";
+        let mut files = blur_program(fsh);
+        files.insert(
+            "assets/m/shaders/include/tinted.glsl".to_owned(),
+            b"#include <sunrise:pipeline_sprite.glsl>\n\
+                vec4 tintedSprite(vec2 uv) { return sampleSprite(uv) * 0.5; }\n"
+                .to_vec(),
+        );
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!((count, refused), (1, Vec::<String>::new()));
+    }
+
+    /// The vertex inputs are those of the stage with its includes inlined, as the translator
+    /// validates them: a vertex shader whose extra `in` comes from its own include is checked
+    /// against that input, not refused as undeclared.
+    #[test]
+    fn a_vertex_input_an_include_declares_is_the_programs() {
+        let vsh = "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            #include <minecraft:projection.glsl>\n#include <m:offset.glsl>\n\
+            in vec3 Position;\nin vec2 UV0;\nin vec4 Color;\n\
+            out vec2 texCoord0;\nout vec4 vertexColor;\n\
+            void main() { gl_Position = ProjMat * ModelViewMat * vec4(Position + Offset, 1.0); texCoord0 = UV0; vertexColor = Color; }\n";
+        let fsh = "#version 330\n\
+            in vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() { fragColor = vertexColor; }\n";
+        let files: BTreeMap<String, Vec<u8>> = [
+            ("assets/m/shaders/include/offset.glsl", "in vec3 Offset;\n"),
+            ("assets/m/shaders/core/blur.vsh", vsh),
+            ("assets/m/shaders/core/blur.fsh", fsh),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+        .into();
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!((count, refused), (1, Vec::<String>::new()));
+    }
+
+    /// A vertex shader with `vsh_in` as its inputs and `main_body` as its body, with
+    /// `blur.fsh` of the default format's outputs.
+    fn vertex_program(vsh_in: &str, main_body: &str) -> BTreeMap<String, Vec<u8>> {
+        let vsh = format!(
+            "#version 330\n#include <minecraft:dynamictransforms.glsl>\n\
+            #include <minecraft:projection.glsl>\n{vsh_in}\
+            out vec2 texCoord0;\nout vec4 vertexColor;\n\
+            void main() {{ {main_body} }}\n"
+        );
+        let fsh = "#version 330\nin vec2 texCoord0;\nin vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() { fragColor = vertexColor; }\n";
+        [
+            ("assets/m/shaders/core/blur.vsh", vsh.as_str()),
+            ("assets/m/shaders/core/blur.fsh", fsh),
+        ]
+        .map(|(name, text)| (name.to_owned(), text.as_bytes().to_vec()))
+        .into()
+    }
+
+    /// A program that declares only `Position` is checked against that input alone: it passes,
+    /// and reading `UV0` it never declared is refused, as the game (which builds the inputs from
+    /// the format's declared ones) would; checked as if it declared all three defaults, the
+    /// undeclared read compiled.
+    #[test]
+    fn a_program_declaring_one_default_input_is_checked_against_that_input() {
+        let body = "gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);";
+        let (count, refused) = pipeline_shaders(&vertex_program("in vec3 Position;\n", body), None);
+        assert_eq!((count, refused), (1, Vec::<String>::new()));
+
+        let reads_uv0 = format!("{body} texCoord0 = UV0;");
+        let (count, refused) =
+            pipeline_shaders(&vertex_program("in vec3 Position;\n", &reads_uv0), None);
+        assert_eq!(count, 1);
+        assert!(
+            refused
+                .iter()
+                .any(|r| r.starts_with("assets/m/shaders/core/blur.vsh")),
+            "{refused:?}"
+        );
+    }
+
+    /// The check cannot see the format a pipeline registers, so an `in` of any type a vertex
+    /// attribute can have passes, whatever its name: `Normal`, which vanilla formats have, and a
+    /// custom `Tangent` a mod's own binding would supply.
+    #[test]
+    fn a_vertex_input_of_any_attribute_type_passes_whatever_its_name() {
+        for (inputs, body) in [
+            (
+                "in vec3 Position;\nin vec3 Normal;\n",
+                "gl_Position = ProjMat * ModelViewMat * vec4(Position + Normal, 1.0);",
+            ),
+            (
+                "in vec3 Position;\nin vec4 Tangent;\n",
+                "gl_Position = ProjMat * ModelViewMat * vec4(Position + Tangent.xyz, 1.0);",
+            ),
+        ] {
+            let (count, refused) = pipeline_shaders(&vertex_program(inputs, body), None);
+            assert_eq!((count, refused), (1, Vec::<String>::new()), "{inputs}");
+        }
+    }
+
+    /// An `in` of a type no vertex attribute format supplies is refused, naming it, at its line.
+    #[test]
+    fn a_vertex_input_no_attribute_format_supplies_is_refused() {
+        let body = "gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0) * Bones;";
+        let inputs = "in vec3 Position;\nin mat4 Bones;\n";
+        let (count, refused) = pipeline_shaders(&vertex_program(inputs, body), None);
+        assert_eq!(count, 1);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].starts_with("assets/m/shaders/core/blur.vsh:5:")
+                && refused[0].contains("`mat4` for `Bones`"),
+            "{refused:?}"
+        );
+    }
+
+    /// A fragment shader that includes `oit.glsl` only through an include of its own is checked
+    /// against the OIT passes: its body is refused there, as it is with the direct include.
+    #[test]
+    fn an_oit_include_reached_through_another_include_is_checked_against_the_oit_passes() {
+        let fsh = "#version 330\n#include <m:wrapped.glsl>\n\
+            in vec4 vertexColor;\nout vec4 fragColor;\n\
+            void main() {\n#ifdef OIT_ALPHA_ONLY\n\
+            executeAlphaOnlyPhase(gl_FragCoord.z, vertexColor.a);\n#else\n\
+            fragColor = sampleColorForAccumulation(vertexColor);\n#endif\n}\n";
+        let mut files = blur_program(fsh);
+        files.insert(
+            "assets/m/shaders/include/wrapped.glsl".to_owned(),
+            b"#include <minecraft:oit.glsl>\n".to_vec(),
+        );
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!(count, 1);
+        assert!(
+            refused
+                .iter()
+                .any(|r| r.contains("blur.fsh") && r.contains("OIT depth_bounds")),
+            "{refused:?}"
+        );
+    }
+
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../sunrise-mod-package/tests/index")
@@ -661,8 +971,6 @@ mod tests {
         let smod = fixture("coords_hud-0.1.0.smod");
         let report = inspect(&smod, Kind::Mod).unwrap();
         assert!(report.text().contains("no code: content only"));
-        let e = inspect(&pack, Kind::Shader).err().unwrap();
-        assert!(e.contains("sunrise-shaders.toml"), "{e}");
         assert!(inspect(&pack, Kind::Mod).is_err());
     }
 
@@ -775,5 +1083,125 @@ mod tests {
             assert!(text.contains(word), "{text}");
         }
         assert_eq!(report.json()["dependencies"], dependencies);
+    }
+
+    /// #6022: a shader using a set-1 uniform block and a sampler of the mod's own layout passes
+    /// `check`, declared in the shader or in an include, as the game accepts it; the same shader
+    /// with a real syntax error is still refused.
+    #[test]
+    fn pipeline_shaders_take_the_mods_own_set_1_block_and_sampler() {
+        const DECLARE: &str =
+            "layout(std140, set = 1, binding = 0) uniform SceneUniform { vec4 Tint; };
+layout(set = 1, binding = 1) uniform sampler2D SsaoTex;
+";
+        const BODY: &str = "in vec2 texCoord0;
+out vec4 fragColor;
+void main() { fragColor = Tint * texture(SsaoTex, texCoord0); }
+";
+        let check = |fsh: String| {
+            let mut files = BTreeMap::new();
+            files.insert(
+                "assets/example/shaders/core/ssao.fsh".to_owned(),
+                fsh.into_bytes(),
+            );
+            files.insert(
+                "assets/example/shaders/include/scene.glsl".to_owned(),
+                DECLARE.as_bytes().to_vec(),
+            );
+            pipeline_shaders(&files, None)
+        };
+        for fsh in [
+            format!(
+                "#version 330
+{DECLARE}{BODY}"
+            ),
+            format!(
+                "#version 330
+#moj_import <example:scene.glsl>
+{BODY}"
+            ),
+            format!(
+                "#version 330
+#include <example:scene.glsl>
+{BODY}"
+            ),
+        ] {
+            let (count, refused) = check(fsh.clone());
+            assert_eq!((count, refused), (1, Vec::<String>::new()), "{fsh}");
+        }
+        let broken = format!(
+            "#version 330
+{DECLARE}{}",
+            BODY.replace("Tint *", "Tint * *")
+        );
+        let (_, refused) = check(broken);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].starts_with("assets/example/shaders/core/ssao.fsh:")
+                && !refused[0].contains("is not a block or sampler"),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_shaders_validates_oit_variants_and_refuses_alpha_only_color_output() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            "assets/example/shaders/core/good_oit.fsh".to_owned(),
+            b"\
+#version 330
+#include <minecraft:dynamictransforms.glsl>
+#include <minecraft:oit.glsl>
+in vec2 texCoord0;
+in vec4 vertexColor;
+#ifndef OIT_ALPHA_ONLY
+out vec4 fragColor;
+#endif
+void main() {
+    vec4 color = vertexColor * ColorModulator;
+#ifdef OIT_ALPHA_ONLY
+    executeAlphaOnlyPhase(gl_FragCoord.z, color.a);
+#else
+#ifdef OIT_ACCUMULATE
+    color = sampleColorForAccumulation(color);
+#endif
+    fragColor = color;
+#endif
+}
+"
+            .to_vec(),
+        );
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!(count, 1);
+        assert!(
+            refused.is_empty(),
+            "expected valid OIT shader to pass: {refused:?}"
+        );
+
+        files.insert(
+            "assets/example/shaders/core/bad_oit.fsh".to_owned(),
+            b"\
+#version 330
+#include <minecraft:oit.glsl>
+in vec4 vertexColor;
+out vec4 fragColor;
+void main() {
+#ifdef OIT_ALPHA_ONLY
+    executeAlphaOnlyPhase(gl_FragCoord.z, vertexColor.a);
+#else
+    fragColor = sampleColorForAccumulation(vertexColor);
+#endif
+}
+"
+            .to_vec(),
+        );
+        let (count, refused) = pipeline_shaders(&files, None);
+        assert_eq!(count, 2);
+        assert!(
+            refused
+                .iter()
+                .any(|r| r.contains("bad_oit.fsh") && r.contains("OIT depth_bounds")),
+            "expected bad OIT shader refusal at depth_bounds, got: {refused:?}"
+        );
     }
 }

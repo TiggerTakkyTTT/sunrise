@@ -15,7 +15,7 @@ use sunrise_addresses::SDK_RELEASES;
 use sunrise_release_sign::{self as release, MOD_TOOL, PublicKey, SIGNATURE, SUMS};
 use tempfile::NamedTempFile;
 
-const BUILD: &str = env!("SUNRISE_TOOL_BUILT_FROM");
+const BUILD: &str = sunrise_native_build::contract::TOOL_COMMIT;
 const CHANNEL: &str = env!("SUNRISE_TOOL_CHANNEL");
 const INFO: &str = "tool.json";
 #[cfg(not(windows))]

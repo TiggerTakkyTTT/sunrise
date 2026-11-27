@@ -14,6 +14,7 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, OnceLock},
 };
+use sunrise_hooks::items::engine::CreativeOrder;
 use sunrise_items::{
     creative_catalog::{Catalog, Kind, TabContents},
     item_data::component_snapshot,
@@ -113,78 +114,37 @@ pub struct Creative {
     /// The packs' Polytone creative tab modifiers, applied by `rebuild`.
     pack: Vec<crate::polytone_creative_tabs::TabModifier>,
 }
-/// The same registries a vanilla client finishes configuring, in network ID order.
-/// Known-pack entries have already been filled from local resources by configuration.
-pub fn live_holders(
-    builtin: &sunrise_protocol::registry::Builtin,
-    dynamic: &sunrise_protocol::registry::Dynamic,
-) -> sunrise_items::creative_catalog::Holders {
-    use std::num::NonZeroU8;
-    use sunrise_core::nbt::Tag;
-    use sunrise_items::creative_catalog::{Enchantment, Holders, Painting};
-    let size = |value: &Tag| {
-        let n = match *value {
-            Tag::Byte(n) => i64::from(n),
-            Tag::Short(n) => i64::from(n),
-            Tag::Int(n) => i64::from(n),
-            Tag::Long(n) => n,
-            _ => return None,
-        };
-        NonZeroU8::new(u8::try_from(n).ok()?)
-    };
-    let entries = |kind: &str| dynamic.registries.get(kind).into_iter().flatten();
-    let text = |data: &Tag, key: &str| data.get(key).map(crate::scoreboard::tag_to_json);
-    let enchantments = entries("minecraft:enchantment")
-        .filter_map(|(id, data)| {
-            let data = data.as_ref()?;
-            Some(Enchantment {
-                id: id.clone(),
-                max_level: size(data.get("max_level")?)?,
-                description: text(data, "description").unwrap_or_default(),
-            })
-        })
-        .collect();
-    let placeable = dynamic
-        .tag("minecraft:painting_variant", "minecraft:placeable")
-        .unwrap_or_default();
-    let paintings = entries("minecraft:painting_variant")
-        .enumerate()
-        .filter_map(|(i, (id, data))| {
-            let data = data.as_ref()?;
-            Some(Painting {
-                id: id.clone(),
-                width: size(data.get("width")?)?,
-                height: size(data.get("height")?)?,
-                placeable: placeable.contains(&(i as i32)),
-                title: text(data, "title"),
-                author: text(data, "author"),
-            })
-        })
-        .collect();
-    let horns = dynamic
-        .tag("minecraft:instrument", "minecraft:goat_horns")
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|&id| dynamic.name("minecraft:instrument", id).map(str::to_owned))
-        .collect();
-    let instrument_descriptions = entries("minecraft:instrument")
-        .filter_map(|(id, data)| Some((id.clone(), text(data.as_ref()?, "description")?)))
-        .collect();
-    let banner_patterns = entries("minecraft:banner_pattern")
-        .map(|(id, _)| id.clone())
-        .collect();
-    let potions = builtin
-        .get("minecraft:potion")
-        .map_or_else(Vec::new, |registry| registry.names.clone());
-    Holders {
-        potions,
-        enchantments,
-        paintings,
-        horns,
-        instrument_descriptions,
-        banner_patterns,
+#[cfg(any(test, feature = "test-resource-cache"))]
+impl Creative {
+    /// Clone loaded catalog state with fresh per-game UI cache mutexes for tests.
+    pub fn clone_for_tests(&self) -> Self {
+        Self {
+            tabs: self.tabs.clone(),
+            selected_id: self.selected_id.clone(),
+            page: self.page,
+            scroll: self.scroll,
+            scrolling: self.scrolling,
+            search: self.search.clone(),
+            search_items: self.search_items.clone(),
+            search_names: self.search_names.clone(),
+            search_generation: self.search_generation,
+            search_index: self.search_index.clone(),
+            holders: Arc::clone(&self.holders),
+            items: Arc::clone(&self.items),
+            catalog: Arc::clone(&self.catalog),
+            headers: self.headers.clone(),
+            metadata: self.metadata.clone(),
+            ungrouped: self.ungrouped.clone(),
+            item_tags: self.item_tags.clone(),
+            contents: self.contents.clone(),
+            shown: Mutex::new(None),
+            lines_cache: Mutex::new(None),
+            pack: self.pack.clone(),
+        }
     }
 }
+pub use crate::menu::{DisplayClick, click_display, slot_locked};
+pub use sunrise_sim::item_names::{Names, live_holders};
 
 fn append_unique(items: &mut Vec<ItemStack>, added: &[ItemStack]) {
     for stack in added {
@@ -230,125 +190,27 @@ struct Shown {
     language_generation: u64,
     items: Arc<[ItemStack]>,
 }
-/// Display names from the pinned en_us language file.
-#[derive(Default)]
-pub struct Names {
-    map: HashMap<String, String>,
-    item_names: HashMap<String, serde_json::Value>,
-    /// The block registry, which says whether an item is a block's (`Item.Properties.useBlockDescriptionPrefix`).
-    blocks: Option<&'static sunrise_world::registry::BlockRegistry>,
+/// The stacks an item tab's display slots show, from `Creative::display_window`.
+pub struct DisplayWindow {
+    items: Arc<[ItemStack]>,
+    first: usize,
 }
-impl Names {
-    pub fn load(root: &sunrise_assets::resource_source::ResourceSource) -> Self {
-        let read = |namespace: &str| {
-            root.read(&format!("assets/{namespace}/lang/en_us.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice::<HashMap<String, String>>(&b).ok())
-                .unwrap_or_default()
-        };
-        let mut map = read("minecraft");
-        // Content mods' names (docs/modpacks.md); none in a vanilla root.
-        for namespace in root
-            .namespaces("assets")
-            .into_iter()
-            .filter(|ns| ns != "minecraft")
-        {
-            map.extend(read(&namespace));
-        }
-        Self {
-            map,
-            item_names: HashMap::new(),
-            blocks: None,
-        }
+
+impl DisplayWindow {
+    /// The stack in a display slot, if that slot exists and holds a nonempty stack.
+    pub fn stack(&self, slot: usize) -> Option<&ItemStack> {
+        let cell = Creative::display_cell(slot)?;
+        self.items.get(self.first + cell).filter(|s| s.count > 0)
     }
-    /// Keep each item's default `minecraft:item_name` component from the items' prototypes:
-    /// `Item.getDescriptionId` is its translation key, so the key is the item's own, never
-    /// guessed from the language.
-    pub fn with_item_names(
-        mut self,
-        prototypes: &std::collections::BTreeMap<
-            String,
-            std::collections::BTreeMap<String, serde_json::Value>,
-        >,
-        blocks: &'static sunrise_world::registry::BlockRegistry,
-    ) -> Self {
-        self.blocks = Some(blocks);
-        self.item_names = prototypes
-            .iter()
-            .filter_map(|(id, components)| {
-                Some((id.clone(), components.get("minecraft:item_name")?.clone()))
-            })
-            .collect();
-        self
-    }
-    /// Whether `id` is the item of a block of the same id, which takes its block's `block.*`
-    /// description id (a mod block item, whose prototype carries no `item_name`).
-    pub fn is_block_item(&self, id: &str) -> bool {
-        self.blocks
-            .is_some_and(|blocks| blocks.default_state(id).is_some())
-    }
-    /// An item's default `minecraft:item_name` component, as its prototype has it.
-    pub fn item_name(&self, id: &str) -> Option<&serde_json::Value> {
-        self.item_names.get(id)
-    }
-    pub fn item(&self, id: &str) -> String {
-        let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-        self.map
-            .get(&format!("item.{namespace}.{path}"))
-            .or_else(|| self.map.get(&format!("block.{namespace}.{path}")))
-            .cloned()
-            .unwrap_or_else(|| path.replace('_', " "))
-    }
-    /// An item's display name in the selected language: `item.*` then
-    /// `block.*`, then the pinned English map (`Names::item`).
-    pub fn display_item(&self, id: &str) -> String {
-        let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
-        if let Some(lang) = crate::lang::current() {
-            for prefix in ["item", "block"] {
-                if let Some(name) = lang.get(&format!("{prefix}.{namespace}.{path}")) {
-                    return name.to_owned();
-                }
-            }
-        }
-        self.item(id)
-    }
-    /// A translation key's text in the selected language, else the pinned
-    /// English map (`HoverName` and tooltip keys such as potion names).
-    pub fn display_get(&self, key: &str) -> Option<String> {
-        crate::lang::current()
-            .and_then(|lang| lang.get(key).map(str::to_owned))
-            .or_else(|| self.get(key).map(str::to_owned))
-    }
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.map.get(key).map(String::as_str)
+
+    /// Whether this snapshot has items beyond the visible grid.
+    pub fn can_scroll(&self) -> bool {
+        Creative::has_hidden_items(self.items.len())
     }
 }
 
-/// `CreativeModeTabs`' key for an exported tab id (`itemGroup.*`); the
-/// export's `title` is the English fallback.
-pub fn item_group_key(id: &str) -> Option<&'static str> {
-    Some(match id.trim_start_matches("minecraft:") {
-        "building_blocks" => "itemGroup.buildingBlocks",
-        "colored_blocks" => "itemGroup.coloredBlocks",
-        "natural_blocks" => "itemGroup.natural",
-        "functional_blocks" => "itemGroup.functional",
-        "redstone_blocks" => "itemGroup.redstone",
-        "hotbar" => "itemGroup.hotbar",
-        "search" => "itemGroup.search",
-        "tools_and_utilities" => "itemGroup.tools",
-        "combat" => "itemGroup.combat",
-        "food_and_drinks" => "itemGroup.foodAndDrink",
-        "ingredients" => "itemGroup.ingredients",
-        "spawn_eggs" => "itemGroup.spawnEggs",
-        "op_blocks" => "itemGroup.op",
-        "inventory" => "itemGroup.inventory",
-        _ => return None,
-    })
-}
-/// A mod tab's own `itemGroup.<mod>.<name>` key, for its id `<mod>:<name>`.
-pub fn mod_item_group_key(id: &str) -> String {
-    format!("itemGroup.{}", id.replace(':', "."))
-}
+pub use sunrise_items::creative_catalog::{item_group_key, mod_item_group_key};
+
 impl Creative {
     pub const WIDTH: f32 = 195.0;
     pub const HEIGHT: f32 = 136.0;
@@ -383,22 +245,41 @@ impl Creative {
     /// Game slot id of an item tab's first display slot (ItemPickerMenu's
     /// `CustomCreativeSlot`s, 9 by 5); its hotbar row keeps ids 0..9.
     pub const DISPLAY: usize = 900;
+    const DISPLAY_ROWS: usize = 5;
+    const DISPLAY_COLUMNS: usize = 9;
+    const DISPLAY_CELLS: usize = Self::DISPLAY_ROWS * Self::DISPLAY_COLUMNS;
 
     /// Visible slots of an item tab (game slot ids).
     pub fn tab_slots() -> impl Iterator<Item = usize> {
-        (Self::DISPLAY..Self::DISPLAY + 45).chain(0..9)
+        Self::display_slots().map(|(slot, _)| slot).chain(0..9)
+    }
+
+    /// An item tab's display slots, left to right then top to bottom: each one's game slot id
+    /// and position (ItemPickerMenu's `CustomCreativeSlot(CONTAINER, i * 9 + j, 9 + j * 18,
+    /// 18 + i * 18)`).
+    pub fn display_slots() -> impl Iterator<Item = (usize, (f32, f32))> {
+        (0..Self::DISPLAY_CELLS).map(|cell| (Self::DISPLAY + cell, Self::display_position(cell)))
+    }
+
+    fn display_position(cell: usize) -> (f32, f32) {
+        (
+            9.0 + (cell % Self::DISPLAY_COLUMNS) as f32 * 18.0,
+            18.0 + (cell / Self::DISPLAY_COLUMNS) as f32 * 18.0,
+        )
     }
 
     /// ItemPickerMenu's slot positions.
     pub fn tab_slot_position(slot: usize) -> Option<(f32, f32)> {
         match slot {
             0..9 => Some((9.0 + slot as f32 * 18.0, 112.0)),
-            _ if (Self::DISPLAY..Self::DISPLAY + 45).contains(&slot) => {
-                let i = slot - Self::DISPLAY;
-                Some((9.0 + (i % 9) as f32 * 18.0, 18.0 + (i / 9) as f32 * 18.0))
-            }
-            _ => None,
+            _ => Self::display_cell(slot).map(Self::display_position),
         }
+    }
+
+    /// The grid cell of display slot `slot`, None for any other slot.
+    fn display_cell(slot: usize) -> Option<usize> {
+        slot.checked_sub(Self::DISPLAY)
+            .filter(|&cell| cell < Self::DISPLAY_CELLS)
     }
     /// The scrollbar track (insideScrollbar), relative to the screen origin.
     pub const SCROLL_X: f32 = 175.0;
@@ -425,11 +306,7 @@ impl Creative {
         {
             if recipe.kind == Kind::Search {
                 for row in tab["search_metadata"].as_array().into_iter().flatten() {
-                    let snbt = row["stack"]
-                        .as_str()
-                        .ok_or("missing search metadata stack")?;
-                    let stack = crate::item_data::parse_stack(snbt)?
-                        .ok_or("empty search metadata stack")?;
+                    let stack = sunrise_items::creative_catalog::parse_search_metadata_stack(row)?;
                     let strings = |key: &str| {
                         row[key]
                             .as_array()
@@ -534,9 +411,11 @@ impl Creative {
         self.index_search();
     }
 
-    /// The built-in sorter keeps the creative UI's ranking for ungrouped items, too.
-    pub fn search_order_from(&self, contents: &[Arc<TabContents>]) -> Vec<ItemStack> {
-        self.with_ungrouped(self.catalog.search_display(contents))
+    /// Vanilla's creative order of `contents`, ungrouped items last: a stack's own place in the
+    /// search tab, else its item's first. The built-in sorter ranks by it, and the platform reads it.
+    pub fn stock_order(&self, contents: &[Arc<TabContents>]) -> CreativeOrder {
+        let stacks = self.with_ungrouped(self.catalog.search_display(contents));
+        CreativeOrder::new(stacks.iter().map(|s| (s.item.as_ref(), s.merge_kind())))
     }
 
     fn with_ungrouped(&self, search: &[ItemStack]) -> Vec<ItemStack> {
@@ -686,7 +565,7 @@ impl Creative {
         self.project();
         if !self.select_default_if_missing() {
             // ItemPickerMenu.getScrollForRowIndex.
-            let hidden = self.hidden_rows(names);
+            let hidden = Self::hidden_rows(self.rows(names));
             self.scroll = if hidden > 0 {
                 (row as f32 / hidden as f32).clamp(0.0, 1.0)
             } else {
@@ -706,15 +585,6 @@ impl Creative {
             .position(|t| t.id == "minecraft:building_blocks");
         self.select(default.unwrap_or(0));
         true
-    }
-    /// Where a stack comes in the creative tabs (the search tab lists them
-    /// all, in tab order): the same stack's place, else its item's first.
-    /// None for items the tabs don't show.
-    pub fn order_of(items: &[ItemStack], stack: &ItemStack) -> Option<usize> {
-        items
-            .iter()
-            .position(|s| s.same_item_same_components(stack))
-            .or_else(|| items.iter().position(|s| s.item == stack.item))
     }
     /// The tabs without their stacks: what the screen draws of them each frame.
     pub fn tab_headers(&self) -> Vec<Tab> {
@@ -996,13 +866,13 @@ impl Creative {
         });
         items
     }
-    /// The stack in grid cell `index` (row-major from the tab's top), None
-    /// for an empty cell: a saved toolbar's empty slot, or past the end.
-    pub fn shown(&self, names: &Names, index: usize) -> Option<ItemStack> {
-        self.items(names)
-            .get(index)
-            .filter(|s| s.count > 0)
-            .cloned()
+    /// What the display slots show (`ItemPickerMenu.scrollTo`): the tab's list from its first
+    /// visible row, resolved once for any number of slots.
+    pub fn display_window(&self, names: &Names) -> DisplayWindow {
+        let items = self.items(names);
+        let hidden = Self::hidden_rows(Self::rows_for(items.len()));
+        let first = self.first_row_of(hidden) * Self::DISPLAY_COLUMNS;
+        DisplayWindow { items, first }
     }
     /// `CreativeModeInventoryScreen.selectTab` for the HOTBAR tab: the nine
     /// saved rows of `HotbarManager` as the tab's items, an empty stack (count
@@ -1019,19 +889,29 @@ impl Creative {
         *self.shown.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
     pub fn rows(&self, names: &Names) -> usize {
-        self.items(names).len().div_ceil(9)
+        Self::rows_for(self.items(names).len())
     }
-    /// ItemPickerMenu.calculateRowCount: rows beyond the five shown.
-    fn hidden_rows(&self, names: &Names) -> i32 {
-        self.rows(names) as i32 - 5
+    fn rows_for(item_count: usize) -> usize {
+        item_count.div_ceil(Self::DISPLAY_COLUMNS)
+    }
+    /// ItemPickerMenu.calculateRowCount: rows beyond the display grid.
+    fn hidden_rows(row_count: usize) -> i32 {
+        row_count as i32 - Self::DISPLAY_ROWS as i32
     }
     /// First visible grid row for the scroll position (getRowIndexForScroll).
     pub fn first_row(&self, names: &Names) -> usize {
-        ((self.scroll * self.hidden_rows(names) as f32 + 0.5) as i32).max(0) as usize
+        self.first_row_of(Self::hidden_rows(self.rows(names)))
     }
-    /// CreativeModeInventoryScreen.canScroll: more than five rows, on a tab with a scrollbar.
+    /// `first_row` with `hidden` rows beyond the display grid.
+    fn first_row_of(&self, hidden: i32) -> usize {
+        ((self.scroll * hidden as f32 + 0.5) as i32).max(0) as usize
+    }
+    /// CreativeModeInventoryScreen.canScroll: more items than fit, on a tab with a scrollbar.
     pub fn can_scroll(&self, names: &Names) -> bool {
-        !self.tab().inventory && self.items(names).len() > 45
+        !self.tab().inventory && Self::has_hidden_items(self.items(names).len())
+    }
+    fn has_hidden_items(item_count: usize) -> bool {
+        item_count > Self::DISPLAY_CELLS
     }
     /// insideScrollbar, for a point relative to the screen origin.
     pub fn inside_scrollbar(&self, x: f32, y: f32) -> bool {
@@ -1069,7 +949,7 @@ impl Creative {
         if !self.can_scroll(names) {
             return;
         }
-        let rows = self.hidden_rows(names) as f64;
+        let rows = Self::hidden_rows(self.rows(names)) as f64;
         self.scroll = (self.scroll - (amount / rows) as f32).clamp(0.0, 1.0);
     }
     /// The scroller sprite's offset from the top of the track.
@@ -1217,102 +1097,6 @@ pub enum Hover {
 pub fn search_key_swaps(numeric: bool, hotbar_key: bool, hover: Hover, carrying: bool) -> bool {
     let quick_swap = hover != Hover::Display { filled: false };
     quick_swap && numeric && hotbar_key && !carrying && hover != Hover::Nothing
-}
-
-/// What a click on an item tab's display slot does besides changing the
-/// carried stack.
-#[derive(Clone, PartialEq, Debug)]
-pub enum DisplayClick {
-    Nothing,
-    /// SWAP: the hotbar slot gets a full stack of the item.
-    Hotbar(usize, ItemStack),
-    /// SWAP with button 40 (Key F): the off-hand gets a full stack of the item.
-    Offhand(ItemStack),
-    /// THROW: a copy of the item is dropped.
-    Drop(ItemStack),
-}
-
-/// Whether a stack has `minecraft:creative_slot_lock`.
-pub fn slot_locked(stack: &ItemStack) -> bool {
-    stack
-        .data()
-        .is_some_and(|d| d.other("minecraft:creative_slot_lock").is_some())
-}
-
-/// `CreativeModeInventoryScreen.slotClicked` on a display slot
-/// (`slot.container == CONTAINER`): `shown` is the slot's item (None past
-/// the tab's end) and `max` gives an item's max stack size. The tab's items
-/// are never changed: clicks make copies.
-pub fn click_display(
-    carried: &mut Option<ItemStack>,
-    shown: Option<&ItemStack>,
-    max: impl Fn(&ItemStack) -> u32,
-    button: i32,
-    input: crate::menu::Input,
-) -> DisplayClick {
-    use crate::menu::Input;
-    // CustomCreativeSlot.mayPickup: a `creative_slot_lock` stack (the saved
-    // toolbars' hint) can't be clicked at all.
-    if shown.is_some_and(slot_locked) {
-        return DisplayClick::Nothing;
-    }
-    let copy = |s: &ItemStack, count: u32| ItemStack { count, ..s.clone() };
-    let quick_key = input == Input::QuickMove;
-    match input {
-        Input::Swap => {
-            return match shown {
-                Some(s) if button == 40 => DisplayClick::Offhand(copy(s, max(s))),
-                Some(s) if (0..9).contains(&button) => {
-                    DisplayClick::Hotbar(button as usize, copy(s, max(s)))
-                }
-                Some(_) | None => DisplayClick::Nothing,
-            };
-        }
-        Input::Clone => {
-            if carried.is_none()
-                && let Some(s) = shown
-            {
-                *carried = Some(copy(s, max(s)));
-            }
-            return DisplayClick::Nothing;
-        }
-        Input::Throw => {
-            return match shown {
-                Some(s) => DisplayClick::Drop(copy(s, if button == 0 { 1 } else { max(s) })),
-                None => DisplayClick::Nothing,
-            };
-        }
-        _ => {}
-    }
-    match (carried.as_mut(), shown) {
-        (Some(c), Some(s)) if c.item == s.item && c.extra == s.extra && c.damage == s.damage => {
-            // isSameItemSameComponents: grow, fill or shrink what is carried.
-            if button == 0 {
-                if quick_key {
-                    c.count = max(c);
-                } else if c.count < max(c) {
-                    c.count += 1;
-                }
-            } else {
-                c.count -= 1;
-            }
-        }
-        (None, Some(s)) => {
-            *carried = Some(copy(s, if quick_key { max(s) } else { s.count }));
-        }
-        (Some(c), _) => {
-            if button == 0 {
-                *carried = None;
-            } else {
-                c.count -= 1;
-            }
-        }
-        (None, None) => {}
-    }
-    if carried.as_ref().is_some_and(|c| c.count == 0) {
-        *carried = None;
-    }
-    DisplayClick::Nothing
 }
 
 #[cfg(test)]
@@ -1628,15 +1412,19 @@ mod tests {
             }],
             ..Default::default()
         });
-        let names = Names {
-            map: HashMap::from([
-                ("attribute.name.armor".into(), "Armor".into()),
-                ("attribute.modifier.plus.0".into(), "+%s %s".into()),
-                ("painting.dimensions".into(), "%s by %s".into()),
-            ]),
-            ..Default::default()
-        };
-        let lang = lang::Language::of("en_us", names.map.clone());
+        let map: HashMap<String, String> = HashMap::from([
+            ("attribute.name.armor".into(), "Armor".into()),
+            ("attribute.modifier.plus.0".into(), "+%s %s".into()),
+            ("painting.dimensions".into(), "%s by %s".into()),
+        ]);
+        let names = Names::load(&sunrise_assets::resource_source::ResourceSource::indexed(
+            [(
+                "assets/minecraft/lang/en_us.json".into(),
+                sunrise_assets::resource_source::Resource::bytes(serde_json::to_vec(&map).unwrap()),
+            )]
+            .into(),
+        ));
+        let lang = lang::Language::of("en_us", map);
         let (local, _) = lang::scoped(lang, || creative.localized_lines(&names));
         let search = |term| creative.search_results_in(term, &names, &local, false);
         assert_eq!(search("+2 armor"), [0, 2]);
@@ -1960,10 +1748,7 @@ mod tests {
         let mut c = creative(90);
         c.select(2);
         assert!(c.tab().inventory);
-        assert!(!c.can_scroll(&Names {
-            map: HashMap::new(),
-            ..Default::default()
-        }));
+        assert!(!c.can_scroll(&Names::default()));
     }
 
     #[test]
@@ -2099,6 +1884,31 @@ mod tests {
 
     fn ids(items: &[ItemStack]) -> Vec<&str> {
         items.iter().map(|s| s.item.as_ref()).collect()
+    }
+
+    #[test]
+    fn the_stock_order_is_the_search_tabs_places_without_publishing_anything() {
+        let c = with_operator_tab();
+        let build = |operator| {
+            c.catalog.build(
+                Parameters {
+                    operator,
+                    features: &[],
+                    holders: &Default::default(),
+                    items: &crate::items::Items::empty(),
+                },
+                None,
+                |_, _, _| {},
+            )
+        };
+        let place =
+            |order: &CreativeOrder, id: &str| order.of(id, ItemStack::new(id, 1).merge_kind());
+        let normal = c.stock_order(&build(false));
+        assert_eq!(place(&normal, "minecraft:stone"), Some(0));
+        assert_eq!(place(&normal, "minecraft:barrier"), None);
+        let operator = c.stock_order(&build(true));
+        assert_eq!(place(&operator, "minecraft:command_block"), Some(1));
+        assert_eq!(place(&operator, "minecraft:barrier"), Some(2));
     }
 
     #[test]
@@ -2269,14 +2079,13 @@ mod tests {
         );
         // A saved sword in slot 0, an empty slot, then the hint.
         c.set_saved_hotbars(vec![stack("diamond_sword", 1), stack("air", 0), hint]);
-        let names = Names {
-            map: HashMap::new(),
-            ..Default::default()
-        };
-        assert_eq!(c.shown(&names, 0), Some(stack("diamond_sword", 1)));
-        assert_eq!(c.shown(&names, 1), None);
-        assert_eq!(c.shown(&names, 3), None);
-        let hint = c.shown(&names, 2).unwrap();
+        let names = Names::default();
+        let shown = c.display_window(&names);
+        let cell = |i| shown.stack(Creative::DISPLAY + i).cloned();
+        assert_eq!(cell(0), Some(stack("diamond_sword", 1)));
+        assert_eq!(cell(1), None);
+        assert_eq!(cell(3), None);
+        let hint = cell(2).unwrap();
         assert!(slot_locked(&hint));
         assert!(!slot_locked(&stack("diamond_sword", 1)));
         // CustomCreativeSlot.mayPickup: the hint is never taken, and a carried
@@ -2318,10 +2127,7 @@ mod tests {
     #[test]
     fn search_matches_vanilla_trees() {
         let c = creative(0);
-        let names = Names {
-            map: HashMap::new(),
-            ..Default::default()
-        };
+        let names = Names::default();
         let q = |s: &str| c.search_results(s, &names);
         assert_eq!(q(""), [0, 1, 2]);
         assert_eq!(q("ANVIL"), [0]);
@@ -2346,14 +2152,18 @@ mod tests {
     #[test]
     fn search_matches_the_display_name_in_the_selected_language() {
         let c = creative(0);
-        let names = Names {
-            map: HashMap::from([
-                ("item.minecraft.anvil".to_owned(), "铁砧".to_owned()),
-                ("item.minecraft.wooden_hoe".to_owned(), "木锄".to_owned()),
-            ]),
-            ..Default::default()
-        };
-        let lang = lang::Language::of("zh_cn", names.map.clone());
+        let map: HashMap<String, String> = HashMap::from([
+            ("item.minecraft.anvil".to_owned(), "铁砧".to_owned()),
+            ("item.minecraft.wooden_hoe".to_owned(), "木锄".to_owned()),
+        ]);
+        let names = Names::load(&sunrise_assets::resource_source::ResourceSource::indexed(
+            [(
+                "assets/minecraft/lang/en_us.json".into(),
+                sunrise_assets::resource_source::Resource::bytes(serde_json::to_vec(&map).unwrap()),
+            )]
+            .into(),
+        ));
+        let lang = lang::Language::of("zh_cn", map);
         let (local, _) = lang::scoped(lang, || c.localized_lines(&names));
         let q = |s: &str| c.search_results_in(s, &names, &local, false);
         assert_eq!(q("铁砧"), [0]);
@@ -2411,10 +2221,7 @@ mod tests {
     #[test]
     fn scrollbar_drag_follows_the_mouse_while_held() {
         let mut c = creative(90);
-        let names = Names {
-            map: HashMap::new(),
-            ..Default::default()
-        };
+        let names = Names::default();
         c.select(1);
         // Pressing the track holds the scrollbar without moving it.
         assert!(c.press_scrollbar(180.0, 60.0, &names));
@@ -2481,10 +2288,7 @@ mod tests {
     #[test]
     fn wheel_moves_one_row_per_notch() {
         let mut c = creative(90);
-        let names = Names {
-            map: HashMap::new(),
-            ..Default::default()
-        };
+        let names = Names::default();
         c.select(1);
         let rows = (93usize.div_ceil(9) - 5) as f32;
         c.wheel(-1.0, &names);
@@ -2565,10 +2369,7 @@ mod tests {
         // Fallback tab: no panic, empty id, not search.
         assert_eq!(c.tab().id, "");
         assert!(!c.tab().search);
-        let names = Names {
-            map: HashMap::new(),
-            ..Default::default()
-        };
+        let names = Names::default();
         assert!(c.items(&names).is_empty());
         assert!(c.tab_headers().is_empty());
         assert_eq!(c.search_tab(), None);

@@ -295,6 +295,7 @@ pub fn main() -> sunrise_client::Result<()> {
                 vehicle: c.get("vehicle").map(|v| LootEntity::new(v)),
                 mob_drops: true,
                 world_seed,
+                variants: None,
             };
             // Vanilla's entity tables all name a random sequence: no level random.
             let mut level = sunrise_core::random::LegacyRandom::new(0);
@@ -305,7 +306,12 @@ pub fn main() -> sunrise_client::Result<()> {
                     // The fixture's mobs keep no whole stacks.
                     drops::Drop::Stack(s) => writeln!(out, "drop {} {}", s.item, s.count),
                     drops::Drop::CarriedBlock(state) => {
-                        let tool = enderman::carried_block_tool();
+                        let tool = enderman::carried_block_tool(
+                            &block_items.enchantments,
+                            &block_items,
+                            &mut m.random,
+                            0.0,
+                        );
                         let stacks = block_items.block_drops(
                             registry,
                             state,

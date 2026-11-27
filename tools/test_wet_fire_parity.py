@@ -10,10 +10,11 @@ from pathlib import Path
 import re
 import subprocess
 
-try:
-    from . import lab, oracle_harness, test_rust_parity as base
-except ImportError:
-    import lab, oracle_harness, test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness, test_rust_parity as base
 
 
 def vanilla_rows(text):
@@ -56,8 +57,8 @@ def main():
     classes.mkdir(exist_ok=True)
     dependencies = os.pathsep.join(map(str, [jars["server"], *libraries]))
     source = lab.ROOT / "mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaWetFireOracle.java"
-    sources = [Path(__file__), source, lab.ROOT / "crates/sunrise-client/src/mobs/ai.rs",
-               lab.ROOT / "crates/sunrise-client/src/mobs/wet_fire_tests.rs"]
+    sources = [Path(__file__), source, lab.ROOT / "crates/sunrise-sim/src/mobs/ai.rs",
+               lab.ROOT / "crates/sunrise-sim/src/mobs/wet_fire_tests.rs"]
     hashes = base.source_hashes(sources)
     oracle_harness.run_logged(["javac", "--release", lock["minecraft"]["java_major"],
         "-proc:none", "-sourcepath", lab.ROOT / "mods/sunrise/src/test/java", "-cp",

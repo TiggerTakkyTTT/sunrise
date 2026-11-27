@@ -266,6 +266,14 @@ pub fn tag_slot(id: &sunrise_core::identifier::Identifier) -> Option<u32> {
         .ok()
 }
 
+/// Intern a canonical tag identifier string (`"c:ingots"`), returning its retained slot.
+pub fn tag_slot_str(id: &str) -> Option<u32> {
+    if let Some(slot) = TAG_NAMES.read().ok()?.slots.get(id) {
+        return Some(*slot);
+    }
+    TAG_NAMES.write().ok()?.request("sunrise", id).ok()
+}
+
 /// Borrow a retained tag name while its table is read-locked. No string is allocated.
 pub fn with_tag_name<R>(slot: u32, read: impl FnOnce(Option<&str>) -> R) -> R {
     match TAG_NAMES.read() {

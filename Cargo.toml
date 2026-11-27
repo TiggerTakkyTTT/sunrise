@@ -22,13 +22,16 @@ members = [
     "crates/sunrise-threads",
     "crates/sunrise-hdr",
     "crates/sunrise-world",
+    "crates/sunrise-sim",
+    "crates/sunrise-level",
     "crates/sunrise-client",
     "crates/sunrise-parity-fixtures",
     "crates/sunrise-internals",
     "crates/sunrise-client-lib",
+    "crates/sunrise-gameplay-common",
     "crates/sunrise-gameplay",
     "crates/sunrise-client-gameplay",
-    "crates/sunrise-client-core",
+    "crates/sunrise-game-data",
     "crates/sunrise-client-input",
     "crates/sunrise-border",
     "crates/sunrise-client-render",
@@ -37,6 +40,7 @@ members = [
     "crates/sunrise-command",
     "crates/sunrise-items",
     "crates/sunrise-server-files",
+    "crates/sunrise-server-profiles-http",
     "crates/sunrise-java-properties",
     "crates/sunrise-deflate",
     # The Model Context Protocol, shared by sunrise-ctl, sunrise-server and the launcher.
@@ -77,7 +81,6 @@ members = [
     "crates/sunrise-connected",
     "crates/sunrise-optifine",
     "crates/sunrise-polytone",
-    "crates/sunrise-shader-api",
     "crates/sunrise-mod-pipeline",
     "crates/sunrise-release-sign",
     "crates/sunrise-mod-deps",
@@ -159,6 +162,9 @@ opt-level = 3
 [profile.test.package.sunrise-client]
 opt-level = 0
 debug = 0
+# 256 smaller codegen units instead of the non-incremental 16: this lib test's rustc at Rollup 218 peaked at 16.4 GiB
+# with 16 and 14.1 GiB with 256 (8 jobs), and compiled in 2m54 instead of 4m04 (sunrise#5839).
+codegen-units = 256
 # The same for sunrise-client-lib's lib test, which a dozen harnesses run: 6.3 GiB and 253 s at opt-level 0 against
 # 8.7 GiB and 349 s at 3 (damage_catalog's build of it beside sunrise-client's was killed, main, run 43884739298).
 [profile.test.package.sunrise-client-lib]

@@ -2,25 +2,14 @@
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use naga::{BinaryOperator, Expression, Scalar, TypeInner};
 use sunrise_shaders::{
-    GbuffersInputs, GeometryInputs, Origin, Preprocessed, Program, Target, translate_composite,
+    GbuffersInputs, GeometryInputs, Preprocessed, Program, Target, translate_composite,
     translate_gbuffers, translate_geometry, translate_shadow,
 };
 
 fn source(code: &str) -> Preprocessed {
-    Preprocessed {
-        code: code.into(),
-        lines: code
-            .lines()
-            .enumerate()
-            .map(|(line, _)| Origin {
-                file: 0,
-                line: line as u32 + 1,
-            })
-            .collect(),
-        files: vec!["original.glsl".into()],
-        version: Some((450, None)),
-        ..Default::default()
-    }
+    let mut pp = Preprocessed::from_source("original.glsl", code);
+    pp.version = Some((450, None));
+    pp
 }
 
 fn translate(code: &str, path: &str) -> Program {

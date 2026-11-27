@@ -135,6 +135,13 @@ parked guest read from its hub record (read-only, no random). A victim that caus
 read through `victim()`; `causing()` answers `None` then. Random draws
 from a live stream are not undone by an abort; see [Randomness](randomness.md#borrow-the-live-level-stream).
 
+Hooks that fire inside a tick's own health or movement update take a loop context instead of a host,
+and lend the same read-only `LivingView` of the entity they are about as a parameter: `living_heal`
+its healed entity (`healed`), `living_jump_power`, `living_speed` and `living_flying_speed` the
+moving entity (`living`). The view reads the entity's live state at the call, so an effect changed
+earlier in the same tick is what the listener sees, on the server and in the client's prediction.
+With no host there, it reads no attachments.
+
 Reads such as collision, light, signals and block entities use the owning side's available data.
 They do not load chunks. Light or a vanilla air result is not proof of residency; check `is_loaded`
 when you need a resident position. Treat `None` as unavailable where the reference says a view

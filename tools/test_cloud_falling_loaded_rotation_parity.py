@@ -19,15 +19,12 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import command_exec_corpus as corpus, lab, test_rust_parity as base
-except ImportError:
-    import command_exec_corpus as corpus
-    import lab
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import command_exec_corpus as corpus, lab, test_rust_parity as base
 
 SEED = 1
-TEST = 'game::commands::data::rotation_tests::a_cloud_and_a_falling_block_save_the_rotation_they_were_loaded_with'
+TEST = 'game::server_side::commands::data::rotation_tests::a_cloud_and_a_falling_block_save_the_rotation_they_were_loaded_with'
 
 
 def java_version_string():

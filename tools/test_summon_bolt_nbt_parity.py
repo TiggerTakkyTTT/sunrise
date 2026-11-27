@@ -4,7 +4,7 @@
 Runs VanillaCommandExecOracle (with SeedAgent) through tools/test_command_exec_parity.py
 for the `summon lightning_bolt NBT` corpus group (#2690), writing summon_bolt_nbt.json and
 meta.json into .local/witness/<version>/summon_bolt_nbt/ (gitignored). Unless --record /
---record-only is given, runs game::commands::summon_bolt_tests::a_bolt_summoned_with_nbt_strikes_and_goes
+--record-only is given, runs game::server_side::commands::summon_bolt_tests::a_bolt_summoned_with_nbt_strikes_and_goes
 through lab.parity_fixtures() with SUNRISE_SUMMON_BOLT_NBT_WITNESS pointing at the recorded witness.
 
   test_summon_bolt_nbt_parity.py [--prepare] [--record | --record-only] [--resources DIR]
@@ -16,16 +16,13 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, seed_agent, test_rust_parity as base
-except ImportError:
-    import lab
-    import seed_agent
-    import test_rust_parity as base
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, seed_agent, test_rust_parity as base
 
 GROUP = 'summon lightning_bolt NBT'
 ORACLE = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCommandExecOracle.java'
-TEST = 'game::commands::summon_bolt_tests::a_bolt_summoned_with_nbt_strikes_and_goes'
+TEST = 'game::server_side::commands::summon_bolt_tests::a_bolt_summoned_with_nbt_strikes_and_goes'
 
 
 def java_version_string():

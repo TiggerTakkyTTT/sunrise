@@ -27,14 +27,12 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-try:
-    from . import lab, test_rust_parity as base, test_model_baking_parity as baking
-    from .integration_env import run_game
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    import test_model_baking_parity as baking
-    from integration_env import run_game
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base, test_model_baking_parity as baking
+from tools.integration_env import run_game
 
 
 def cases():
@@ -107,10 +105,10 @@ def main():
     args = parser.parse_args()
     lock, jars, _ = base.verify_artifacts()
     source_paths = [lab.ROOT / path for path in (
-        'crates/sunrise-client/src/game/entities/boats/mod.rs',
-        'crates/sunrise-client/src/game/network/remote_vehicles.rs',
-        'crates/sunrise-client/src/game/network/lan_vehicles.rs',
-        'crates/sunrise-client/src/game/entities/boat_authority_fixture.rs',
+        'crates/sunrise-gameplay/src/game/entities/boats/mod.rs',
+        'crates/sunrise-client-gameplay/src/game/network/remote_vehicles.rs',
+        'crates/sunrise-gameplay/src/game/network/lan_vehicles.rs',
+        'crates/sunrise-gameplay/src/game/entities/boat_authority_fixture.rs',
         'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaBoatAuthorityOracle.java',
         'tools/test_boat_authority_parity.py')]
     source_hashes = base.source_hashes(source_paths)

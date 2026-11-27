@@ -37,13 +37,10 @@ import tempfile
 import time
 from pathlib import Path
 
-try:
-    from . import graphics_bench as gb, lab
-except ImportError:
-    import graphics_bench as gb
-    import lab
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import graphics_bench as gb, lab
+
 FIXTURE = ROOT / "tools/fixtures/mod-pipeline-bench"
 OUT = ROOT / "benchmarks/mod-pipelines"
 # Kept in step with `PIPELINES` in the fixture's src/lib.rs.

@@ -27,8 +27,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// The manifest's file name in a `.smod` or a mod folder.
-pub const MANIFEST: &str = "sunrise-mod.toml";
 /// The largest uses table ([`USES_FILE`]) a package may carry: what the surface crate reads.
 pub const MAX_USES: u64 = mod_surface::uses::MAX_USES_BYTES as u64;
 /// The content manifest API this build loads.
@@ -59,8 +57,10 @@ pub const STORAGE_DIR: &str = ".sunrise-mod-data";
 /// Maximum bytes in the complete manifest, including properties and dependency explanations.
 pub const MAX_MANIFEST: u64 = 32 << 20;
 
-/// The most source files (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/**`, the root notices) a
-/// package selects: as many as its content files, so a port laid out one file per class fits.
+/// The most source files a package carries (every [`source_file`] of a native package): as many as
+/// its content files, so a port laid out one file per class fits. The packers and the readers that
+/// inflate source (`index::native::Bundle::read`, the registry's requirement scan) check it from
+/// the archive's directory before inflating any; the game never reads a source file.
 pub const MAX_SOURCE_FILES: usize = crate::content::MAX_FILES;
 /// The most bytes those source files take, unpacked.
 pub const MAX_SOURCE_BYTES: u64 = 64 << 20;
@@ -948,7 +948,7 @@ impl Manifest {
                 if !rust_ident(&module.name) {
                     return Err(format!("{MANIFEST}: module name must be an identifier"));
                 }
-                if !plain_path(&module.source) || !source_file(&module.source) {
+                if !plain_path(&module.source) || !module.source.starts_with("src/") {
                     return Err(format!(
                         "{MANIFEST}: module source must be a file under src/"
                     ));
@@ -1099,14 +1099,15 @@ impl std::fmt::Display for ServerOnlyDeclaration {
 
 impl std::error::Error for ServerOnlyDeclaration {}
 
-pub use mod_source::package::{NOT_PACKAGED, source_file};
+pub use mod_source::package::{MANIFEST, NOT_PACKAGED, binary_kind, source_file};
 
 pub(crate) fn plain_path(name: &str) -> bool {
     !name.starts_with('/')
         && !name.contains(['\\', ':'])
-        && !name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !name.split('/').any(|part| {
+            // A Windows extraction drops a trailing dot or space, so `a.` would land as `a`.
+            part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' '])
+        })
 }
 
 /// A mod as found on disk.
@@ -1180,64 +1181,67 @@ impl Package {
             let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
             return Self::read_zip_detailed(&mut zip);
         };
-        let package = Self::from_parts(manifest, icon, has_cargo, has_source)?;
+        if has_cargo != manifest.native.is_some() || has_source != has_cargo {
+            return Err("[native] and Rust source must be declared together".into());
+        }
+        let package = Package { manifest, icon };
         package.check_runtime_layout(&crate::content::runtime_folder_files(path)?)?;
         Ok(package)
     }
 
-    /// Read and validate an archive, including all selected source and resource entries.
+    /// Read an archive: its manifest, icon, content files and uses table, and the `runtime/` files
+    /// it lists. Any other entry, a native package's source among them, is skipped without being
+    /// read, and no file list or binary check is made of it: the game never compiles the source.
     pub fn read_zip<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Self, String> {
         Self::read_zip_detailed(zip).map_err(|error| error.to_string())
     }
 
-    /// Read and validate an archive, preserving structured refusals (such as
+    /// Read an archive like [`Package::read_zip`], preserving structured refusals (such as
     /// [`PackageReadError::NativeStateLayout`]) for callers that inspect or localize them at
-    /// their presentation boundary.
+    /// their presentation boundary. Every entry's path is checked, read or not: an absolute path,
+    /// a `..` part, a duplicate, or an entry that is not a plain file or folder (a symbolic link
+    /// among them) is refused by name.
     pub fn read_zip_detailed<R: Read + std::io::Seek>(
         zip: &mut zip::ZipArchive<R>,
     ) -> Result<Self, PackageReadError> {
         let mut icon = None;
-        let mut has_cargo = false;
-        let mut has_source = false;
-        let mut entries = Vec::new();
         let mut uses = false;
         let mut runtime = Vec::new();
+        let mut resources = Vec::new();
+        let mut names = std::collections::HashSet::new();
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
             let name = entry.name().map_err(|e| e.to_string())?.into_owned();
+            let directory = entry.is_dir();
+            let path = if directory {
+                name.trim_end_matches('/')
+            } else {
+                &name
+            };
+            if !plain_path(path) || !names.insert(name.clone()) {
+                return Err(format!("invalid or duplicate package path: {name}").into());
+            }
             let mode = entry.unix_mode().unwrap_or_default();
-            entries.push((name.clone(), entry.size(), entry.is_dir()));
-            has_source |= name.split('/').next() == Some("src");
-            if entry.is_dir() && matches!(mode & 0o170000, 0 | 0o040000) {
+            let kind = mode & 0o170000;
+            if !matches!(kind, 0 | 0o100000) && !(directory && kind == 0o040000) {
+                return Err(format!("{name}: unsupported file type").into());
+            }
+            if directory {
                 continue;
             }
-            has_cargo |= name == "Cargo.toml";
             if let Some(below) = name
                 .strip_prefix(RUNTIME_DIR)
                 .and_then(|n| n.strip_prefix('/'))
             {
                 // Any file type, but a file: its bytes are checked against `[runtime]` below.
-                if !matches!(mode & 0o170000, 0 | 0o100000) {
-                    return Err(format!("{name}: unsupported file type").into());
-                }
                 runtime.push((below.to_owned(), entry.size()));
-                continue;
-            }
-            if name == USES_FILE && matches!(mode & 0o170000, 0 | 0o100000) {
-                if uses {
-                    return Err(format!("duplicate {USES_FILE}").into());
-                }
+            } else if name == USES_FILE {
                 if entry.size() > MAX_USES {
                     return Err(format!("{USES_FILE} exceeds {} MiB", MAX_USES >> 20).into());
                 }
                 uses = true;
-                continue;
-            }
-            check_file(&name, mode, || Ok(&mut entry)).map_err(|e| e.to_string())?;
-            if name == "icon.png" {
-                if icon.is_some() {
-                    return Err("duplicate icon.png".into());
-                }
+            } else if name == "icon.png" {
+                check_file(&name, mode, || Ok(&mut entry)).map_err(|e| e.to_string())?;
                 if entry.size() > crate::icon::MAX_ICON as u64 {
                     return Err("icon.png exceeds 256 KiB".into());
                 }
@@ -1249,73 +1253,68 @@ impl Package {
                     .read_to_end(&mut bytes)
                     .map_err(|e| format!("icon.png: {e}"))?;
                 icon = Some(crate::icon::Icon::parse(bytes)?);
+            } else if name == MANIFEST {
+                check_file(&name, mode, || Ok(&mut entry)).map_err(|e| e.to_string())?;
+            } else if name.starts_with("assets/") || name.starts_with("data/") {
+                check_file(&name, mode, || Ok(&mut entry)).map_err(|e| e.to_string())?;
+                resources.push((name, entry.size()));
             }
         }
         let entry = zip
             .by_name(MANIFEST)
             .map_err(|e| format!("{MANIFEST}: {e}"))?;
-        let package =
-            Self::from_parts(Manifest::read_detailed(entry)?, icon, has_cargo, has_source)?;
+        let package = Package {
+            manifest: Manifest::read_detailed(entry)?,
+            icon,
+        };
         if uses && !package.is_native() {
             return Err(format!("a content mod has no code, so no {USES_FILE}").into());
         }
         package.check_runtime_layout(&runtime)?;
         if package.is_native() {
-            let mut names = std::collections::HashSet::new();
-            let mut source_count = 0usize;
-            let mut source_bytes = 0u64;
-            let mut resource_count = 0usize;
             let mut resource_bytes = 0u64;
-            for (name, size, directory) in entries {
-                let path = if directory {
-                    name.trim_end_matches('/')
-                } else {
-                    &name
-                };
-                if !plain_path(path) || !names.insert(name.clone()) {
-                    return Err(format!("invalid or duplicate package path: {name}").into());
+            for (name, size) in &resources {
+                crate::content::check_path(name)?;
+                crate::content::check_namespace(name, &package.manifest)?;
+                if *size > crate::content::MAX_FILE {
+                    return Err(format!("{name} exceeds the content file size limit").into());
                 }
-                if !directory {
-                    if name != MANIFEST
-                        && name != USES_FILE
-                        && name != "icon.png"
-                        && !name.starts_with("runtime/")
-                        && !name.starts_with("assets/")
-                        && !name.starts_with("data/")
-                        && !source_file(&name)
-                    {
-                        return Err(format!("unexpected package path: {name}").into());
-                    }
-                    if source_file(&name) {
-                        source_count += 1;
-                        source_bytes = source_bytes
-                            .checked_add(size)
-                            .ok_or("native package too large")?;
-                    } else if name.starts_with("assets/") || name.starts_with("data/") {
-                        crate::content::check_path(&name)?;
-                        crate::content::check_namespace(&name, &package.manifest)?;
-                        if size > crate::content::MAX_FILE {
-                            return Err(
-                                format!("{name} exceeds the content file size limit").into()
-                            );
-                        }
-                        resource_count += 1;
-                        resource_bytes = resource_bytes
-                            .checked_add(size)
-                            .ok_or("content too large")?;
-                    }
-                }
+                resource_bytes = resource_bytes
+                    .checked_add(*size)
+                    .ok_or("content too large")?;
             }
-            if source_count > MAX_SOURCE_FILES || source_bytes > MAX_SOURCE_BYTES {
-                return Err("native package exceeds its entry or size limit".into());
-            }
-            if resource_count > crate::content::MAX_FILES
+            if resources.len() > crate::content::MAX_FILES
                 || resource_bytes > crate::content::MAX_TOTAL
             {
                 return Err("content exceeds its entry or size limit".into());
             }
         }
         Ok(package)
+    }
+
+    /// Refuse an archive whose source entries are too many or too large: they are counted, and
+    /// their declared sizes summed from the archive's directory, before any is inflated, as the
+    /// packers bound them. The game never reads source entries, so only the readers that inflate
+    /// them (`index::native::Bundle::read`, the registry's requirement scan) call this.
+    #[cfg(feature = "index-read")]
+    pub(crate) fn check_source_bounds<R: Read + std::io::Seek>(
+        zip: &mut zip::ZipArchive<R>,
+    ) -> Result<(), String> {
+        let (mut count, mut bytes) = (0usize, 0u64);
+        for i in 0..zip.len() {
+            let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
+            if entry.is_dir() || !entry.name().is_ok_and(|name| source_file(&name)) {
+                continue;
+            }
+            count += 1;
+            bytes = bytes
+                .checked_add(entry.size())
+                .ok_or("native package too large")?;
+            if count > MAX_SOURCE_FILES || bytes > MAX_SOURCE_BYTES {
+                return Err("native package exceeds its entry or size limit".into());
+            }
+        }
+        Ok(())
     }
 
     /// Refuse a `runtime/` folder that is not the one `[runtime]` lists: an extra, a missing or an
@@ -1370,20 +1369,12 @@ impl Package {
         Ok(Some(RuntimeData::new(files, table.digest())))
     }
 
-    fn from_parts(
-        manifest: Manifest,
-        icon: Option<crate::icon::Icon>,
-        has_cargo: bool,
-        has_source: bool,
-    ) -> Result<Self, PackageReadError> {
-        if has_cargo != manifest.native.is_some() || has_source != has_cargo {
-            return Err("[native] and Rust source must be declared together".into());
-        }
-        Ok(Package { manifest, icon })
-    }
-    /// Select and validate a flat project's source and resource files deterministically. Any
-    /// other file in the folder (a `module.toml`, `tools/generate.rs`, `.cargo/config.toml`,
-    /// `rust-toolchain.toml`) is left out, and no folder but `src/` is read for source.
+    /// Select and validate a flat project's source and resource files deterministically. The
+    /// source is what `cargo package` would put in the crate (`mod_source::package::source_files`):
+    /// a file outside it (one under `.cargo/`, one `[package] exclude` or `.gitignore` names) is
+    /// left out unread, and one inside it is refused when its bytes are a prebuilt binary
+    /// ([`binary_kind`]) or it is not a plain file.
+    #[cfg(feature = "folder")]
     pub fn directory_files(
         &self,
         root: &Path,
@@ -1406,8 +1397,8 @@ impl Package {
         if self.is_native() {
             let (mut source_bytes, mut source_count) = (0u64, 0usize);
             for name in mod_source::package::source_files(root).map_err(|e| e.to_string())? {
-                check_folder_file(root, &name)?;
                 let path = root.join(&name);
+                check_source_type(&name, folder_mode(root, &name)?).map_err(|e| e.to_string())?;
                 let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
                 source_bytes = source_bytes
                     .checked_add(size)
@@ -1416,7 +1407,15 @@ impl Package {
                 if source_bytes > MAX_SOURCE_BYTES || source_count > MAX_SOURCE_FILES {
                     return Err("native package exceeds its entry or size limit".into());
                 }
-                files.insert(name, std::fs::read(path).map_err(|e| e.to_string())?);
+                // Read once: the bytes checked are the bytes packed.
+                let mut bytes = Vec::new();
+                std::fs::File::open(&path)
+                    .map_err(|e| format!("{name}: {e}"))?
+                    .take(size)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| format!("{name}: {e}"))?;
+                refuse_binary(&name, &bytes).map_err(|e| e.to_string())?;
+                files.insert(name, bytes);
             }
         }
         files.insert(
@@ -1427,6 +1426,7 @@ impl Package {
     }
 
     /// Pack a flat project, selecting its source and resource files deterministically.
+    #[cfg(feature = "folder")]
     pub fn pack_directory(root: &Path) -> Result<Vec<u8>, String> {
         Self::pack_directory_with(root, None, None)
     }
@@ -1453,6 +1453,7 @@ impl Package {
     }
 
     /// [`Package::pack_directory`], carrying `uses` as the package's [`USES_FILE`] table when given.
+    #[cfg(feature = "folder")]
     pub fn pack_directory_with(
         root: &Path,
         uses: Option<&[u8]>,
@@ -1490,8 +1491,15 @@ impl Package {
             zip.write_all(bytes).map_err(|e| e.to_string())
         };
         put(MANIFEST, manifest_text.as_bytes())?;
+        let mut lowercase = std::collections::HashMap::from([(MANIFEST.to_lowercase(), MANIFEST)]);
         let code = manifest.native.is_some();
+        let (mut source_bytes, mut source_count) = (0u64, 0usize);
         for (name, bytes) in files {
+            if let Some(other) = lowercase.insert(name.to_lowercase(), *name) {
+                return Err(format!(
+                    "{other} and {name} differ only by case, which a Windows or macOS extraction cannot keep apart"
+                ));
+            }
             let source = code && source_file(name) && plain_path(name);
             if let Some(below) = name.strip_prefix("runtime/") {
                 let table = manifest
@@ -1509,7 +1517,18 @@ impl Package {
                 put(name, bytes)?;
                 continue;
             }
-            if *name != "icon.png" && !source {
+            if source {
+                // A source file has no name or mode rule: only its bytes may not be a binary.
+                refuse_binary(name, bytes).map_err(|e| e.to_string())?;
+                source_bytes += bytes.len() as u64;
+                source_count += 1;
+                if source_bytes > MAX_SOURCE_BYTES || source_count > MAX_SOURCE_FILES {
+                    return Err("native package exceeds its entry or size limit".into());
+                }
+                put(name, bytes)?;
+                continue;
+            }
+            if *name != "icon.png" {
                 crate::content::check_path(name)?;
             }
             check_file(name, 0, || Ok(*bytes)).map_err(|e| e.to_string())?;
@@ -1559,6 +1578,12 @@ fn minisign_secret_key(bytes: &[u8]) -> bool {
 pub enum ContentFileError {
     UnsupportedType(String),
     Executable(String),
+    /// A native package's source file whose bytes are prebuilt object code of this kind
+    /// ([`binary_kind`]), whatever its name. A content file with such a header is `Executable`.
+    Binary {
+        name: String,
+        kind: &'static str,
+    },
     Read {
         name: String,
         source: std::io::Error,
@@ -1574,6 +1599,10 @@ impl std::fmt::Display for ContentFileError {
             Self::Executable(name) => {
                 write!(f, "{name}: unsupported executable file in a content mod")
             }
+            Self::Binary { name, kind } => write!(
+                f,
+                "{name}: unsupported executable file ({kind}); a package carries source, never prebuilt binaries"
+            ),
             Self::Read { name, source } => write!(f, "{name}: {source}"),
         }
     }
@@ -1588,8 +1617,43 @@ impl std::error::Error for ContentFileError {
     }
 }
 
-/// The shared content-file boundary. Refuse type/mode before opening a file,
-/// then inspect its header even when its name has no executable extension.
+/// The first bytes of a file, up to 8, for the content checks.
+fn file_head<R: Read>(
+    name: &str,
+    open: impl FnOnce() -> std::io::Result<R>,
+) -> Result<([u8; 8], usize), ContentFileError> {
+    let error = |source| ContentFileError::Read {
+        name: name.into(),
+        source,
+    };
+    let mut file = open().map_err(error)?;
+    let mut head = [0; 8];
+    let mut read = 0;
+    while read < head.len() {
+        let size = file.read(&mut head[read..]).map_err(error)?;
+        if size == 0 {
+            break;
+        }
+        read += size;
+    }
+    Ok((head, read))
+}
+
+/// The refusal of a source file whose bytes are prebuilt object code ([`binary_kind`]), whatever
+/// its name. `bytes` is the file, of which the first 1024 are read.
+fn refuse_binary(name: &str, bytes: &[u8]) -> Result<(), ContentFileError> {
+    match binary_kind(&bytes[..bytes.len().min(1024)]) {
+        Some(kind) => Err(ContentFileError::Binary {
+            name: name.into(),
+            kind,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The boundary of a content file (an asset, a data file, the manifest, the icon). Refuse
+/// type/mode before opening a file, then inspect its header even when its name has no executable
+/// extension.
 pub(crate) fn check_file<R: Read>(
     name: &str,
     mode: u32,
@@ -1612,42 +1676,36 @@ pub(crate) fn check_file<R: Read>(
     if executable || mode & 0o111 != 0 {
         return Err(ContentFileError::Executable(name.into()));
     }
-    let error = |source| ContentFileError::Read {
-        name: name.into(),
-        source,
-    };
-    let mut file = open().map_err(error)?;
-    let mut header = [0; 4];
-    let mut read = 0;
-    while read < header.len() {
-        let size = file.read(&mut header[read..]).map_err(error)?;
-        if size == 0 {
-            break;
-        }
-        read += size;
-    }
-    let executable = matches!(
-        &header,
-        b"\x7fELF"
-            | b"\0asm"
-            | b"\xfe\xed\xfa\xce"
-            | b"\xce\xfa\xed\xfe"
-            | b"\xfe\xed\xfa\xcf"
-            | b"\xcf\xfa\xed\xfe"
-            | b"\xca\xfe\xba\xbe"
-            | b"\xbe\xba\xfe\xca"
-    ) || header.starts_with(b"MZ")
-        || (header.starts_with(b"#!") && header[2] != b'[');
-    if executable {
+    let (head, read) = file_head(name, open)?;
+    let head = &head[..read];
+    // Any `MZ` is refused here, not only a PE: a content file has no use for it.
+    if binary_kind(head).is_some()
+        || head.starts_with(b"MZ")
+        || (head.starts_with(b"#!") && head.get(2) != Some(&b'['))
+    {
         return Err(ContentFileError::Executable(name.into()));
     }
     Ok(())
 }
 
-fn check_folder_file(root: &Path, name: &str) -> Result<(), String> {
-    let path = root.join(name);
-    let metadata = std::fs::symlink_metadata(&path).map_err(|e| format!("{name}: {e}"))?;
-    let mode = if metadata.is_file() {
+/// The type check of a native package's source file, before it is opened: a plain file. Its name
+/// and mode play no part, so a C source tree may carry a `configure` script, a `.bat` or a file
+/// with the executable bit; its bytes are checked by [`refuse_binary`].
+#[cfg(feature = "folder")]
+fn check_source_type(name: &str, mode: u32) -> Result<(), ContentFileError> {
+    if matches!(mode & 0o170000, 0 | 0o100000) {
+        Ok(())
+    } else {
+        Err(ContentFileError::UnsupportedType(name.into()))
+    }
+}
+
+/// The file mode of `name` in a mod folder: the mode itself for a file (0 off Unix), a link's for
+/// anything else, so that nothing but a plain file passes the content checks.
+fn folder_mode(root: &Path, name: &str) -> Result<u32, String> {
+    let metadata =
+        std::fs::symlink_metadata(root.join(name)).map_err(|e| format!("{name}: {e}"))?;
+    Ok(if metadata.is_file() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -1659,8 +1717,14 @@ fn check_folder_file(root: &Path, name: &str) -> Result<(), String> {
         }
     } else {
         0o120000
-    };
-    check_file(name, mode, || std::fs::File::open(&path)).map_err(|e| e.to_string())
+    })
+}
+
+fn check_folder_file(root: &Path, name: &str) -> Result<(), String> {
+    check_file(name, folder_mode(root, name)?, || {
+        std::fs::File::open(root.join(name))
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// The `.smod` files and mod folders in `dir`, by name.
@@ -1683,10 +1747,10 @@ mod runtime_files_tests;
 
 #[cfg(test)]
 mod tests {
-    /// A project folder packs its source set and leaves every other file out, so the archive
-    /// reads back as a valid package.
+    /// A project folder packs the files `cargo package` would carry, whatever their kind or
+    /// folder, and not what Cargo leaves out, so the archive reads back as a valid package.
     #[test]
-    fn a_native_project_folder_packs_its_source_set_and_leaves_other_files_out() {
+    fn a_native_project_folder_packs_the_files_cargo_package_would_carry() {
         let folder = tempfile::tempdir().unwrap();
         let write = |name: &str, text: &str| {
             let path = folder.path().join(name);
@@ -1715,7 +1779,7 @@ mod tests {
             "[source.crates-io]\nreplace-with='local'\n",
         );
         write("rust-toolchain.toml", "[toolchain]\nchannel='nightly'\n");
-        // A folder beside the crate is never read, so a name packing could not encode is no bar.
+        // A name packing could not encode is left out, and is no bar.
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt;
@@ -1750,8 +1814,145 @@ mod tests {
             .map(|name| name.unwrap().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["Cargo.toml", "src/lib.rs", MANIFEST]);
+        assert_eq!(
+            names,
+            [
+                "Cargo.toml",
+                "module.toml",
+                "rust-toolchain.toml",
+                "sources/wings.toml",
+                "src/lib.rs",
+                "sunrise-mod.toml",
+                "tools/generate.rs",
+            ]
+        );
         assert!(Package::read(&archive).unwrap().is_native());
+    }
+
+    /// A source file that starts as a prebuilt binary is refused by its bytes, not its name, when
+    /// the packer writes it (from a folder or from a file list), and the error names the file and
+    /// the kind. The reader never opens a source file, so an archive that has one still loads.
+    #[test]
+    fn a_prebuilt_binary_named_as_source_is_refused_when_packed_and_skipped_when_read() {
+        use std::io::Write;
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join(MANIFEST), &manifest).unwrap();
+        std::fs::write(folder.path().join("Cargo.toml"), "[package]\nname='ruby'\n").unwrap();
+        std::fs::create_dir(folder.path().join("src")).unwrap();
+        std::fs::write(folder.path().join("src/lib.rs"), "pub fn hooks() {}").unwrap();
+        for (bytes, kind) in [
+            (&b"\x7fELF\x02\x01\x01\0"[..], "ELF"),
+            (b"!<arch>\nlib.o/", "ar archive"),
+        ] {
+            std::fs::write(folder.path().join("src/lib.c"), bytes).unwrap();
+            let error = Package::pack_directory(folder.path()).unwrap_err();
+            assert!(error.starts_with("src/lib.c: "), "{error}");
+            assert!(error.contains(&format!("({kind})")), "{error}");
+
+            let files: &[(&str, &[u8])] = &[
+                ("Cargo.toml", b"[package]\nname='ruby'\n"),
+                ("src/lib.rs", b"pub fn hooks() {}"),
+                ("src/lib.c", bytes),
+            ];
+            let error = Package::write_files(&manifest, files).unwrap_err();
+            assert!(error.starts_with("src/lib.c: "), "{error}");
+            assert!(error.contains(&format!("({kind})")), "{error}");
+
+            let archive = folder.path().join("ruby.smod");
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file(MANIFEST, options).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            for (name, content) in files {
+                zip.start_file(*name, options).unwrap();
+                zip.write_all(content).unwrap();
+            }
+            zip.finish().unwrap();
+            assert!(Package::read(&archive).unwrap().is_native());
+            std::fs::remove_file(archive).unwrap();
+        }
+    }
+
+    /// The reader reads the manifest, content and the rest of what the game uses, and skips every
+    /// other entry of a native package unread and without error: no file list, no name, mode or
+    /// header rule. The packer's own rules for source files are the one place those live.
+    #[test]
+    fn a_native_archive_with_any_other_entry_loads() {
+        use std::io::Write;
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ruby.smod");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default().system(zip::System::Unix);
+        zip.start_file(MANIFEST, options).unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
+        for (name, mode, bytes) in [
+            ("Cargo.toml", 0o644, &b"[package]\nname='ruby'\n"[..]),
+            ("src/lib.rs", 0o644, b"pub fn hooks() {}"),
+            (
+                "src/add.c",
+                0o644,
+                b"int add(int a, int b) { return a + b; }",
+            ),
+            ("src/add.h", 0o644, b"int add(int, int);"),
+            ("vendor/zlib/configure", 0o755, b"#!/bin/sh\n"),
+            ("vendor/zlib/build.bat", 0o644, b"@echo off\n"),
+            ("src/prebuilt.c", 0o644, b"\x7fELF\x02\x01\x01\0"),
+            ("docs/NOTES", 0o644, b"stray"),
+            (".git/config", 0o644, b"[core]\n"),
+        ] {
+            zip.start_file(name, options.unix_permissions(mode))
+                .unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        assert!(Package::read(&path).unwrap().is_native());
+    }
+
+    /// Whatever else an archive holds, an entry that is absolute, climbs with `..` or is a
+    /// symbolic link is refused by its name, source entries included.
+    #[test]
+    fn an_archive_entry_that_escapes_or_links_is_refused_by_name() {
+        use std::io::Write;
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame='26.3'\nsunrise='{}'\nmixins='{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ruby.smod");
+        let options = zip::write::SimpleFileOptions::default().system(zip::System::Unix);
+        for (name, link, refusal) in [
+            ("/abs.c", false, "invalid or duplicate package path: /abs.c"),
+            (
+                "src/../escape.c",
+                false,
+                "invalid or duplicate package path: src/../escape.c",
+            ),
+            ("src/link.c", true, "src/link.c: unsupported file type"),
+        ] {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            zip.start_file(MANIFEST, options).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if link {
+                zip.add_symlink(name, "/etc/passwd", options).unwrap();
+            } else {
+                zip.start_file(name, options).unwrap();
+                zip.write_all(b"int x;").unwrap();
+            }
+            zip.finish().unwrap();
+            let error = Package::read(&path).err().unwrap();
+            assert!(error.contains(refusal), "{error}");
+        }
     }
 
     /// A short version with a pre-release or build part is padded before it, not after it.
@@ -2268,10 +2469,12 @@ capabilities = ["registries"]
                 .map(String::from_utf8_lossy)
                 .collect::<Vec<_>>()
         );
-        assert!(!source_file(
-            ".sunrise/sdk/api/crates/sunrise-mod-api/src/lib.rs"
-        ));
-        std::fs::write(root.join("src/lib.rs"), b"MZ executable").unwrap();
+        // A PE: `MZ`, the offset of its `PE\0\0` signature at 0x3c, and the signature there.
+        let mut pe = vec![0u8; 0x44];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c] = 0x40;
+        pe[0x40..].copy_from_slice(b"PE\0\0");
+        std::fs::write(root.join("src/lib.rs"), pe).unwrap();
         assert!(
             Package::pack_directory(&root)
                 .unwrap_err()
@@ -2303,6 +2506,27 @@ capabilities = ["registries"]
         assert_eq!(Package::read_zip(&mut zip).unwrap().manifest.id, "ruby");
         assert!(zip.by_name("src/classes/c699.rs").is_ok());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_packer_refuses_names_that_differ_only_by_case_and_parts_a_windows_extraction_renames() {
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame = '26.3'\nsunrise = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let error = Package::write_files(
+            &manifest,
+            &[("build.rs", b"".as_slice()), ("Build.rs", b"".as_slice())],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("Build.rs") && error.contains("build.rs"),
+            "{error}"
+        );
+        assert!(plain_path("src/a.c"));
+        assert!(!plain_path("src/a."));
+        assert!(!plain_path("src/a /b.c"));
     }
 
     #[test]
@@ -2589,19 +2813,23 @@ issues = \"http://example.org/issues\"
             zip.start_file(*name, options).unwrap();
             zip.write_all(bytes).unwrap();
             zip.finish().unwrap();
-            let error = Package::read(&archive).err().unwrap();
-            assert!(
-                error.contains("unsupported executable file"),
-                "{name}: {error}"
-            );
             if name.starts_with("assets/") {
+                let error = Package::read(&archive).err().unwrap();
+                assert!(
+                    error.contains("unsupported executable file"),
+                    "{name}: {error}"
+                );
                 let error = Package::read(&dir).err().unwrap();
                 assert!(
                     error.contains("unsupported executable file"),
                     "{name}: {error}"
                 );
             } else {
+                // Not a content file: the reader skips it, in an archive as in a folder.
                 assert!(Package::read(&dir).is_ok(), "unpackaged {name}");
+                if *name != "./mod.exe" {
+                    assert!(Package::read(&archive).is_ok(), "skipped {name}");
+                }
             }
             std::fs::remove_file(file).unwrap();
         }
@@ -2676,11 +2904,25 @@ issues = \"http://example.org/issues\"
             check_file(name, 0o100755, || Ok(std::io::Cursor::new(nbt))),
             Err(ContentFileError::Executable(_))
         ));
-        for header in [b"\x7fELF", b"MZ!!", b"\xcf\xfa\xed\xfe"] {
-            assert!(matches!(
-                check_file(name, 0o100644, || Ok(std::io::Cursor::new(header))),
-                Err(ContentFileError::Executable(_))
-            ));
+        for (header, expected) in [
+            (&b"\x7fELF"[..], "ELF"),
+            (b"MZ!!", "PE"),
+            (b"\xcf\xfa\xed\xfe", "Mach-O"),
+            (
+                b"\xca\xfe\xba\xbe",
+                "Mach-O universal binary or Java class file",
+            ),
+            (b"!<arch>\n", "ar archive"),
+            // A file that is only a shebang's first two bytes.
+            (b"#!", "script"),
+        ] {
+            assert!(
+                matches!(
+                    check_file(name, 0o100644, || Ok(std::io::Cursor::new(header))),
+                    Err(ContentFileError::Executable(_))
+                ),
+                "{expected}"
+            );
         }
     }
 

@@ -7,8 +7,11 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from tests.test_ci_concurrency import expression_value, yaml
+from tests.test_ci_concurrency import expression_value
 from tools.ci import ignored_shards, ignored_tests
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 ROOT = Path(__file__).resolve().parents[1]
 

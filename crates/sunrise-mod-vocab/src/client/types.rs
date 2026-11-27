@@ -82,6 +82,19 @@ impl NoBackend for AddToastError {
     }
 }
 
+/// How clouds are drawn (vanilla's `CloudStatus`, the Clouds option).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// exhaustive: vanilla's three values, which the game matches without a wildcard
+// no wire: a local client option for this session.
+pub enum CloudStatus {
+    /// No clouds (`OFF`, `renderClouds:false`).
+    Off,
+    /// Flat clouds (`FAST`, `renderClouds:fast`).
+    Fast,
+    /// Volumetric clouds (`FANCY`, `renderClouds:true`).
+    Fancy,
+}
+
 /// What a key did in an `input_key` event (GLFW's `action`: release 0, press 1, repeat 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // exhaustive: a closed set the game matches without a wildcard
@@ -206,6 +219,57 @@ impl std::error::Error for MappingError {
         }
     }
 }
+
+/// Why [`confirm_link`](crate::prelude::ClientInputClientHost::confirm_link) opened no prompt.
+/// Nothing is opened or changed when it is returned.
+// no wire: refusal of a process-local client operation
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OpenLinkError {
+    /// The text is not an http or https URI (`Util.parseAndValidateUntrustedUri`): another
+    /// scheme (`file:`, `javascript:`, `ftp:`), no scheme, or a malformed URI such as one with
+    /// a space. The scheme is matched without regard to case.
+    Invalid,
+    /// This host has no native window (a server or a headless host).
+    Unavailable,
+}
+
+impl std::fmt::Display for OpenLinkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Invalid => "the link is not a valid http or https URI",
+            Self::Unavailable => "there is no window to show the link in",
+        })
+    }
+}
+
+impl std::error::Error for OpenLinkError {}
+
+/// Why [`open_path`](crate::prelude::ClientInputClientHost::open_path) opened nothing.
+// no wire: refusal of a process-local client operation
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OpenPathError {
+    /// The path does not exist. No process was started.
+    NotFound,
+    /// The operating system could not hand the path to the desktop's handler; the text is the
+    /// system's own error.
+    Failed(String),
+    /// This host has no native window (a server or a headless host).
+    Unavailable,
+}
+
+impl std::fmt::Display for OpenPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => f.write_str("the path does not exist"),
+            Self::Failed(error) => write!(f, "the desktop could not open the path: {error}"),
+            Self::Unavailable => f.write_str("there is no desktop to open the path in"),
+        }
+    }
+}
+
+impl std::error::Error for OpenPathError {}
 
 /// A read-only view of a play packet in `Hooks::client_packet` or `Hooks::client_packet_send`.
 ///
@@ -357,6 +421,10 @@ pub struct ClientGuiOptions {
     pub notification_display_time: f32,
     /// Opacity of the background behind text, 0 to 1.
     pub text_background_opacity: f32,
+    /// The "Text Background: Chat only" switch (`backgroundForChatOnly`, on by default): only
+    /// chat takes [`Self::text_background_opacity`]; every other backdrop keeps its caller's
+    /// default. [`Self::background_opacity`] and [`Self::background_color`] resolve it.
+    pub background_for_chat_only: bool,
     /// Menu background blur radius.
     pub menu_blur: i32,
     /// Distortion / screen effect intensity scale (`Options.screenEffectScale`, 0 to 1).
@@ -365,6 +433,27 @@ pub struct ClientGuiOptions {
     /// the Damage Tilt accessibility option): the factor of vanilla's own hurt tilt, so a mod's
     /// camera shake can scale with it as that tilt does.
     pub damage_tilt_strength: f64,
+}
+
+impl ClientGuiOptions {
+    /// `Options.getBackgroundOpacity(default)`: the opacity of a text backdrop whose own default
+    /// is `default_opacity` (0.0 for titles, 0.3 and 0.4 for the scoreboard and tab list):
+    /// that default while [`Self::background_for_chat_only`] is on, the player's
+    /// [`Self::text_background_opacity`] otherwise.
+    pub fn background_opacity(&self, default_opacity: f32) -> f32 {
+        if self.background_for_chat_only {
+            default_opacity
+        } else {
+            self.text_background_opacity
+        }
+    }
+    /// `Options.getBackgroundColor(default)`: black ARGB with [`Self::background_opacity`]'s
+    /// alpha (`ARGB.colorFromFloat`, the opacity times 255 rounded down), the colour vanilla
+    /// draws behind its own text.
+    pub fn background_color(&self, default_opacity: f32) -> u32 {
+        let alpha = (self.background_opacity(default_opacity) * 255.0).floor() as i32 as u32;
+        (alpha & 255) << 24
+    }
 }
 
 /// A snapshot of the client's chat preferences.
@@ -424,6 +513,10 @@ pub struct HumanoidRenderState<'a> {
     pub ticks_using_item: i32,
     /// Animation of the item currently being used.
     pub use_animation: UseAnimation,
+    /// Whether the entity is swinging an arm (`LivingEntity.isSwinging`, the swing state
+    /// itself, not the interpolated animation progress), as extracted for this draw. Both
+    /// hands see the same flag, from the first tick of a swing. False for armor stands.
+    pub is_swinging: bool,
     /// Selected main-hand pose before any hook answers.
     pub main_arm_pose: ArmPose,
     /// Selected off-hand pose before any hook answers.

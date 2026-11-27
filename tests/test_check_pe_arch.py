@@ -10,8 +10,11 @@ import sys
 import tempfile
 import unittest
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
 from tools import check_pe_arch
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 
 def pe(machine, reserve=None):

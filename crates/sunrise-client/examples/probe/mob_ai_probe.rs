@@ -908,7 +908,6 @@ pub fn main() -> sunrise_client::Result<()> {
     let data = MobData::load(
         &sunrise_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
         facts.states.len(),
-        false,
     )?;
     let types = MobTypes::load(root)?;
     // The types a bee leaving its hive is loaded with (EntityType.loadEntityRecursive).
@@ -1456,7 +1455,13 @@ pub fn main() -> sunrise_client::Result<()> {
                     s.time,
                     test_level.random(),
                 );
-                sunrise_client::mobs::warden::hear_mob_events(&mut mobs, &events, from, &w);
+                sunrise_client::mobs::warden::hear_mob_events(
+                    &mut mobs,
+                    &events,
+                    from,
+                    &w,
+                    &items.game_event_tags,
+                );
                 // Melee hits on other mobs land during the attacker's tick
                 // (LivingEntity.hurtServer), with the sounds they raise.
                 let mut k = from;

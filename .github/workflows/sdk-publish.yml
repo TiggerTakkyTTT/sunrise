@@ -15,7 +15,8 @@ name: sdk publish
 #   commit that is not on its branch. Any other run signs with a throwaway key.
 # - `publish` checks the signature as the launcher does (tools/ci/nightly.py verify-sums) and that the release holds
 #   exactly the assets a Nightly needs (tools/ci/nightly.py sdk-assets), then creates `sdk-<sha>`: only on main or
-#   release/26.3 with `publish` set. Any other branch's run, or a dry run, publishes nothing.
+#   release/26.3 with `publish` set. Any other branch's run, or a dry run, publishes nothing. With `draft` (a Dev
+#   build) the release is a draft: nothing public changes until promote-dev.yml makes it public.
 on:
   workflow_call:
     inputs:
@@ -25,6 +26,10 @@ on:
         required: true
       publish:
         description: Sign with the release key and create sdk-<sha> (on main or release/26.3 only); otherwise a throwaway key, nothing published
+        type: boolean
+        default: false
+      draft:
+        description: Create sdk-<sha> as a draft (a Dev build's, made public by promote-dev.yml)
         type: boolean
         default: false
 permissions:
@@ -242,124 +247,61 @@ jobs:
           fi
       - name: Release sdk-<sha>
         if: env.PUBLISH == 'true'
+        env:
+          DRAFT: ${{ inputs.draft && 'yes' || '' }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "### $TAG is already published" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          # The sdk.json of the release this leaves, for a Dev build's signing (nightly-build.yml `sdk-index`).
+          released="$RUNNER_TEMP/released"
+          rm -rf "$released"
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
+            if [[ "$draft" != true ]]; then
+              echo "### $TAG is already published" >> "$GITHUB_STEP_SUMMARY"
+              gh release download "$TAG" --pattern sdk.json --dir "$released"
+              exit 0
+            fi
+            # A Dev build's draft of this commit, publishing at once: made public as it is when it is complete and
+            # signed for $TAG, so the Dev game draft's sdk.json still names its files. Otherwise (an earlier Dev
+            # attempt's, perhaps half uploaded) it is replaced, as a Dev build replaces it: nobody sees a draft.
+            check="$RUNNER_TEMP/draft"
+            rm -rf "$check"
+            if [[ -z "$DRAFT" ]] && gh release download "$TAG" --dir "$check" \
+              && [[ "$(ls "$check" | sort)" == "$(python3 tools/ci/nightly.py sdk-assets | sort)" ]] \
+              && python3 tools/ci/nightly.py verify-sums --tag "$TAG" --publishing "$check"; then
+              gh release edit "$TAG" --draft=false --prerelease --latest=false
+              echo "### Made the draft $TAG public" >> "$GITHUB_STEP_SUMMARY"
+              mkdir -p "$released" && cp "$check/sdk.json" "$released/"
+              exit 0
+            fi
+            gh release delete "$TAG" --yes
           fi
-          gh release create "$TAG" dist/* --target "$COMMIT" --prerelease --latest=false \
+          body="$RUNNER_TEMP/sdk-body.md"
+          python3 tools/ci/nightly.py sdk-body dist/sdk.json "$body"
+          gh release create "$TAG" dist/* --target "$COMMIT" --prerelease --latest=false ${DRAFT:+--draft} \
             --title "Mod SDK ${COMMIT::10}" \
-            --notes "The mod SDK of game build $COMMIT: sdk.json lists every asset; SHA256SUMS is signed for $TAG."
+            --notes-file "$body"
+          mkdir -p "$released" && cp dist/sdk.json "$released/"
+      - uses: actions/upload-artifact@v4
+        if: env.PUBLISH == 'true'
+        with:
+          name: sdk-released-index
+          path: ${{ runner.temp }}/released/sdk.json
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
       - name: Dry run, the SDK that would be published
         if: env.PUBLISH != 'true'
         run: |
           echo "### Would publish $TAG (a branch or dry run: signed with a throwaway key)" >> "$GITHUB_STEP_SUMMARY"
           ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # Generated modding-book chapters and SDK tables for this exact SDK commit, published to the orphan branch
-  # `modding-book-generated` so playsunrise.net's Node-only docs-sync reads them straight from its blobless clone
-  # with no extra token, no path-filter misses, and no latest-only cancellation races. Runs in parallel with
-  # index/sign/publish with read-only permissions; only `book-generated-publish` writes the branch after `publish`.
-  book-generated:
-    needs: [authorize]
-    if: needs.authorize.outputs.publish == 'true'
-    runs-on: ${{ vars.DYNA_CI_SELF_HOSTED == 'true' && 'dyna-medium' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+  # The generated modding book for this commit (modding-book-generated.yml), once sdk-<sha> is public: a Dev build's
+  # draft gets it from promote-dev.yml when it is made public.
+  book:
+    needs: [authorize, publish]
+    if: needs.authorize.outputs.publish == 'true' && !inputs.draft
     permissions:
-      contents: read
-    env:
-      CARGO_INCREMENTAL: 0
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.commit }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: The pinned Rust (tools/ci/rust-version)
-        env:
-          DYNA: ${{ runner.environment != 'github-hosted' }}
-        run: |
-          if [ "$DYNA" = true ]; then
-            if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
-              curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
-            fi
-            export PATH="$CARGO_HOME/bin:$PATH"
-            echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          fi
-          bash tools/ci/rustup_install.sh --profile minimal
-      - name: Export generated chapters and SDK tables
-        run: |
-          rm -rf "$RUNNER_TEMP/modding-book-generated"
-          python3 tools/modding_export_generated.py --out "$RUNNER_TEMP/modding-book-generated"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: modding-book-generated
-          path: ${{ runner.temp }}/modding-book-generated
-          if-no-files-found: error
-          overwrite: true
-
-  book-generated-publish:
-    needs: [authorize, publish, book-generated]
-    if: needs.authorize.outputs.publish == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: modding-book-generated
-      cancel-in-progress: false
-    permissions:
-      contents: write  # updates orphan branch modding-book-generated
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: modding-book-generated
-          path: ${{ runner.temp }}/modding-book-generated
-      - name: Publish modding-book-generated snapshot for this SDK commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          exported="$RUNNER_TEMP/modding-book-generated"
-          python3 - "$exported" <<'PY'
-          import pathlib, sys
-          root = pathlib.Path(sys.argv[1]).resolve()
-          allowed = {
-              "sdk-tables.json",
-              "reference/api-reference.md",
-              "reference/hook-notes.md",
-              "reference/neoforge-counterparts.md",
-          }
-          found = []
-          for p in sorted(root.rglob("*")):
-              if p.is_dir():
-                  assert not p.is_symlink(), f"refusing symlink dir {p}"
-                  continue
-              assert not p.is_symlink() and p.is_file(), f"refusing non-regular file {p}"
-              rel = p.relative_to(root).as_posix()
-              assert rel in allowed, f"refusing unexpected exported file {rel}"
-              found.append(rel)
-          assert found, "no generated files exported"
-          PY
-          work="$RUNNER_TEMP/book-generated-repo"
-          rm -rf "$work"
-          mkdir -p "$work"
-          git -C "$work" init -q
-          git -C "$work" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git -C "$work" fetch -q --depth=1 origin refs/heads/modding-book-generated:refs/heads/modding-book-generated 2>/dev/null; then
-            git -C "$work" checkout -q -f modding-book-generated
-            git -C "$work" rm -q -rf .
-          else
-            git -C "$work" checkout -q --orphan modding-book-generated
-            git -C "$work" rm -q -rf . 2>/dev/null || true
-          fi
-          printf '%s\n' "$COMMIT" > "$work/source-commit"
-          cp -R "$exported"/. "$work"/
-          git -C "$work" add -A
-          if git -C "$work" diff --cached --quiet; then
-            echo "### \`modding-book-generated\` already matches \`${COMMIT::10}\`" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          git -C "$work" -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            -c commit.gpgsign=false commit -q -m "docs(modding): generated bundle for ${COMMIT::10}"
-          git -C "$work" push -q origin HEAD:refs/heads/modding-book-generated
-          echo "### Published \`modding-book-generated\` snapshot for \`${COMMIT::10}\`" >> "$GITHUB_STEP_SUMMARY"
+      contents: write  # the orphan branch modding-book-generated
+    uses: ./.github/workflows/modding-book-generated.yml
+    with:
+      commit: ${{ inputs.commit }}

@@ -27,10 +27,9 @@ import sys
 import tempfile
 import zipfile
 
-try:
-    from . import lab
-except ImportError:
-    import lab
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 # Classes whose decompiled source a generator parses: (side, class).
 SOURCES = [("client", "net/minecraft/world/entity/EntityTypes")]
@@ -253,12 +252,12 @@ GENERATORS = [
      lambda root, version, store, build: [python(), "tools/gen_version_consts.py"]),
     ("packet_ids", ["crates/sunrise-protocol/src/ids.rs"],
      lambda root, version, store, build: [python(), "tools/generate_packet_ids.py"]),
-    ("entity_tracking", ["crates/sunrise-client/src/lan/tracking.rs"],
+    ("entity_tracking", ["crates/sunrise-sim/src/lan/tracking.rs"],
      lambda root, version, store, build: [python(), "tools/generate_entity_tracking.py", "--sources",
                                           store / "sources" / "client"]),
-    ("lan_command_order", ["crates/sunrise-client/src/lan/command_order.rs"],
+    ("lan_command_order", ["crates/sunrise-sim/src/lan/command_order.rs"],
      lambda root, version, store, build: [python(), "tools/generate_lan_command_order.py"]),
-    ("command_suggestions", ["crates/sunrise-client/src/lan/command_suggestions.rs"], gen_suggestions),
+    ("command_suggestions", ["crates/sunrise-sim/src/lan/command_suggestions.rs"], gen_suggestions),
     ("vanilla_command_order", ["crates/sunrise-command/src/vanilla_order.rs"], gen_vanilla_order),
 ]
 

@@ -129,6 +129,29 @@ fn pack_predicates_bind_for_validation_and_world_evaluation() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// `LootPool`, `LootPoolEntryContainer` and `LootItemConditionalFunction` read `condition`
+/// alone (#5378): an old `conditions` list, even of untyped pre-26.3 conditions, is an unknown
+/// field that the load-time walker leaves unchecked, as vanilla's codecs ignore it.
+#[test]
+fn old_conditions_lists_on_pools_entries_and_functions_are_not_checked() {
+    let types = Types::default();
+    let empty = HashMap::new();
+    let old = json!([{"condition":"minecraft:random_chance","chance":0.1}]);
+    let table = json!({"pools":[{"rolls":1,"conditions":old,"entries":[{
+        "type":"minecraft:item","name":"minecraft:stick","conditions":old,
+        "functions":[{"type":"minecraft:set_count","count":2,"conditions":old}]}]}]});
+    types
+        .validate(std::iter::once(("test:root", &table)), &empty, &empty)
+        .unwrap();
+    // The field the codecs do read is still checked.
+    let typed_field = json!({"pools":[{"rolls":1,"condition":old[0],"entries":[]}]});
+    assert!(
+        types
+            .validate(std::iter::once(("test:root", &typed_field)), &empty, &empty)
+            .is_err()
+    );
+}
+
 #[test]
 fn conditional_function_with_null_condition_loads_and_applies() {
     let root = std::env::temp_dir().join(format!("sunrise-null-function-{}", std::process::id()));

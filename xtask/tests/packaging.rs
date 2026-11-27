@@ -61,7 +61,6 @@ fn client_and_server_layouts_require_and_ship_companion_programs() {
         for name in [
             "sunrise-client",
             "sunrise-ctl",
-            "sunrise-perf",
             "sunrise-server",
             "sunrise-port-pack",
         ] {

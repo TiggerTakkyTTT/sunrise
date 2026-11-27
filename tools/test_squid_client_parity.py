@@ -3,10 +3,12 @@
 import json
 import random
 
-try:
-    from . import lab, oracle_harness as harness
-except ImportError:
-    import lab, oracle_harness as harness
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness
 
 
 def make_input(build):
@@ -40,7 +42,7 @@ def main():
         'Actual Squid.aiStep on a client with controlled inherited movement/world services. '
         'Checks water/air body rotation and tentacle state, cycle clamping and event 19. '
         'Glow squid uses the same inherited method; packet dispatch and rendering are separate.',
-        sources=[lab.ROOT / 'crates/sunrise-client/src/mobs/aquatic.rs'])
+        sources=[lab.ROOT / 'crates/sunrise-sim/src/mobs/aquatic.rs'])
 
 
 if __name__ == '__main__':

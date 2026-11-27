@@ -79,6 +79,9 @@ from tools.ci import ignored_shards
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The environment variable through which a test executable finds the shared libraries beside it.
+LIBRARY_PATH = "PATH" if os.name == "nt" else "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+
 # One file per topic, read in file-name order (README.md there gives the row format).
 POLICY = Path(__file__).with_name("ignored-tests")
 POLICY_PATH = "tools/ci/ignored-tests"  # as messages name it
@@ -937,9 +940,11 @@ def run_binaries(package, executables, arguments, env):
     does (in its folder, with the variables cargo sets), printing cargo's own lines around each, which run() reads."""
     folder = ROOT / ignored_shards.workspace_members()[package][0]
     deps = Path(next(iter(executables.values()))).parent
+    # The variable the platform's loader reads (Windows' environment names are case-insensitive: keep the spelling in env).
+    library_path = next((key for key in env if key.upper() == LIBRARY_PATH.upper()), LIBRARY_PATH)
     env = dict(env, CARGO=shutil.which("cargo") or "cargo", CARGO_MANIFEST_DIR=str(folder),
                CARGO_MANIFEST_PATH=str(folder / "Cargo.toml"), CARGO_PKG_NAME=package,
-               LD_LIBRARY_PATH=os.pathsep.join(filter(None, [str(deps), str(deps.parent), env.get("LD_LIBRARY_PATH")])))
+               **{library_path: os.pathsep.join(filter(None, [str(deps), str(deps.parent), env.get(library_path)]))})
     output, status = [], 0
     for target, executable in executables.items():
         output.append(f"     Running {executable} ({executable})")
@@ -1137,17 +1142,16 @@ def run_leg(package, skip, number=None, count=None, only=None, binaries=None):
         elif SUMMARY.match(line):
             if target_count is not None:
                 last_summary = line
-        elif status := re.search(r"\((signal|exit status): (\d+)", line):
+        elif status := re.search(r"\((signal|exit status): (\d+)(?:, (SIG\w+))?", line):
             # Emit only the numeric status, never adjacent test output.
-            print(f"{package}: {status[0]})")
+            print(f"{package}: ({status[1]}: {status[2]})")
             # Cargo's own line for a test process that ended: 101 is libtest's "tests failed"; a signal or any
             # other status is a crash, whatever summaries came before it.
             if cargo_failure and "process didn't exit successfully" in line:
                 crash = status[1] == "signal" or status[2] != "101"
                 if crash and ended_by is None:
-                    number = int(status[2])
-                    name = signal.Signals(number).name if status[1] == "signal" and number in signal.valid_signals() else None
-                    ended_by = f"{status[1]} {number}" + (f" ({name})" if name else "")
+                    # The name is the one cargo printed: this machine's signal table may not know the signal.
+                    ended_by = f"{status[1]} {status[2]}" + (f" ({status[3]})" if status[3] else "")
                 crashed |= crash
                 cargo_failure = False
         if line.startswith("error: test failed, to rerun pass "):

@@ -1,3 +1,10 @@
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 """Command scripts for tools/test_command_exec_parity.py.
 
 Each group is a list of operations: `cmd` runs a command as the player and
@@ -56,21 +63,12 @@ def inline_predicate_constants():
 def predicate_selector_fixtures(group_names):
     fixtures = {}
     if 'mob custom name components' in group_names:
-        try:
-            from .mob_name_predicate_corpus import predicates as name_predicates
-        except ImportError:
-            from mob_name_predicate_corpus import predicates as name_predicates
+        from tools.mob_name_predicate_corpus import predicates as name_predicates
         fixtures.update(name_predicates())
     if 'mob effect predicate view' in group_names:
-        try:
-            from .mob_effect_predicate_corpus import predicates as effect_predicates
-        except ImportError:
-            from mob_effect_predicate_corpus import predicates as effect_predicates
+        from tools.mob_effect_predicate_corpus import predicates as effect_predicates
         fixtures.update(effect_predicates())
-    try:
-        from . import player_food_predicate_corpus as player_food
-    except ImportError:
-        import player_food_predicate_corpus as player_food
+    from tools import player_food_predicate_corpus as player_food
     if player_food.GROUP in group_names:
         fixtures.update(player_food.predicates())
     if 'named smoke predicates' in group_names:
@@ -2864,22 +2862,13 @@ def advancement_reward_fixtures(group_names):
 def function_return_fixtures(group_names):
     functions = {}
     if 'fork function feedback' in group_names:
-        try:
-            from .fork_function_feedback_corpus import functions as fork_functions
-        except ImportError:
-            from fork_function_feedback_corpus import functions as fork_functions
+        from tools.fork_function_feedback_corpus import functions as fork_functions
         functions.update(fork_functions())
     if 'function condition fallthrough' in group_names:
-        try:
-            from .function_condition_corpus import functions as condition_functions
-        except ImportError:
-            from function_condition_corpus import functions as condition_functions
+        from tools.function_condition_corpus import functions as condition_functions
         functions.update(condition_functions())
     if any(name.startswith('wolf anger ') for name in group_names):
-        try:
-            from .wolf_anger_corpus import functions as anger_functions
-        except ImportError:
-            from wolf_anger_corpus import functions as anger_functions
+        from tools.wolf_anger_corpus import functions as anger_functions
         functions.update(anger_functions())
     if 'macro source type error' in group_names:
         functions.update({'command_macro:apply': '$scoreboard players add #hits macro_error $(amount)\n',
@@ -2986,18 +2975,12 @@ def function_return_feedback():
 
 
 def fork_function_feedback_cases():
-    try:
-        from .fork_function_feedback_corpus import cases
-    except ImportError:
-        from fork_function_feedback_corpus import cases
+    from tools.fork_function_feedback_corpus import cases
     return cases(cmd)
 
 
 def function_condition_fallthrough():
-    try:
-        from .function_condition_corpus import conditions
-    except ImportError:
-        from function_condition_corpus import conditions
+    from tools.function_condition_corpus import conditions
     return conditions()
 
 
@@ -3675,10 +3658,7 @@ def shulker_box_empty_items():
 
 
 def shulker_lock_drop_cases():
-    try:
-        from .shulker_lock_drop_corpus import cases
-    except ImportError:
-        from shulker_lock_drop_corpus import cases
+    from tools.shulker_lock_drop_corpus import cases
     return cases(cmd)
 
 
@@ -6647,34 +6627,22 @@ def zombie_nautilus_ignored_age():
 
 
 def boat_passenger_tree_cases(original_full=False):
-    try:
-        from .boat_passenger_tree_corpus import cases
-    except ImportError:
-        from boat_passenger_tree_corpus import cases
+    from tools.boat_passenger_tree_corpus import cases
     return cases(cmd, original_full)
 
 
 def effective_component_presence_cases():
-    try:
-        from .effective_component_presence_corpus import cases
-    except ImportError:
-        from effective_component_presence_corpus import cases
+    from tools.effective_component_presence_corpus import cases
     return cases(cmd)
 
 
 def jukebox_saved_clock_cases():
-    try:
-        from .jukebox_saved_clock_corpus import cases
-    except ImportError:
-        from jukebox_saved_clock_corpus import cases
+    from tools.jukebox_saved_clock_corpus import cases
     return cases(cmd)
 
 
 def item_count_predicate_cases():
-    try:
-        from .item_count_predicate_corpus import cases
-    except ImportError:
-        from item_count_predicate_corpus import cases
+    from tools.item_count_predicate_corpus import cases
     return cases(cmd)
 
 
@@ -7042,10 +7010,7 @@ def advancement_loot_fixtures(group_names):
         tables['parity:pack_loot'] = {'type': 'minecraft:chest', 'pools': [{'rolls': 1, 'entries': [
             {'type': 'minecraft:item', 'name': 'minecraft:emerald',
              'modifier': {'type': 'minecraft:set_count', 'count': 3}}]}]}
-    try:
-        from . import player_food_predicate_corpus as player_food
-    except ImportError:
-        import player_food_predicate_corpus as player_food
+    from tools import player_food_predicate_corpus as player_food
     if player_food.GROUP in group_names:
         advancements.update(player_food.advancements())
     return advancements, tables
@@ -7372,18 +7337,12 @@ def advancement_reward_functions():
 
 
 def moving_piston_presentation_diagnostic():
-    try:
-        from .moving_piston_data_corpus import moving_piston_presentation
-    except ImportError:
-        from moving_piston_data_corpus import moving_piston_presentation
+    from tools.moving_piston_data_corpus import moving_piston_presentation
     return moving_piston_presentation(cmd, setup)
 
 
 def piston_mob_bounce():
-    try:
-        from .piston_bounce_corpus import piston_bounce
-    except ImportError:
-        from piston_bounce_corpus import piston_bounce
+    from tools.piston_bounce_corpus import piston_bounce
     return piston_bounce(cmd, setup)
 
 
@@ -9396,106 +9355,38 @@ def summon_lightning_bolt_nbt():
 
 
 def groups():
-    try:
-        from .spectral_duration_corpus import cases as spectral_saved_duration
-    except ImportError:
-        from spectral_duration_corpus import cases as spectral_saved_duration
-    try:
-        from .item_health_load_corpus import cases as item_health_load
-    except ImportError:
-        from item_health_load_corpus import cases as item_health_load
-    try:
-        from .vehicle_kill_corpus import vehicle_kill_contents
-    except ImportError:
-        from vehicle_kill_corpus import vehicle_kill_contents
-    try:
-        from .vehicle_container_corpus import vehicle_containers
-        from .boat_loot_corpus import boat_loot
-    except ImportError:
-        from vehicle_container_corpus import vehicle_containers
-        from boat_loot_corpus import boat_loot
-    try:
-        from .vehicle_boolean_corpus import other_entity_boolean_flags, vehicle_boolean_flags
-    except ImportError:
-        from vehicle_boolean_corpus import other_entity_boolean_flags, vehicle_boolean_flags
-    try:
-        from .data_literal_corpus import storage_literals
-    except ImportError:
-        from data_literal_corpus import storage_literals
-    try:
-        from .craft_map_take_corpus import cases as craft_map_takes
-    except ImportError:
-        from craft_map_take_corpus import cases as craft_map_takes
-    try:
-        from .potion_effect_icon_corpus import cases as potion_effect_icons
-    except ImportError:
-        from potion_effect_icon_corpus import cases as potion_effect_icons
-    try:
-        from .trader_llama_delay_corpus import llama_delay
-    except ImportError:
-        from trader_llama_delay_corpus import llama_delay
-    try:
-        from .guest_close_event_corpus import cases as guest_close_events
-    except ImportError:
-        from guest_close_event_corpus import cases as guest_close_events
-    try:
-        from .pot_hopper_corpus import cases as pot_hopper_cases
-    except ImportError:
-        from pot_hopper_corpus import cases as pot_hopper_cases
-    try:
-        from .transmute_patch_corpus import cases as transmute_patches
-    except ImportError:
-        from transmute_patch_corpus import cases as transmute_patches
-    try:
-        from .mob_effect_predicate_corpus import cases as mob_effect_predicates
-    except ImportError:
-        from mob_effect_predicate_corpus import cases as mob_effect_predicates
-    try:
-        from .fill_block_nbt_corpus import fill_block_nbt
-    except ImportError:
-        from fill_block_nbt_corpus import fill_block_nbt
-    try:
-        from .seed_sync_corpus import cases as seed_sync_proof
-    except ImportError:
-        from seed_sync_corpus import cases as seed_sync_proof
-    try:
-        from .mob_name_predicate_corpus import cases as mob_name_predicates
-    except ImportError:
-        from mob_name_predicate_corpus import cases as mob_name_predicates
-    try:
-        from . import player_food_predicate_corpus as player_food
-    except ImportError:
-        import player_food_predicate_corpus as player_food
-    try:
-        from .frame_map_corpus import frame_maps, treasure_map_copies
-        from .allay_damage_corpus import allay_player_damage
-        from .wolf_anger_corpus import groups as wolf_anger_groups
-        from .allay_healing_corpus import allay_healing
-        from .loaded_cloud_corpus import loaded_clouds
-        from .moving_piston_data_corpus import moving_piston_data
-        from .carpet_farm_corpus import carpet_farms
-        from .passenger_teleport_corpus import passenger_teleports
-        from .gateway_passenger_corpus import gateway_passengers
-        from .gateway_item_motion_corpus import gateway_item_motion
-        from .item_honey_bounce_corpus import item_honey_bounce
-        from .item_merge_corpus import stack_limit_merges
-        from .conduit_table_entity_corpus import conduit_table_entities
-        from .first_tick_lava_burn_corpus import GROUP as FIRST_TICK_LAVA_BURN, first_tick_lava_burn
-    except ImportError:
-        from frame_map_corpus import frame_maps, treasure_map_copies
-        from allay_damage_corpus import allay_player_damage
-        from wolf_anger_corpus import groups as wolf_anger_groups
-        from allay_healing_corpus import allay_healing
-        from loaded_cloud_corpus import loaded_clouds
-        from moving_piston_data_corpus import moving_piston_data
-        from carpet_farm_corpus import carpet_farms
-        from passenger_teleport_corpus import passenger_teleports
-        from gateway_passenger_corpus import gateway_passengers
-        from gateway_item_motion_corpus import gateway_item_motion
-        from item_honey_bounce_corpus import item_honey_bounce
-        from item_merge_corpus import stack_limit_merges
-        from conduit_table_entity_corpus import conduit_table_entities
-        from first_tick_lava_burn_corpus import GROUP as FIRST_TICK_LAVA_BURN, first_tick_lava_burn
+    from tools.spectral_duration_corpus import cases as spectral_saved_duration
+    from tools.item_health_load_corpus import cases as item_health_load
+    from tools.vehicle_kill_corpus import vehicle_kill_contents
+    from tools.vehicle_container_corpus import vehicle_containers
+    from tools.boat_loot_corpus import boat_loot
+    from tools.vehicle_boolean_corpus import other_entity_boolean_flags, vehicle_boolean_flags
+    from tools.data_literal_corpus import storage_literals
+    from tools.craft_map_take_corpus import cases as craft_map_takes
+    from tools.potion_effect_icon_corpus import cases as potion_effect_icons
+    from tools.trader_llama_delay_corpus import llama_delay
+    from tools.guest_close_event_corpus import cases as guest_close_events
+    from tools.pot_hopper_corpus import cases as pot_hopper_cases
+    from tools.transmute_patch_corpus import cases as transmute_patches
+    from tools.mob_effect_predicate_corpus import cases as mob_effect_predicates
+    from tools.fill_block_nbt_corpus import fill_block_nbt
+    from tools.seed_sync_corpus import cases as seed_sync_proof
+    from tools.mob_name_predicate_corpus import cases as mob_name_predicates
+    from tools import player_food_predicate_corpus as player_food
+    from tools.frame_map_corpus import frame_maps, treasure_map_copies
+    from tools.allay_damage_corpus import allay_player_damage
+    from tools.wolf_anger_corpus import groups as wolf_anger_groups
+    from tools.allay_healing_corpus import allay_healing
+    from tools.loaded_cloud_corpus import loaded_clouds
+    from tools.moving_piston_data_corpus import moving_piston_data
+    from tools.carpet_farm_corpus import carpet_farms
+    from tools.passenger_teleport_corpus import passenger_teleports
+    from tools.gateway_passenger_corpus import gateway_passengers
+    from tools.gateway_item_motion_corpus import gateway_item_motion
+    from tools.item_honey_bounce_corpus import item_honey_bounce
+    from tools.item_merge_corpus import stack_limit_merges
+    from tools.conduit_table_entity_corpus import conduit_table_entities
+    from tools.first_tick_lava_burn_corpus import GROUP as FIRST_TICK_LAVA_BURN, first_tick_lava_burn
     result = [
         ('setup', group_setup()),
         ('guest container close event', guest_close_events()),

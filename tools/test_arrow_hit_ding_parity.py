@@ -27,19 +27,15 @@ import tempfile
 import time
 import uuid
 
-try:
-    from . import lab, test_locator_bar_parity as net, test_rust_parity as base
-    from .test_dedicated_server_parity import Server, game_time
-except ImportError:
-    import lab
-    import test_locator_bar_parity as net
-    import test_rust_parity as base
-    from test_dedicated_server_parity import Server, game_time
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_locator_bar_parity as net, test_rust_parity as base
+from tools.test_dedicated_server_parity import Server, game_time
 
 NAME = 'arrow-hit-ding-parity'
 ORACLE_SOURCE = 'mods/sunrise/src/test/java/dev/sunriselab/parity/LocatorBarClient.java'
 WITNESS_ENV = 'SUNRISE_ARROW_HIT_DING_WITNESS'
-TEST = 'game::lan_pvp::arrow_hit_sound_tests::an_arrow_that_hurts_another_player_dings_its_shooter'
+TEST = 'game::server_side::lan_pvp::arrow_hit_sound_tests::an_arrow_that_hurts_another_player_dings_its_shooter'
 PLAYERS = ['Alice', 'Bob']
 # (case name, shooter player name, Silent flag, pvp game rule, victim game mode)
 CASES = [

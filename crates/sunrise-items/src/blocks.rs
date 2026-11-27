@@ -111,6 +111,19 @@ pub fn cube_edges() -> Vec<[f64; 6]> {
     }
     edges
 }
+/// The shape `BlockBehaviour.getVisualShape` answers ([`StateFacts::visual_shape`]): the one
+/// `ClipContext.Block.VISUAL` rays (the camera's, a mod's `ClipBlock::Visual`) stop on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisualShape {
+    /// `BlockBehaviour.getVisualShape`'s default: the collision shape, with the ray's context.
+    Collision,
+    /// `Shapes.empty()`: nothing, the ray passes.
+    Empty,
+    /// `Shapes.block()`: the full cube.
+    Block,
+    /// The selection outline (`getShape`), with its column offset.
+    Outline,
+}
 /// Which of the four `SignBlock` subclasses a block is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignForm {
@@ -138,6 +151,25 @@ impl StateFacts {
     /// reads connected textures treats them alike.
     pub fn is_pane(&self) -> bool {
         self.has_class("IronBarsBlock")
+    }
+    /// Which shape `BlockBehaviour.getVisualShape` gives this state (`ClipContext.Block.VISUAL`),
+    /// from the first class of the chain that overrides it: `TransparentBlock` (glass, stained
+    /// and tinted glass, copper grates), `IronBarsBlock` (bars and panes) and `PowderSnowBlock`
+    /// give nothing, `SoulSandBlock` and `MudBlock` a full block, `SnowLayerBlock` and
+    /// `FenceBlock` their outline (`getShape`). Any other block, a mod block on one of
+    /// these templates included, keeps vanilla's default, its collision shape.
+    pub fn visual_shape(&self) -> VisualShape {
+        self.classes
+            .iter()
+            .find_map(|class| match &**class {
+                "TransparentBlock" | "IronBarsBlock" | "PowderSnowBlock" => {
+                    Some(VisualShape::Empty)
+                }
+                "SoulSandBlock" | "MudBlock" => Some(VisualShape::Block),
+                "SnowLayerBlock" | "FenceBlock" => Some(VisualShape::Outline),
+                _ => None,
+            })
+            .unwrap_or(VisualShape::Collision)
     }
     /// `OffsetType.XZ`/`XYZ` with `getMaxHorizontalOffset` and
     /// `getMaxVerticalOffset`, as (max horizontal, max vertical): vertical 0
@@ -514,7 +546,7 @@ impl BlockFacts {
                 | "minecraft:seagrass"
                 | "minecraft:tall_seagrass" => (Fluid::Water, 8, false),
                 _ if prop("waterlogged") == Some("true") => (Fluid::Water, 8, false),
-                name if sunrise_world::fluid::mod_fluid_named(name).is_some() => {
+                name if sunrise_world::fluid::mod_fluid_of_block_name(name).is_some() => {
                     let level: u8 = prop("level").and_then(|v| v.parse().ok()).unwrap_or(0);
                     match level {
                         0 => (Fluid::Modded, 8, false),

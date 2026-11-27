@@ -19,6 +19,7 @@ impl Items {
             crate::enchant::Enchantments::load_definitions(root, overlay, defaults)?,
             HashMap::new(),
         );
+        items.bind_enchantment_tags(root, overlay)?;
         load_component_damage_registry(root, overlay, &mut items)?;
         Ok(items)
     }
@@ -37,11 +38,21 @@ impl Items {
         let registry = Arc::make_mut(&mut self.component_registry);
         registry.by_registry.insert(
             "minecraft:damage_type".into(),
-            sunrise_client_core::registries::RegistryIds {
+            sunrise_game_data::registries::RegistryIds {
                 ids,
                 tags: catalog.tags().map(str::to_owned).collect(),
             },
         );
+        let ordered = catalog
+            .tags()
+            .map(|tag| {
+                (
+                    tag.to_owned(),
+                    catalog.tag_members(tag).map(str::to_owned).collect(),
+                )
+            })
+            .collect();
+        self.set_tags(TagRegistry::DamageType, ordered);
     }
 
     /// Bind a damage type registry received rather than loaded, a client's from its server:
@@ -51,7 +62,7 @@ impl Items {
     pub fn bind_damage_registry(
         &mut self,
         mut ids: Vec<String>,
-        tags: HashMap<String, std::collections::HashSet<String>>,
+        tags: HashMap<String, Vec<String>>,
     ) {
         ids.sort();
         let mut names: Vec<_> = tags.keys().cloned().collect();
@@ -60,9 +71,13 @@ impl Items {
             .by_registry
             .insert(
                 "minecraft:damage_type".into(),
-                sunrise_client_core::registries::RegistryIds { ids, tags: names },
+                sunrise_game_data::registries::RegistryIds { ids, tags: names },
             );
-        Arc::make_mut(&mut self.enchantments).damage_tags = tags;
+        Arc::make_mut(&mut self.enchantments).damage_tags = tags
+            .iter()
+            .map(|(tag, members)| (tag.clone(), members.iter().cloned().collect()))
+            .collect();
+        self.set_tags(TagRegistry::DamageType, tags);
     }
 }
 
@@ -140,10 +155,10 @@ pub(crate) fn component_tables(
     overlay: &PackOverlay,
     source: LoadEntityTags<'_>,
 ) -> Result<(
-    Arc<sunrise_client_core::registries::Registries>,
+    Arc<sunrise_game_data::registries::Registries>,
     Arc<EntityTypeTags>,
 )> {
-    let mut registry = sunrise_client_core::registries::Registries::default();
+    let mut registry = sunrise_game_data::registries::Registries::default();
     let path = root.join("command-registries.json");
     if path.exists() {
         registry.fill_from_export(&serde_json::from_slice(&fs::read(path)?)?);
@@ -196,7 +211,7 @@ pub(crate) fn component_tables(
     registry.damage_types.clear();
     registry.by_registry.insert(
         "minecraft:damage_type".into(),
-        sunrise_client_core::registries::RegistryIds::default(),
+        sunrise_game_data::registries::RegistryIds::default(),
     );
     Ok((Arc::new(registry), entity_type_tags))
 }
@@ -215,8 +230,20 @@ mod tests {
             [(tag.into(), vec![cow.into()])].into(),
             [cow.into()].into(),
         ));
-        let reload = |bytes: &[u8]| {
-            let files = [("tags/test:entity_type/walkers".into(), vec![bytes.to_vec()])];
+        let reload = |bytes: &[u8], reject_builtins: bool| {
+            let mut files = vec![("tags/test:entity_type/walkers".into(), vec![bytes.to_vec()])];
+            if reject_builtins {
+                // Built-in empty convention tags also bind unless rejected by the pack stack.
+                for id in [
+                    "tags/c:entity_type/capturing_not_supported",
+                    "tags/c:entity_type/teleporting_not_supported",
+                ] {
+                    files.push((
+                        id.into(),
+                        vec![br#"{"replace":true,"values":["test:missing"]}"#.to_vec()],
+                    ));
+                }
+            }
             component_tables(
                 &root,
                 &PackOverlay::new(&files),
@@ -225,9 +252,9 @@ mod tests {
             .unwrap()
             .1
         };
-        assert!(reload(br#"{"values":["test:missing"]}"#).contains(tag, cow));
+        assert!(reload(br#"{"values":["test:missing"]}"#, true).contains(tag, cow));
         assert_eq!(
-            reload(br#"{"values":[]}"#).ordered().get(tag),
+            reload(br#"{"values":[]}"#, false).ordered().get(tag),
             Some(&Vec::new())
         );
         std::fs::remove_dir(root).unwrap();

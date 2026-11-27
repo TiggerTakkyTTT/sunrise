@@ -11,12 +11,18 @@
 mod component_validation;
 mod fill;
 pub mod global_modifiers;
+mod location;
+pub use location::{
+    LootLocation, block_entity_matches, components_match, location_offset, location_offset_tag,
+    reads_block_entity,
+};
 pub mod number;
 pub mod query;
-use component_validation::retain_valid;
+use component_validation::{refuse, refused_entries};
 pub use component_validation::{
     validate_entity_predicate, validate_item_modifier, validate_item_predicate,
     validate_loot_condition, validate_loot_table, validate_slot_source,
+    validate_typed_loot_condition,
 };
 mod component_validation_nbt;
 pub use component_validation_nbt::{
@@ -284,6 +290,7 @@ pub struct LootData {
     global_modifiers: Arc<global_modifiers::GlobalLootModifiers>,
     modifiers: Arc<HashMap<String, Value>>,
     predicates: Arc<HashMap<String, Value>>,
+    slot_sources: HashMap<String, Value>,
     items: HashMap<String, ItemFacts>,
     /// Enchantments in registry (identifier) order.
     enchantments: Vec<Enchantment>,
@@ -686,8 +693,8 @@ pub fn shared_tables(root: &Path, overlay: &PackOverlay) -> io::Result<Arc<LootT
     if let Some(tables) = held(&mut LOADED.lock().unwrap_or_else(|e| e.into_inner())) {
         return Ok(tables);
     }
-    let mut tables = load_resources::load_ordered_kind(root, overlay, "loot_table")?;
-    tables.retain(|id, table| retain_valid("loot table", id, validate_loot_table(table)));
+    let tables = load_resources::load_ordered_kind(root, overlay, "loot_table")?;
+    refuse(refused_entries("loot table", &tables, validate_loot_table))?;
     let tables: LootTables = tables.into_iter().collect();
     let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
     // Another thread may have loaded the same tables meanwhile: keep one.
@@ -817,14 +824,13 @@ impl LootData {
         let mut recipes = HashMap::new();
         load_kind(&root.join("data"), "recipe", &mut recipes)?;
         overlay_map(overlay, "recipe", &mut recipes);
-        recipes.retain(|id, value| {
-            value["type"] != "minecraft:smelting"
-                || retain_valid(
-                    "recipe",
-                    id,
-                    crate::item_defaults::validate_stack(&value["result"]),
-                )
-        });
+        refuse(refused_entries(
+            "recipe",
+            recipes
+                .iter()
+                .filter(|(_, value)| value["type"] == "minecraft:smelting"),
+            |value| crate::item_defaults::validate_stack(&value["result"]),
+        ))?;
         let mut ids: Vec<&String> = recipes.keys().collect();
         ids.sort();
         loaded.smelting = ids
@@ -876,12 +882,23 @@ impl LootData {
     ) -> io::Result<Self> {
         let all = root.join("data");
         let tables = shared_tables(root, overlay)?;
-        let mut modifiers = load_resources::load_ordered_kind(root, overlay, "item_modifier")?;
-        modifiers
-            .retain(|id, value| retain_valid("item modifier", id, validate_item_modifier(value)));
-        let mut predicates = load_predicates(root, overlay)?;
-        predicates
-            .retain(|id, value| retain_valid("predicate", id, validate_loot_condition(value)));
+        let modifiers = load_resources::load_ordered_kind(root, overlay, "item_modifier")?;
+        let predicates = load_predicates(root, overlay)?;
+        let slot_sources = types::load_files(root, overlay, "slot_source", |bytes| {
+            serde_json::from_slice(bytes)
+        })?;
+        let mut refused = refused_entries("item modifier", &modifiers, validate_item_modifier);
+        refused.extend(refused_entries(
+            "predicate",
+            &predicates,
+            validate_typed_loot_condition,
+        ));
+        refused.extend(refused_entries(
+            "slot source",
+            &slot_sources,
+            validate_slot_source,
+        ));
+        refuse(refused)?;
         let items = defaults
             .entries()
             .iter()
@@ -976,6 +993,8 @@ impl LootData {
             "entity_type",
             "predicate",
             "item_modifier",
+            // `LootTable.LIST_CODEC`'s tags: advancement rewards and the loot table trigger.
+            "loot_table",
             // What `location_check`'s `biomes` names.
             "worldgen/biome",
         ] {
@@ -993,6 +1012,7 @@ impl LootData {
                     || crate::fluid::FluidKind::from_name(id).is_some(),
                     |ids| ids.contains(id),
                 ),
+                "loot_table" => tables.contains_key(id),
                 "predicate" => predicates.contains_key(id),
                 "item_modifier" => modifiers.contains_key(id),
                 _ => binding.ids(registry).map_or_else(
@@ -1015,6 +1035,7 @@ impl LootData {
             global_modifiers: Arc::default(),
             modifiers: Arc::new(modifiers),
             predicates: Arc::new(predicates),
+            slot_sources,
             items,
             enchantments,
             primary_answers: Default::default(),
@@ -1071,6 +1092,10 @@ impl LootData {
 
     pub fn item_modifiers(&self) -> &HashMap<String, Value> {
         &self.modifiers
+    }
+
+    pub fn slot_sources(&self) -> &HashMap<String, Value> {
+        &self.slot_sources
     }
 
     /// The table snapshot used by this loot data.
@@ -1135,6 +1160,7 @@ impl LootData {
             local_bindings: None,
             random: LegacyRandom::new(0),
             biome: None,
+            location: None,
             visited: Vec::new(),
             luck: 0.0,
             open_water: None,
@@ -1236,6 +1262,7 @@ impl LootData {
             local_bindings: None,
             random: random.clone(),
             biome: None,
+            location: None,
             visited: Vec::new(),
             luck: params.luck,
             open_water: None,
@@ -1270,6 +1297,7 @@ impl LootData {
             local_bindings: None,
             random: random.clone(),
             biome: None,
+            location: None,
             visited: Vec::new(),
             luck: 0.0,
             open_water: None,
@@ -1414,6 +1442,8 @@ struct Context<'a, R> {
     local_bindings: Option<&'a types::RuleMap>,
     random: R,
     biome: Option<&'a str>,
+    /// `ORIGIN` and the level, for `location_check`; None without an origin.
+    location: Option<LootLocation<'a>>,
     visited: Vec<String>,
     /// LootContext.getLuck.
     luck: f32,
@@ -1735,21 +1765,8 @@ impl<R: RandomSource> Context<'_, R> {
                     let chance = self.float(&c["chance"]);
                     self.random.next_float() < chance
                 }
-                "minecraft:location_check" => {
-                    let Some(biome) = self.biome else {
-                        return false;
-                    };
-                    // `LocationPredicate.biomes`: a HolderSet, so a `#tag`
-                    // (the loot data's biome tags, packs included), an id or
-                    // a list of ids.
-                    match &c["predicate"]["biomes"] {
-                        Value::Null => true,
-                        set => data
-                            .holder_set("worldgen/biome", set)
-                            .iter()
-                            .any(|b| b == biome),
-                    }
-                }
+                // `LocationCheck.test`: false without an origin.
+                "minecraft:location_check" => self.location.is_some_and(|at| at.check(c)),
                 // A validated registered condition runs in the current roll's order.
                 k if k.contains(':') && !k.starts_with("minecraft:") => {
                     self.registered_condition(bindings, k, c)
@@ -1960,7 +1977,7 @@ impl<R: RandomSource> Context<'_, R> {
             // (it drops the map when nothing is found, as the filtered
             // map_id check after it would).
             "minecraft:exploration_map" => {
-                stack.map = self.biome.is_some();
+                stack.map = self.location.is_some();
                 if stack.map {
                     stack.exploration = Some(Box::new(ExplorationMap::from_json(f)));
                 }
@@ -3367,6 +3384,58 @@ mod namespace_tests {
         assert!(!data.in_tag("item", "minecraft:food", "minecraft:kelp"));
         let _ = fs::remove_dir_all(&root);
     }
+    /// A world pack's tag file (no `replace`, one optional entry that is not in the registry)
+    /// joins the tag the game's own files define, for every registry `load_table_candidate` binds
+    /// from files: the optional miss drops, the rest keep their layer order (`TagLoader.build`).
+    #[test]
+    fn pack_tag_files_reach_the_loot_readers_of_five_registries() {
+        let root =
+            std::env::temp_dir().join(format!("sunrise-loot-pack-tags-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let members = [
+            ("predicate", r#"{"type": "minecraft:survives_explosion"}"#),
+            ("item_modifier", r#"{"type": "minecraft:explosion_decay"}"#),
+            (
+                "enchantment",
+                r#"{"supported_items": "minecraft:stick", "max_level": 1}"#,
+            ),
+            ("instrument", "{}"),
+            ("worldgen/biome", "{}"),
+        ];
+        let mut overlay_files = Vec::new();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("items.json"), r#"{"minecraft:stick": {}}"#).unwrap();
+        for (registry, body) in members {
+            for name in ["a", "b"] {
+                let path = root.join(format!("data/test/{registry}/{name}.json"));
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, body).unwrap();
+            }
+            let path = root.join(format!("data/test/tags/{registry}/t.json"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, r#"{"values": ["test:a"]}"#).unwrap();
+            overlay_files.push((
+                format!("tags/test:{registry}/t"),
+                vec![
+                    br#"{"values": ["test:b", {"id": "test:ghost", "required": false}]}"#.to_vec(),
+                ],
+            ));
+        }
+        let overlay = PackOverlay {
+            files: &overlay_files,
+            ..PackOverlay::default()
+        };
+        let defaults = crate::item_defaults::read(&root).unwrap();
+        let data = LootData::load(&root, &overlay, &defaults).unwrap();
+        for (registry, _) in members {
+            assert_eq!(
+                data.tag(registry, "test:t"),
+                ["test:a", "test:b"],
+                "{registry}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
     /// `ToggleTooltips`: a loot table's toggles show the components an earlier
     /// display hid and hide the ones it shows; the item layer reads the
     /// `minecraft:tooltip_display` component back for its tooltip.
@@ -3845,6 +3914,28 @@ mod native_kinds_tests {
 #[path = "recipe_result_tests.rs"]
 mod recipe_result_tests;
 
+/// A level that answers a location predicate's `biomes` with the loot data's own biome
+/// tags, standing in for the game's level in tests; `None` rolls without an origin.
+#[cfg(test)]
+pub(crate) fn in_biome<T>(
+    data: &LootData,
+    biome: Option<&str>,
+    roll: impl FnOnce(Option<LootLocation<'_>>) -> T,
+) -> T {
+    let level = |predicate: &Value, _: [f64; 3]| match &predicate["biomes"] {
+        Value::Null => true,
+        set => biome.is_some_and(|biome| {
+            data.holder_set("worldgen/biome", set)
+                .iter()
+                .any(|b| b == biome)
+        }),
+    };
+    roll(biome.map(|_| LootLocation {
+        origin: [0.0; 3],
+        level: &level,
+    }))
+}
+
 #[cfg(test)]
 mod location_check_biome_tests {
     use super::*;
@@ -3876,15 +3967,17 @@ mod location_check_biome_tests {
     }
 
     fn drops(data: &LootData, biome: Option<&str>) -> bool {
-        !data
-            .roll(
-                "minecraft:test",
-                &mut LegacyRandom::new(1),
-                0.0,
-                biome,
-                None,
-            )
-            .is_empty()
+        in_biome(data, biome, |location| {
+            !data
+                .roll(
+                    "minecraft:test",
+                    &mut LegacyRandom::new(1),
+                    0.0,
+                    location,
+                    None,
+                )
+                .is_empty()
+        })
     }
 
     /// `LocationPredicate.biomes` is a HolderSet: a `#tag` names the biomes

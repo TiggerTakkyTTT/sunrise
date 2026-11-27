@@ -689,16 +689,8 @@ impl<'a> Walker<'a> {
                             pending.push(Visit::Builtin(data, function, kind, path.clone()));
                         }
                         if conditional {
-                            // Item loot still evaluates the old plural field after `condition`.
-                            if let Some(list) = data.get("conditions").and_then(Value::as_array) {
-                                for (i, value) in list.iter().enumerate().rev() {
-                                    pending.push(Visit::Entry(
-                                        value,
-                                        false,
-                                        format!("{path}.conditions[{i}]"),
-                                    ));
-                                }
-                            }
+                            // `LootItemConditionalFunction`'s codec reads `condition` alone: an
+                            // old `conditions` list is an unknown field, ignored (#5378).
                             if let Some(condition) = data.get("condition").filter(|v| !v.is_null())
                             {
                                 pending.push(Visit::Entry(
@@ -765,16 +757,8 @@ impl<'a> Walker<'a> {
                         return Err(invalid(&path, "loot_table", "expected object"));
                     }
                     pending.push(Visit::TableChildren(data, part, path.clone()));
-                    // JsonOps map lookup treats JSON null as absent for optionalFieldOf.
-                    if let Some(list) = data.get("conditions").and_then(Value::as_array) {
-                        for (i, value) in list.iter().enumerate().rev() {
-                            pending.push(Visit::Field(
-                                value,
-                                false,
-                                format!("{path}.conditions[{i}]"),
-                            ));
-                        }
-                    }
+                    // JsonOps map lookup treats JSON null as absent for optionalFieldOf. A pool's or
+                    // entry's old `conditions` list is no codec field: ignored, not checked (#5378).
                     if let Some(value) = data.get("modifier").filter(|v| !v.is_null()) {
                         pending.push(Visit::Field(value, true, format!("{path}.modifier")));
                     }

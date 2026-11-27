@@ -97,7 +97,7 @@ fn screenshot_paths_are_relative_and_strictly_below_page() {
         ("page/", "under page/"),
         ("page/C:/runes.jpg", "under page/"),
         ("page/sub\\runes.jpg", "under page/"),
-        ("page/.. /runes.jpg", "dot or space"),
+        ("page/.. /runes.jpg", "under page/"),
         (&long, "not a ustar path"),
     ] {
         let error = Page::parse(

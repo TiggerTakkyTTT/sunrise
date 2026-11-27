@@ -4,25 +4,14 @@
 use std::io::{Cursor, Write};
 
 use sunrise_shaders::{
-    GameInputs, GbuffersInputs, Macros, Origin, Pack, Preprocessed, Program, Target, load_post,
+    GameInputs, GbuffersInputs, Macros, Pack, Preprocessed, Program, Target, load_post,
     read_properties, translate_composite,
 };
 
 fn stage(code: &str) -> Preprocessed {
-    Preprocessed {
-        code: code.into(),
-        files: vec!["original.fsh".into()],
-        lines: code
-            .lines()
-            .enumerate()
-            .map(|(i, _)| Origin {
-                file: 0,
-                line: i as u32 + 1,
-            })
-            .collect(),
-        version: Some((330, Some("compatibility".into()))),
-        ..Default::default()
-    }
+    let mut pp = Preprocessed::from_source("original.fsh", code);
+    pp.version = Some((330, Some("compatibility".into())));
+    pp
 }
 
 fn fragment(source: &str) -> Result<Program, Vec<sunrise_shaders::Error>> {

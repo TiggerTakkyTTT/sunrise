@@ -4,12 +4,11 @@ import os
 from pathlib import Path
 import tempfile
 
-try:
-    from . import lab, oracle_harness as h, integration_env
-except ImportError:
-    import lab
-    import oracle_harness as h
-    import integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as h, integration_env
 
 
 def main():
@@ -32,9 +31,9 @@ def main():
     paths = [
         'tools/test_allay_interaction_state_parity.py', 'tools/oracle_harness.py',
         'tools/test_rust_parity.py', 'tools/lab.py', 'tools/integration_env.py',
-        'Cargo.toml', 'Cargo.lock', 'crates/sunrise-client/src/mobs/allay.rs',
-        'crates/sunrise-client/src/mobs/allay/interaction.rs',
-        'crates/sunrise-client/src/mobs.rs',
+        'Cargo.toml', 'Cargo.lock', 'crates/sunrise-sim/src/mobs/allay.rs',
+        'crates/sunrise-sim/src/mobs/allay/interaction.rs',
+        'crates/sunrise-sim/src/mobs.rs',
         'crates/sunrise-client/examples/probe/main.rs',
         'crates/sunrise-client/examples/probe/allay_interaction_fixture.rs',
         'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaAllayInteractionStateOracle.java',

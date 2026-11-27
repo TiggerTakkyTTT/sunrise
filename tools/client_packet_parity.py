@@ -46,15 +46,18 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import client_packet_routes as routes  # noqa: E402
-import input_recording  # noqa: E402
-import lab  # noqa: E402
-import net_capture  # noqa: E402
-import packet_parity_runs  # noqa: E402
-import test_rust_parity as base  # noqa: E402
-from test_dedicated_server_parity import Server  # noqa: E402
-from test_wire_stream_parity import ClientCounts, settle  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import (
+    client_packet_routes as routes,
+    input_recording,
+    lab,
+    net_capture,
+    packet_parity_runs,
+    test_rust_parity as base,
+)
+from tools.test_dedicated_server_parity import Server
+from tools.test_wire_stream_parity import ClientCounts, settle  # noqa: E402
 
 WORK = lab.LOCAL / "packet-parity"
 SNAPSHOT = WORK / "world-snapshot"
@@ -296,7 +299,7 @@ def options_file(folder):
 
 
 def start_vanilla(run, address, display, log):
-    import vanilla_client
+    from tools import vanilla_client
     args = argparse.Namespace(name=PLAYER, join=address, world=None, game_dir=run / "client", assets=None,
                               heap="2G", width=routes.WIDTH, height=routes.HEIGHT, lan_port=None, backend=None)
     options_file(args.game_dir)
@@ -528,7 +531,7 @@ def main():
             names = [packet_parity_runs.prefix(c, args.label) for c in ("vanilla", "sunrise")]
         except ValueError as error:
             parser.error(f"{error}")
-    import client_packet_diff
+    from tools import client_packet_diff
     if getattr(args, "look", False):
         look_routes = args.look_route or list(routes.MOUSE_LOOK)
         report = client_packet_diff.compare_look_runs(

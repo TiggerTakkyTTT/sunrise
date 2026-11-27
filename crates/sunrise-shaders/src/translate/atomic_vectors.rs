@@ -94,10 +94,10 @@ fn std430(ty: &str) -> Option<(u32, u32)> {
 
 /// `pp` with its shared and buffer vectors that atomic functions use by component rewritten.
 pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
-    if !ATOMICS.iter().any(|a| pp.code.contains(a)) {
+    if !ATOMICS.iter().any(|a| pp.code().contains(a)) {
         return None;
     }
-    let tokens = lex(&pp.code);
+    let tokens = lex(pp.code());
     let next = |i: usize| (i + 1..tokens.len()).find(|&j| significant(tokens[j]));
     let prev = |i: usize| (0..i).rev().find(|&j| significant(tokens[j]));
     // `[N]` at `open`: its size's text and the token after `]`.
@@ -566,16 +566,7 @@ pub(super) fn rewrite(pp: &Preprocessed) -> Option<Preprocessed> {
         }
         i = end + 1;
     }
-    Some(Preprocessed {
-        code: out.concat(),
-        lines: pp.lines.clone(),
-        files: pp.files.clone(),
-        version: pp.version.clone(),
-        extensions: pp.extensions.clone(),
-        comments: pp.comments.clone(),
-        diagnostics: pp.diagnostics.clone(),
-        warnings: pp.warnings.clone(),
-    })
+    Some(pp.with_code(out.concat()))
 }
 
 /// `hz_get_<key>` and `hz_set_<key>`: a whole vector of `split` (of an array: the `k`th),
@@ -609,17 +600,8 @@ mod tests {
     use super::*;
 
     fn rewritten(code: &str) -> String {
-        let pp = Preprocessed {
-            code: code.to_owned(),
-            lines: Vec::new(),
-            files: Vec::new(),
-            version: None,
-            extensions: Vec::new(),
-            comments: Vec::new(),
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-        };
-        let out = rewrite(&pp).expect("rewritten").code;
+        let pp = Preprocessed::from_source("", code);
+        let out = rewrite(&pp).expect("rewritten").code().to_owned();
         assert_eq!(out.lines().count(), code.lines().count(), "{out}");
         out
     }
@@ -654,16 +636,7 @@ mod tests {
 
     #[test]
     fn untouched_without_atomics_on_a_component() {
-        let pp = |code: &str| Preprocessed {
-            code: code.to_owned(),
-            lines: Vec::new(),
-            files: Vec::new(),
-            version: None,
-            extensions: Vec::new(),
-            comments: Vec::new(),
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-        };
+        let pp = |code: &str| Preprocessed::from_source("", code);
         assert!(rewrite(&pp("shared ivec4 v;\nvoid f() { v.x = 1; }\n")).is_none());
         assert!(rewrite(&pp("shared int n;\nvoid f() { atomicAdd(n, 1); }\n")).is_none());
     }
@@ -707,21 +680,20 @@ mod tests {
     /// vector after them stays whole, and naga refuses the array as too large to lay out.
     #[test]
     fn buffer_offsets_past_u32_leave_the_vector_whole() {
-        let block = |members: &str| Preprocessed {
-            code: format!(
-                "layout(std430) buffer B {{ {members} uvec2 v; }} b;\n\
-                 void f() {{ atomicAdd(b.v.x, 1u); }}\n"
-            ),
-            lines: Vec::new(),
-            files: Vec::new(),
-            version: None,
-            extensions: Vec::new(),
-            comments: Vec::new(),
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
+        let block = |members: &str| {
+            Preprocessed::from_source(
+                "",
+                &format!(
+                    "layout(std430) buffer B {{ {members} uvec2 v; }} b;\n\
+                     void f() {{ atomicAdd(b.v.x, 1u); }}\n"
+                ),
+            )
         };
         // The control: a known offset splits the vector.
-        let out = rewrite(&block("float small[4];")).expect("rewritten").code;
+        let out = rewrite(&block("float small[4];"))
+            .expect("rewritten")
+            .code()
+            .to_owned();
         assert!(out.contains("uint v_hz[2];"), "{out}");
         // An array's bytes past u32; an end past u32; an alignment past u32.
         for members in [
@@ -735,17 +707,10 @@ mod tests {
 
     #[test]
     fn a_struct_type_used_elsewhere_keeps_its_members() {
-        let pp = Preprocessed {
-            code: "shared struct S { ivec3 lo; } sh;\nvoid f(S s) { atomicMin(sh.lo.x, 1); }\n"
-                .to_owned(),
-            lines: Vec::new(),
-            files: Vec::new(),
-            version: None,
-            extensions: Vec::new(),
-            comments: Vec::new(),
-            diagnostics: Vec::new(),
-            warnings: Vec::new(),
-        };
+        let pp = Preprocessed::from_source(
+            "",
+            "shared struct S { ivec3 lo; } sh;\nvoid f(S s) { atomicMin(sh.lo.x, 1); }\n",
+        );
         assert!(rewrite(&pp).is_none());
     }
 }

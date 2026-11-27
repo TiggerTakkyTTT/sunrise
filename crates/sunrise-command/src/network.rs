@@ -194,7 +194,7 @@ pub fn argument_type(id: i32, props: &[u8]) -> ArgType {
         "minecraft:block_pos" => ArgType::BlockPos,
         "minecraft:column_pos" => ArgType::ColumnPos,
         "minecraft:vec3" => ArgType::Vec3 { center: true },
-        "minecraft:vec2" => ArgType::Vec2,
+        "minecraft:vec2" => ArgType::Vec2 { center: true },
         "minecraft:block_state" => ArgType::BlockState,
         "minecraft:block_predicate" => ArgType::BlockPredicate,
         "minecraft:item_stack" => ArgType::Item,

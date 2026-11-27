@@ -142,15 +142,6 @@ fn json_files(
         .collect()
 }
 
-impl super::ParticleOptions {
-    /// These options with the block or item they carry (`source`), for particle modifier
-    /// filters.
-    pub fn with_source(mut self, id: &str) -> Self {
-        self.source = Some(Arc::from(id));
-        self
-    }
-}
-
 impl Registry {
     /// Every `assets/<namespace>/polytone/{custom_particles,block_modifiers,entity_modifiers}/**.json` under a
     /// pack overlay root.
@@ -309,7 +300,7 @@ impl Registry {
     }
 
     /// The GPU particle type `id`'s own shader, when it has one that translated.
-    pub(super) fn gpu_shader(&self, id: &str) -> Option<Arc<super::polytone_gpu::GpuShader>> {
+    pub(crate) fn gpu_shader(&self, id: &str) -> Option<Arc<super::polytone_gpu::GpuShader>> {
         self.gpu_shaders.get(id).cloned()
     }
 
@@ -441,12 +432,7 @@ impl std::fmt::Debug for Registry {
     }
 }
 
-/// What an emitter seeds on the custom particle it spawns: its own `red`... `custom` and customs.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Seed {
-    pub fields: BTreeMap<String, f64>,
-    pub customs: BTreeMap<String, f64>,
-}
+pub use sunrise_level::particle_options::Seed;
 
 /// A custom particle's state beyond the engine particle's.
 #[derive(Clone)]
@@ -1462,7 +1448,8 @@ fn gpu_program(
     };
     let (vertex_file, fragment_file) = (file("vsh"), file("fsh"));
     let stages = sunrise_glsl::Stages {
-        dir: &dir,
+        vertex_dir: &dir,
+        fragment_dir: &dir,
         vertex,
         fragment,
         vertex_file: &vertex_file,

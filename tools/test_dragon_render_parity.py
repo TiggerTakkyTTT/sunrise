@@ -7,12 +7,12 @@ This harness captures real vanilla ray triangles, not a reimplementation.
 import json
 import os
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base
-    from . import test_model_baking_parity as baking
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base
-    import test_model_baking_parity as baking
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
 
 
 def main():
@@ -26,10 +26,9 @@ def main():
     harness.java_run(build, classes, dependencies, 'VanillaDragonRenderOracle', [build / 'client.json'], 'client')
     (build / 'rust.json').unlink(missing_ok=True)
     harness.run_logged(
-        [lab.parity_fixtures(),
-         'game::dragon::tests::dragon_render_parity_fixture', '--exact'],
-        build, 'rust', env=dict(os.environ, SUNRISE_DRAGON_RENDER_OUTPUT=str(build / 'rust.json'),
-                                SUNRISE_TEST_RESOURCES=os.environ.get('SUNRISE_TEST_RESOURCES', str(lab.RESOURCES))))
+        ['cargo', 'test', '--locked', '-p', 'sunrise-client-gameplay', '--lib',
+         'dragon_render::tests::dragon_render_parity_fixture', '--', '--exact', '--ignored'],
+        build, 'rust', env=dict(os.environ, SUNRISE_DRAGON_RENDER_OUTPUT=str(build / 'rust.json')))
     expected = json.loads((build / 'client.json').read_text())
     actual = json.loads((build / 'rust.json').read_text())
     assert len(actual) == len(expected) == 8
@@ -45,7 +44,7 @@ def main():
     lab.write_json(report, dict(schema=1, minecraft=lock['minecraft']['version'], cases=8, vertices=vertices,
                                scope='Death-ray triangle positions, counts and RGBA gradients; no framebuffer comparison.',
                                sources_sha256=base.source_hashes([
-                                   oracle, __file__, lab.ROOT / 'crates/sunrise-client/src/game/mobs/dragon.rs',
+                                   oracle, __file__, lab.ROOT / 'crates/sunrise-client-gameplay/src/dragon_render.rs',
                                    lab.ROOT / 'crates/sunrise-client-render/src/gfx.rs',
                                    lab.ROOT / 'crates/sunrise-client-render/src/gfx/oit_features.rs',
                                    lab.ROOT / 'crates/sunrise-client-render/src/entity.wgsl'])))

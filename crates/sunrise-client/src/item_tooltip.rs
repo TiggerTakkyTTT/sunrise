@@ -331,52 +331,11 @@ pub fn attribute_lines_filtered(
     lines
 }
 
-/// The attribute modifiers a mob effect adds per amplifier level
-/// (`MobEffects`): attribute, amount, operation id.
-fn effect_modifier(effect: &str) -> Option<(&'static str, f64, usize)> {
-    Some(match effect {
-        "speed" => ("movement_speed", 0.2, 2),
-        "slowness" => ("movement_speed", -0.15, 2),
-        "strength" => ("attack_damage", 3.0, 0),
-        "weakness" => ("attack_damage", -4.0, 0),
-        "jump_boost" => ("safe_fall_distance", 1.0, 0),
-        "luck" => ("luck", 1.0, 0),
-        "invisibility" => ("waypoint_transmit_range", -1.0, 2),
-        _ => return None,
-    })
-}
-
 fn is_potion_item(item: &str) -> bool {
     item.ends_with("potion") || item == "minecraft:tipped_arrow"
 }
 
-/// `PlayerHeadItem.getName`: a player head whose profile has a name is titled
-/// after it.
-pub struct PlayerHeadName(String);
-
-impl PlayerHeadName {
-    /// The title as `getName`'s `%s's Head` translation.
-    pub fn title(&self, translate: &dyn Fn(&str) -> Option<String>) -> String {
-        translate("block.minecraft.player_head.named")
-            .unwrap_or_else(|| "%s's Head".to_owned())
-            .replacen("%s", &self.0, 1)
-    }
-    /// The title as a component, for command feedback.
-    pub fn text(&self) -> crate::text::Text {
-        crate::text::Text::from(serde_json::json!({
-            "translate": "block.minecraft.player_head.named",
-            "with": [&self.0],
-        }))
-    }
-}
-
-/// The name in a player head's `minecraft:profile`, if it has one.
-pub fn player_head_name(stack: &ItemStack) -> Option<PlayerHeadName> {
-    if &*stack.item != "minecraft:player_head" {
-        return None;
-    }
-    Some(PlayerHeadName(stack.profile_name()?))
-}
+pub use crate::stations::{PlayerHeadName, player_head_name, rarity};
 
 /// The name line of `stack`, as the item's translation or, for potions and
 /// smithing templates, its name component gives it.
@@ -426,35 +385,6 @@ pub fn name_line(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) 
         .or_else(|| translate(&format!("item.{id}")))
         .or_else(|| translate(&format!("block.{id}")))
         .unwrap_or_else(|| path.replace('_', " "))
-}
-
-/// ItemStack.getRarity: the stack's `minecraft:rarity` (the item's default
-/// unless a command or server set it; the ominous banner's uncommon), then
-/// the enchantment upgrade.
-pub fn rarity<'a>(stack: &ItemStack, default: &'a str) -> &'a str {
-    let set = match stack.data().and_then(|d| d.other("minecraft:rarity")) {
-        Some(Tag::String(s)) => match &*s.to_string_lossy() {
-            "common" => Some("common"),
-            "uncommon" => Some("uncommon"),
-            "rare" => Some("rare"),
-            "epic" => Some("epic"),
-            _ => None,
-        },
-        _ => None,
-    };
-    let rarity = if let Some(set) = set {
-        set
-    } else if stack
-        .data()
-        .is_some_and(|data| data.other("!minecraft:rarity").is_some())
-    {
-        "common"
-    } else if stack.data().is_some_and(|data| data.ominous_banner) {
-        "uncommon"
-    } else {
-        default
-    };
-    sunrise_items::properties::ItemRarity::of(rarity, !stack.enchantments().is_empty()).as_str()
 }
 
 /// `BundleItem.getTooltipImage`: select a stack's bundle tooltip only when it carries
@@ -948,51 +878,66 @@ pub fn potion_modifier_lines(
     if !is_potion_item(&stack.item) {
         return Vec::new();
     }
-    let effects = stack
-        .potion()
-        .and_then(crate::brewing::potion)
-        .into_iter()
-        .flat_map(|p| p.effects.iter())
-        .map(|(effect, _, amplifier)| (*effect, *amplifier));
-    effect_modifier_lines(effects, translate)
+    let effects = crate::brewing::contents_effects(stack);
+    effect_modifier_lines(
+        effects
+            .iter()
+            .map(|&(effect, _, amplifier)| (effect, amplifier)),
+        translate,
+    )
 }
 
-/// `addPotionTooltip`'s attribute block for (effect id, amplifier) entries.
+/// `addPotionTooltip`'s attribute block for (effect id, amplifier) entries:
+/// each effect's `MobEffect.createModifiers`, vanilla's or the ones a content
+/// mod's effect declares, under an empty line and "When Applied:" whenever
+/// there is one; a modifier of amount 0 adds the heading but no line. The
+/// amount reads as itself added, times 100 multiplied, whatever the
+/// attribute (no `ItemAttributeModifiers` display rule applies here).
 fn effect_modifier_lines<'a>(
     effects: impl IntoIterator<Item = (&'a str, i32)>,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<(String, u32)> {
-    let applied: Vec<(String, u32)> = effects
-        .into_iter()
-        .filter_map(|(effect, amplifier)| {
-            let (attribute, amount, operation) =
-                effect_modifier(effect.trim_start_matches("minecraft:"))?;
-            let amount = amount * (amplifier + 1) as f64;
-            let line = modifier_line(
-                translate,
-                attribute,
-                amount,
-                operation,
-                false,
-                Display::Ranged,
-            )?;
-            let color = if amount > 0.0 {
-                rgba(85, 85, 255, 255)
+    let text = |key: &str| translate(key).unwrap_or_else(|| key.to_owned());
+    let mut any = false;
+    let mut applied = Vec::new();
+    for (effect, amplifier) in effects {
+        let Some(def) = crate::brewing::effect(effect) else {
+            continue;
+        };
+        for (attribute, _, amount, operation) in crate::effects::effect_modifiers(def) {
+            any = true;
+            let amount = amount * f64::from(amplifier.wrapping_add(1));
+            let operation = operation as usize;
+            let shown = if operation == 0 {
+                amount
             } else {
-                rgba(255, 85, 85, 255)
+                amount * 100.0
             };
-            Some((line, color))
-        })
-        .collect();
-    if applied.is_empty() {
+            let (kind, shown, color) = if amount > 0.0 {
+                ("plus", shown, rgba(85, 85, 255, 255))
+            } else if amount < 0.0 {
+                ("take", -shown, rgba(255, 85, 85, 255))
+            } else {
+                continue;
+            };
+            let path = attribute.strip_prefix("minecraft:").unwrap_or(attribute);
+            let line = crate::text::format_translation(
+                &text(&format!("attribute.modifier.{kind}.{operation}")),
+                &[
+                    crate::text::Text::literal(format_amount(shown)),
+                    crate::text::Text::literal(text(&format!("attribute.name.{path}"))),
+                ],
+            )
+            .plain();
+            applied.push((line, color));
+        }
+    }
+    if !any {
         return applied;
     }
     let mut lines = vec![
         (String::new(), u32::MAX),
-        (
-            translate("potion.whenDrank").unwrap_or_else(|| "potion.whenDrank".into()),
-            rgba(170, 0, 170, 255),
-        ),
+        (text("potion.whenDrank"), rgba(170, 0, 170, 255)),
     ];
     lines.extend(applied);
     lines
@@ -1337,7 +1282,7 @@ pub fn detail_lines(
             _ => 1.0,
         };
         lines.extend(
-            crate::brewing::tooltip(stack.potion(), scale, translate)
+            crate::brewing::tooltip(stack, scale, translate)
                 .into_iter()
                 .map(|l| l.0),
         );
@@ -1864,6 +1809,81 @@ mod tests {
             ]
         );
         assert!(lines(&ItemStack::new("minecraft:bowl", 1), true).is_empty());
+    }
+
+    /// #4473: a potion's tooltip reads `PotionContents.getAllEffects`, its
+    /// potion's effects then its `custom_effects`, and "When Applied:" lists
+    /// each one's `MobEffect.createModifiers`, a content mod's declared ones
+    /// as vanilla's: times the amplifier plus one, an added amount as itself
+    /// (knockback resistance too) and a multiplied one times 100. A list of
+    /// zero amounts still has its heading (`addPotionTooltip`, read in 26.2).
+    #[test]
+    fn a_potions_tooltip_lists_its_custom_effects_and_their_modifiers() {
+        use sunrise_core::nbt::Tag;
+        let _scope = sunrise_game_data::potions::register_test_mod_effects();
+        let translate = |key: &str| {
+            Some(
+                match key {
+                    "effect.minecraft.speed" => "Speed",
+                    "effect.testfx.stun" => "Stun",
+                    "potion.potency.1" => "II",
+                    "potion.whenDrank" => "When Applied:",
+                    "attribute.modifier.plus.0" => "+%s %s",
+                    "attribute.modifier.plus.1" => "+%s%% %s",
+                    "attribute.modifier.plus.2" => "+%s%% %s",
+                    "attribute.modifier.take.2" => "-%s%% %s",
+                    "attribute.name.armor" => "Armor",
+                    "attribute.name.attack_damage" => "Attack Damage",
+                    "attribute.name.knockback_resistance" => "Knockback Resistance",
+                    "attribute.name.luck" => "Luck",
+                    "attribute.name.movement_speed" => "Speed",
+                    "attribute.name.scale" => "Scale",
+                    _ => return None,
+                }
+                .to_owned(),
+            )
+        };
+        let custom = |id: &str, amplifier: i8| {
+            let mut stack =
+                ItemStack::new("minecraft:potion", 1).with_potion("minecraft:swiftness");
+            stack.data_mut().potion_extra.push((
+                "custom_effects".into(),
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String(id.into())),
+                    ("duration", Tag::Int(600)),
+                    ("amplifier", Tag::Byte(amplifier)),
+                ])]),
+            ));
+            stack
+        };
+        let stunned = custom("testfx:stun", 1);
+        let names: Vec<_> = crate::brewing::tooltip(&stunned, 1.0, &translate)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+        assert_eq!(names, ["Speed (03:00)", "Stun II (00:30)"]);
+        let (blue, red) = (rgba(85, 85, 255, 255), rgba(255, 85, 85, 255));
+        let heading = [
+            (String::new(), u32::MAX),
+            ("When Applied:".to_owned(), rgba(170, 0, 170, 255)),
+        ];
+        let mut expected = heading.to_vec();
+        expected.extend([
+            ("+20% Speed".to_owned(), blue),
+            ("-50% Speed".to_owned(), red),
+            ("+3 Attack Damage".to_owned(), blue),
+            ("+4 Armor".to_owned(), blue),
+            ("+100% Scale".to_owned(), blue),
+            ("+2 Luck".to_owned(), blue),
+            ("+1 Knockback Resistance".to_owned(), blue),
+        ]);
+        assert_eq!(potion_modifier_lines(&stunned, &translate), expected);
+        let mut still = custom("testfx:still", 0);
+        still.data_mut().potion = None;
+        assert_eq!(potion_modifier_lines(&still, &translate), heading);
+        let mut plain = custom("testfx:glow", 0);
+        plain.data_mut().potion = None;
+        assert!(potion_modifier_lines(&plain, &translate).is_empty());
     }
 
     #[test]
@@ -3095,5 +3115,12 @@ mod stack_modifier_tests {
             )>::new())),
         );
         assert!(sword.default_attribute_modifiers_or(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_raid_banner_keeps_its_tooltip_display_across_the_wire() {
+        let (renamed, hidden) = crate::item_sync::raid_banner_round_trip_fixture();
+        assert!(!super::tooltip_display(&renamed).shows("minecraft:banner_patterns"));
+        assert!(!super::tooltip_display(&hidden).shows("minecraft:banner_patterns"));
     }
 }

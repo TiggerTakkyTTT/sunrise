@@ -4,10 +4,11 @@ import os
 from pathlib import Path
 import random
 import tempfile
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base, integration_env
-except ImportError:
-    import lab, oracle_harness as harness, test_rust_parity as base, integration_env
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, integration_env
 
 
 def cases():
@@ -34,12 +35,12 @@ def main():
     sources = [Path(__file__), lab.ROOT / 'tools/lab.py', lab.ROOT / 'tools/oracle_harness.py',
                lab.ROOT / 'tools/test_rust_parity.py', lab.ROOT / 'tools/integration_env.py',
                lab.ROOT / 'Cargo.toml', lab.ROOT / 'Cargo.lock',
-               lab.ROOT / 'crates/sunrise-client/src/game/administration/commands/mod.rs',
-               lab.ROOT / 'crates/sunrise-client/src/save.rs',
-               lab.ROOT / 'crates/sunrise-client/src/save/column.rs',
-               lab.ROOT / 'crates/sunrise-client/src/save/block_entity_decode.rs',
-               lab.ROOT / 'crates/sunrise-client/src/save/loot_tests.rs',
-               lab.ROOT / 'crates/sunrise-client-render/src/chunk.rs',
+               lab.ROOT / 'crates/sunrise-gameplay/src/game/administration/commands/mod.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/save.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/save/column.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/save/block_entity_decode.rs',
+               lab.ROOT / 'crates/sunrise-sim/src/save/loot_tests.rs',
+               lab.ROOT / 'crates/sunrise-level/src/chunk.rs',
                lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaOpenedLootOracle.java',
                lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaBlockUpdateOracle.java',
                lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/ParityData.java']

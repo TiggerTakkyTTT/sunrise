@@ -39,12 +39,10 @@ import tempfile
 import threading
 import time
 
-try:
-    from . import lab
-except ImportError:
-    import lab
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from tools import lab
+
 EXE = '.exe' if os.name == 'nt' else ''
 # Which console queries each server has; a figure it lacks is reported as UNSUPPORTED, one it has but never answers fails the run.
 SERVERS = {

@@ -7,17 +7,26 @@
 //! to the renderer (`gfx::mod_pipelines`). A required pipeline the load cannot build fails the
 //! load; an optional one is logged and left out. A frame reads none of this by name.
 use mod_api::{
-    Identifier, PackGlslInput, PackPassSlot, PackUniformType, PackUniformValue, PipelineBlend,
-    PipelineTexture, PipelineTextureError, RenderPipeline, RenderPipelineError, RenderPipelineRef,
-    WorldDepth,
+    BUILTIN_RENDER_TYPE_IDS, BlendFactor, ColorTargetState, DepthCompare, Identifier,
+    LayeringTransform, PackGlslInput, PackPassSlot, PackUniformType, PackUniformValue,
+    PipelineBlend, PipelineModifier, PipelineModifierRef, PipelineState, PipelineTexture,
+    PipelineTextureError, PrimitiveTopology, RenderPipeline, RenderPipelineError,
+    RenderPipelineRef, RenderSetup, RenderTypeError, RenderTypeRef, TextureTransform,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use sunrise_mod_pipeline::{Options as PipelineOptions, ProgramSources};
 
 static REGISTERED: OnceLock<Vec<RenderPipeline>> = OnceLock::new();
+static REGISTERED_RENDER_TYPES: OnceLock<Vec<RenderSetup>> = OnceLock::new();
+static REGISTERED_MODIFIERS: OnceLock<Vec<PipelineModifier>> = OnceLock::new();
 static PACK_UNIFORMS: OnceLock<HashMap<&'static str, PackUniformType>> = OnceLock::new();
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn has_registered() -> bool {
+    REGISTERED.get().is_some_and(|v| !v.is_empty())
+}
 
 /// The built-in tables exported by `RenderPipelines.requiredPipelines` and `optionalPipelines`.
 #[derive(serde::Deserialize)]
@@ -49,6 +58,25 @@ pub enum RegistrationError {
     },
     InvalidPackBinding(String),
     InvalidShaderDefine(String),
+    InvalidPipelineState(String),
+    InvalidVertexFormat(String),
+    InvalidBindGroupLayout(String),
+    BuiltinRenderTypeCollision {
+        owner: String,
+        id: Identifier,
+    },
+    DuplicateRenderTypeId {
+        earlier: String,
+        owner: String,
+        id: Identifier,
+    },
+    InvalidRenderSetup(String),
+    UnknownRenderTypePipeline {
+        owner: String,
+        id: Identifier,
+        pipeline: Identifier,
+    },
+    InvalidComputePipeline(String),
     AlreadyPublished,
 }
 
@@ -88,6 +116,27 @@ impl std::fmt::Display for RegistrationError {
             ),
             Self::InvalidPackBinding(reason) => f.write_str(reason),
             Self::InvalidShaderDefine(reason) => f.write_str(reason),
+            Self::InvalidPipelineState(reason) => f.write_str(reason),
+            Self::InvalidVertexFormat(reason) => f.write_str(reason),
+            Self::InvalidBindGroupLayout(reason) => f.write_str(reason),
+            Self::BuiltinRenderTypeCollision { owner, id } => write!(
+                f,
+                "mod {owner}: render type {id} collides with built-in render type"
+            ),
+            Self::DuplicateRenderTypeId { earlier, owner, id } => write!(
+                f,
+                "mod {owner}: render type {id} collides with earlier registration from mod {earlier}"
+            ),
+            Self::InvalidRenderSetup(reason) => f.write_str(reason),
+            Self::UnknownRenderTypePipeline {
+                owner,
+                id,
+                pipeline,
+            } => write!(
+                f,
+                "mod {owner}: render type {id} references unknown pipeline {pipeline}"
+            ),
+            Self::InvalidComputePipeline(reason) => f.write_str(reason),
             Self::AlreadyPublished => f.write_str("pipeline registrations were already published"),
         }
     }
@@ -157,6 +206,27 @@ pub fn register(
         }
         if let Err(reason) = pipeline.validate_defines() {
             return Err(RegistrationError::InvalidShaderDefine(format!(
+                "mod {}: pipeline {}: {reason}",
+                pipeline.owner(),
+                pipeline.id
+            )));
+        }
+        if let Err(reason) = pipeline.validate_state() {
+            return Err(RegistrationError::InvalidPipelineState(format!(
+                "mod {}: pipeline {}: {reason}",
+                pipeline.owner(),
+                pipeline.id
+            )));
+        }
+        if let Err(reason) = pipeline.validate_vertex_bindings() {
+            return Err(RegistrationError::InvalidVertexFormat(format!(
+                "mod {}: pipeline {}: {reason}",
+                pipeline.owner(),
+                pipeline.id
+            )));
+        }
+        if let Err(reason) = pipeline.validate_bind_group_layout() {
+            return Err(RegistrationError::InvalidBindGroupLayout(format!(
                 "mod {}: pipeline {}: {reason}",
                 pipeline.owner(),
                 pipeline.id
@@ -241,28 +311,31 @@ fn validate_pack_bindings(pipelines: &[RenderPipeline]) -> Result<(), String> {
             )
         })?;
 
-        if let Some(target) = &binding.depth_target {
-            if let Some(&(first_owner, first_target)) = depth_targets.get(&target.id) {
+        if let Some(target) = &binding.depth_target
+            && let mod_api::PackDepthTarget::Aux {
+                id,
+                depth_samplers,
+                opaque_depth_samplers,
+                ..
+            } = target
+        {
+            if let Some(&(first_owner, first_target)) = depth_targets.get(id) {
                 if first_owner != owner {
                     return Err(format!(
                         "Duplicate pack depth target registration: {} (registered by {} and {})",
-                        target.id, first_owner, owner
+                        id, first_owner, owner
                     ));
                 }
                 if first_target != target {
                     return Err(format!(
                         "Conflicting pack depth target declaration for {} in mod {}: shared targets must declare identical samplers",
-                        target.id, owner
+                        id, owner
                     ));
                 }
             } else {
-                depth_targets.insert(&target.id, (owner, target));
+                depth_targets.insert(id, (owner, target));
             }
-            for sampler in target
-                .depth_samplers
-                .iter()
-                .chain(target.opaque_depth_samplers.iter())
-            {
+            for sampler in depth_samplers.iter().chain(opaque_depth_samplers.iter()) {
                 if let Some(kind) = reserved_pack_identifier(sampler) {
                     return Err(format!(
                         "Reserved pack sampler name {:?} on render pipeline {} (registered by {}) collides with a {kind}",
@@ -288,14 +361,14 @@ fn validate_pack_bindings(pipelines: &[RenderPipeline]) -> Result<(), String> {
                             sampler, first_owner, owner
                         ));
                     }
-                    if first_target_id != &target.id {
+                    if first_target_id != id {
                         return Err(format!(
                             "Conflicting pack sampler registration {:?} in mod {}: bound to both {} and {}",
-                            sampler, owner, first_target_id, target.id
+                            sampler, owner, first_target_id, id
                         ));
                     }
                 } else {
-                    samplers.insert(sampler.as_str(), (owner, &target.id));
+                    samplers.insert(sampler.as_str(), (owner, id));
                 }
             }
         }
@@ -375,6 +448,448 @@ pub fn registered() -> &'static [RenderPipeline] {
     REGISTERED.get().map_or(&[], Vec::as_slice)
 }
 
+#[derive(Debug)]
+pub enum ModifierRegistrationError {
+    DuplicateModId {
+        earlier: String,
+        owner: String,
+        id: Identifier,
+    },
+    InvalidState {
+        owner: String,
+        id: Identifier,
+        reason: String,
+    },
+    AlreadyPublished,
+}
+
+impl std::fmt::Display for ModifierRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("register_pipeline_modifiers: ")?;
+        match self {
+            Self::DuplicateModId { earlier, owner, id } => write!(
+                f,
+                "mod {owner}: pipeline modifier {id} collides with earlier registration from mod {earlier}"
+            ),
+            Self::InvalidState { owner, id, reason } => {
+                write!(f, "mod {owner}: pipeline modifier {id}: {reason}")
+            }
+            Self::AlreadyPublished => {
+                f.write_str("pipeline modifier registrations were already published")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModifierRegistrationError {}
+
+/// Validate a modifier registration list without touching process-global state.
+pub fn validate_modifiers(modifiers: &[PipelineModifier]) -> Result<(), ModifierRegistrationError> {
+    let mut seen = BTreeMap::new();
+    for modifier in modifiers {
+        if let Some(earlier) = seen.insert(&modifier.id, modifier.owner()) {
+            return Err(ModifierRegistrationError::DuplicateModId {
+                earlier: earlier.to_owned(),
+                owner: modifier.owner().to_owned(),
+                id: modifier.id.clone(),
+            });
+        }
+        if let Err(reason) = modifier.validate() {
+            return Err(ModifierRegistrationError::InvalidState {
+                owner: modifier.owner().to_owned(),
+                id: modifier.id.clone(),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate and publish the mods' pipeline modifier registrations once at startup.
+pub fn register_modifiers(
+    modifiers: Vec<PipelineModifier>,
+) -> Result<(), ModifierRegistrationError> {
+    if modifiers.is_empty() {
+        return Ok(());
+    }
+    validate_modifiers(&modifiers)?;
+    REGISTERED_MODIFIERS
+        .set(modifiers)
+        .map_err(|_| ModifierRegistrationError::AlreadyPublished)
+}
+
+/// The registered pipeline modifiers; none until registration publishes them.
+pub fn registered_modifiers() -> &'static [PipelineModifier] {
+    REGISTERED_MODIFIERS.get().map_or(&[], Vec::as_slice)
+}
+
+/// Well-known built-in render types matching [`BUILTIN_RENDER_TYPE_IDS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BuiltinRenderType {
+    Solid,
+    Cutout,
+    Translucent,
+    EntitySolid,
+    EntityCutout,
+    EntityTranslucent,
+    Eyes,
+    EnergySwirl,
+    Lightning,
+    ItemCutout,
+    ItemTranslucent,
+}
+
+impl BuiltinRenderType {
+    /// Resolve a built-in render type from its slot index in [`BUILTIN_RENDER_TYPE_IDS`].
+    pub fn from_slot(slot: u32) -> Option<Self> {
+        match slot {
+            0 => Some(Self::Solid),
+            1 => Some(Self::Cutout),
+            2 => Some(Self::Translucent),
+            3 => Some(Self::EntitySolid),
+            4 => Some(Self::EntityCutout),
+            5 => Some(Self::EntityTranslucent),
+            6 => Some(Self::Eyes),
+            7 => Some(Self::EnergySwirl),
+            8 => Some(Self::Lightning),
+            9 => Some(Self::ItemCutout),
+            10 => Some(Self::ItemTranslucent),
+            _ => None,
+        }
+    }
+
+    /// Whether this built-in render type routes through the translucent sorted/OIT pass.
+    pub fn is_translucent(self) -> bool {
+        matches!(
+            self,
+            Self::Translucent
+                | Self::EntityTranslucent
+                | Self::Eyes
+                | Self::EnergySwirl
+                | Self::Lightning
+                | Self::ItemTranslucent
+        )
+    }
+}
+
+/// Slot index of `id` in [`BUILTIN_RENDER_TYPE_IDS`], if it names a built-in render type.
+pub fn builtin_render_type_slot(id: &Identifier) -> Option<u32> {
+    let text = id.to_string();
+    BUILTIN_RENDER_TYPE_IDS
+        .iter()
+        .position(|&builtin| builtin == text)
+        .map(|index| index as u32)
+}
+
+fn validate_render_types(
+    render_types: &[RenderSetup],
+    mod_pipelines: &[RenderPipeline],
+    vanilla: &VanillaPipelines,
+) -> Result<(), RegistrationError> {
+    let mod_ids: BTreeSet<&Identifier> = mod_pipelines.iter().map(|p| &p.id).collect();
+    let mut seen = BTreeMap::new();
+    for setup in render_types {
+        if builtin_render_type_slot(&setup.id).is_some() {
+            return Err(RegistrationError::BuiltinRenderTypeCollision {
+                owner: setup.owner().to_owned(),
+                id: setup.id.clone(),
+            });
+        }
+        if let Some(earlier) = seen.insert(&setup.id, setup.owner()) {
+            return Err(RegistrationError::DuplicateRenderTypeId {
+                earlier: earlier.to_owned(),
+                owner: setup.owner().to_owned(),
+                id: setup.id.clone(),
+            });
+        }
+        if let Err(reason) = setup.validate() {
+            return Err(RegistrationError::InvalidRenderSetup(format!(
+                "mod {}: render type {}: {reason}",
+                setup.owner(),
+                setup.id
+            )));
+        }
+        let pipeline_str = setup.pipeline.to_string();
+        let known_pipeline = mod_ids.contains(&setup.pipeline)
+            || vanilla.required.contains(&pipeline_str)
+            || vanilla.optional.contains(&pipeline_str);
+        if !known_pipeline {
+            return Err(RegistrationError::UnknownRenderTypePipeline {
+                owner: setup.owner().to_owned(),
+                id: setup.id.clone(),
+                pipeline: setup.pipeline.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate and publish the mods' custom render type registrations once at startup, after
+/// [`register`] has published the mod pipelines.
+pub fn register_render_types(
+    render_types: Vec<RenderSetup>,
+    vanilla_root: &Path,
+) -> Result<(), RegistrationError> {
+    if render_types.is_empty() {
+        return Ok(());
+    }
+    let path = vanilla_root.join("render-pipelines.json");
+    let bytes = std::fs::read(&path).map_err(|error| RegistrationError::Read {
+        path: path.clone(),
+        error,
+    })?;
+    let vanilla: VanillaPipelines =
+        serde_json::from_slice(&bytes).map_err(|error| RegistrationError::Parse {
+            path: path.clone(),
+            error,
+        })?;
+    if [&vanilla.required, &vanilla.optional]
+        .into_iter()
+        .any(|ids| {
+            ids.is_empty()
+                || ids
+                    .iter()
+                    .any(|id| Identifier::parse_namespaced(id).is_none())
+        })
+    {
+        return Err(RegistrationError::InvalidIdTable(path));
+    }
+    validate_render_types(&render_types, registered(), &vanilla)?;
+    REGISTERED_RENDER_TYPES
+        .set(render_types)
+        .map_err(|_| RegistrationError::AlreadyPublished)
+}
+
+/// The registered custom render types; none until startup registration publishes them.
+pub fn registered_render_types() -> &'static [RenderSetup] {
+    REGISTERED_RENDER_TYPES.get().map_or(&[], Vec::as_slice)
+}
+
+/// Resolved target of a live [`RenderTypeRef`] handle.
+#[derive(Clone, Copy, Debug)]
+pub enum ResolvedRenderType<'a> {
+    Builtin(BuiltinRenderType),
+    Custom {
+        slot: u32,
+        setup: &'a RenderSetup,
+        mod_pipeline_slot: Option<u32>,
+    },
+}
+
+impl ResolvedRenderType<'_> {
+    /// Whether geometry drawn with this render type is translucent: a translucent built-in, or
+    /// a custom [`RenderSetup`] with `sort_on_upload` that does not force the solid model phase.
+    pub fn is_translucent(&self) -> bool {
+        match self {
+            Self::Builtin(builtin) => builtin.is_translucent(),
+            Self::Custom { setup, .. } => setup.sort_on_upload && !setup.force_solid_model_phase,
+        }
+    }
+
+    /// The model-view layering this render type applies (`LayeringTransform::None` for built-ins).
+    pub fn layering(&self) -> LayeringTransform {
+        match self {
+            Self::Builtin(_) => LayeringTransform::None,
+            Self::Custom { setup, .. } => setup.layering,
+        }
+    }
+
+    /// The texture-coordinate transform this render type applies (`Default` for built-ins).
+    pub fn texture_transform(&self) -> TextureTransform {
+        match self {
+            Self::Builtin(_) => TextureTransform::Default,
+            Self::Custom { setup, .. } => setup.texture_transform,
+        }
+    }
+}
+
+/// Apply vanilla 26.3's `LayeringTransform` (`LayeringTransform.java` + `ProjectionType.java`)
+/// to `model_view`.
+///
+/// Perspective scales by `1.0 - bias / 4096.0`; orthographic translates Z by `bias / 512.0`,
+/// where `bias = +1.0` for `ViewOffsetZ` and `-1.0` for `ViewOffsetZForward`.
+pub fn layering_transform_matrix(
+    transform: LayeringTransform,
+    model_view: glam::Mat4,
+    orthographic: bool,
+) -> glam::Mat4 {
+    let bias = match transform {
+        LayeringTransform::None => return model_view,
+        LayeringTransform::ViewOffsetZ => 1.0f32,
+        LayeringTransform::ViewOffsetZForward => -1.0f32,
+        _ => return model_view,
+    };
+    if orthographic {
+        model_view * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, bias / 512.0))
+    } else {
+        // JOML `Matrix4f.scale(s)`: the first three columns are multiplied by `s`.
+        let s = 1.0 - bias / 4096.0;
+        let mut scaled = model_view;
+        scaled.x_axis *= s;
+        scaled.y_axis *= s;
+        scaled.z_axis *= s;
+        scaled
+    }
+}
+
+/// Build vanilla 26.3's `TextureTransform.createMatrix()` (`TextureTransform.java`).
+pub fn texture_transform_matrix(
+    transform: TextureTransform,
+    millis: i64,
+    glint_speed: f64,
+) -> glam::Mat4 {
+    let glint = |scale: f32| {
+        let ticks = (millis as f64 * glint_speed * 8.0) as i64;
+        let u = (ticks.rem_euclid(110_000) as f32) / 110_000.0;
+        let v = (ticks.rem_euclid(30_000) as f32) / 30_000.0;
+        // `translation(-u, v, 0).rotateZ(PI / 18).scale(scale)`, with JOML's `rotateZ` trig
+        // (`Math.sin`, then `cosFromSin`) and its per-element products.
+        const ANGLE: f32 = f32::from_bits(0x3e32_b8c2);
+        let sin = crate::camera::joml::sin(ANGLE);
+        let cos = crate::camera::joml::cos_from_sin(sin, ANGLE);
+        glam::Mat4::from_cols(
+            glam::Vec4::new(cos * scale, sin * scale, 0.0, 0.0),
+            glam::Vec4::new(-sin * scale, cos * scale, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, scale, 0.0),
+            glam::Vec4::new(-u, v, 0.0, 1.0),
+        )
+    };
+    match transform {
+        TextureTransform::Default => glam::Mat4::IDENTITY,
+        TextureTransform::Glint => glint(8.0),
+        TextureTransform::EntityGlint => glint(0.5),
+        TextureTransform::ArmorEntityGlint => glint(0.16),
+        TextureTransform::Offset([u, v]) => {
+            glam::Mat4::from_translation(glam::Vec3::new(u, v, 0.0))
+        }
+        _ => glam::Mat4::IDENTITY,
+    }
+}
+
+/// Resolve a registered pipeline modifier by id (static across resource reloads).
+pub fn resolve_modifier(id: &Identifier) -> Result<PipelineModifierRef, RenderPipelineError> {
+    resolve_modifier_in(registered_modifiers(), id)
+}
+
+pub(crate) fn resolve_modifier_in(
+    modifiers: &[PipelineModifier],
+    id: &Identifier,
+) -> Result<PipelineModifierRef, RenderPipelineError> {
+    let slot = modifiers
+        .iter()
+        .position(|m| &m.id == id)
+        .ok_or(RenderPipelineError::Unknown)?;
+    Ok(mod_api::__private::built::pipeline_modifier_ref(
+        slot as u32,
+    ))
+}
+
+/// Interned pipeline modifier stacks: stack id `0` is always the empty stack (no modifiers).
+/// Each non-zero stack id names a distinct sequence of registered modifier slots in push order
+/// (outermost first, innermost last). Applying a stack runs innermost first so the outermost
+/// modifier wins on any field both set, matching NeoForge's `PipelineModifierStack.apply`.
+#[derive(Clone, Debug)]
+pub struct ModifierStacks {
+    stacks: Vec<Vec<u32>>,
+    index: HashMap<Vec<u32>, u32>,
+}
+
+impl Default for ModifierStacks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ModifierStacks {
+    /// The empty stack id (no active modifiers).
+    pub const EMPTY: u32 = 0;
+
+    pub fn new() -> Self {
+        Self {
+            stacks: vec![Vec::new()],
+            index: HashMap::new(),
+        }
+    }
+
+    /// Clear interned non-empty stacks while retaining allocations for the next view.
+    pub fn clear(&mut self) {
+        self.stacks.truncate(1);
+        self.index.clear();
+    }
+
+    /// Intern `stack` (modifier slots in push order: outermost first, innermost last).
+    pub fn intern(&mut self, stack: &[u32]) -> u32 {
+        if stack.is_empty() {
+            return Self::EMPTY;
+        }
+        if let Some(&id) = self.index.get(stack) {
+            return id;
+        }
+        let id = self.stacks.len() as u32;
+        let owned = stack.to_vec();
+        self.index.insert(owned.clone(), id);
+        self.stacks.push(owned);
+        id
+    }
+
+    /// Modifier slots in push order for `id` (empty for `0` or out-of-range).
+    pub fn get(&self, id: u32) -> &[u32] {
+        self.stacks.get(id as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// Apply stack `id` to `base` using `modifiers`: innermost applies first, then older ones,
+    /// so for any field two modifiers set the outermost wins (`PipelineModifierStack.apply`).
+    pub fn apply(
+        &self,
+        id: u32,
+        state: PipelineState,
+        modifiers: &[PipelineModifier],
+    ) -> PipelineState {
+        Self::apply_slots(self.get(id), state, modifiers)
+    }
+
+    /// [`apply`](Self::apply) for a modifier slot sequence (push order).
+    pub fn apply_slots(
+        slots: &[u32],
+        mut state: PipelineState,
+        modifiers: &[PipelineModifier],
+    ) -> PipelineState {
+        for &slot in slots.iter().rev() {
+            if let Some(m) = modifiers.get(slot as usize) {
+                state = m.apply(state);
+            }
+        }
+        state
+    }
+
+    /// Format NeoForge's `<pipeline>/transform/<ns>/<path>` label for a modified variant.
+    pub fn label(&self, id: u32, base_id: &str, modifiers: &[PipelineModifier]) -> String {
+        Self::label_slots(self.get(id), base_id, modifiers)
+    }
+
+    /// [`label`](Self::label) for a modifier slot sequence (push order).
+    pub fn label_slots(slots: &[u32], base_id: &str, modifiers: &[PipelineModifier]) -> String {
+        let mut out = base_id.to_owned();
+        for &slot in slots.iter().rev() {
+            if let Some(m) = modifiers.get(slot as usize) {
+                out.push_str("/transform/");
+                out.push_str(m.id.namespace());
+                out.push('/');
+                out.push_str(m.id.path());
+            }
+        }
+        out
+    }
+
+    pub fn len(&self) -> usize {
+        self.stacks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stacks.len() <= 1
+    }
+}
+
 /// A registered pipeline one resource load built: validated GLSL naga modules (plus expanded
 /// source and defines for lazy linear-light fragment translation) and its fixed state.
 #[derive(Clone, Debug)]
@@ -391,12 +906,80 @@ pub struct Built {
     pub fragment_expanded: Arc<str>,
     /// Pipeline defines (`NAME` or `NAME value`) applied during translation.
     pub defines: Arc<[String]>,
-    pub blend: PipelineBlend,
-    pub depth: WorldDepth,
+    pub state: PipelineState,
+    /// Per-target colour blend and write-mask states (`1..=MAX_COLOR_TARGETS`).
+    pub color_targets: Vec<Option<ColorTargetState>>,
+    /// Effective vertex buffer bindings sorted by binding index.
+    pub vertex_bindings: Vec<(u8, mod_api::VertexFormat)>,
+    /// Whether this pipeline uses the default vertex format (`VertexFormat::position_tex_color`).
+    pub uses_default_vertex_format: bool,
+    /// Whether the pipeline opted in to OIT (`RenderPipeline::order_independent()`).
+    pub order_independent: bool,
+    /// Three translated OIT variants (`DepthBounds`, `Transmittance`, `Accumulate`) when
+    /// `order_independent && state.blend != PipelineBlend::Opaque`.
+    pub oit: Option<Arc<[sunrise_glsl::Translated; 3]>>,
     /// Whether the load may go on without it ([`RenderPipeline::optional()`]).
     pub optional: bool,
     /// What its shader samples, if anything.
     pub texture: Option<BuiltTexture>,
+    /// Mod-declared set-1 bind-group layout (`#5428`).
+    pub bind_group_layout: mod_api::BindGroupLayout,
+    /// Declared push-constant byte size (`0..=128`, multiple of 4).
+    pub push_constant_size: u32,
+}
+
+impl Built {
+    /// Convert this pipeline's set-1 [`mod_api::BindGroupLayout`] into [`sunrise_mod_pipeline::ModBinding`]
+    /// entries for shader translation.
+    pub fn mod_bindings(&self) -> Vec<sunrise_mod_pipeline::ModBinding<'_>> {
+        mod_bindings_from_layout(&self.bind_group_layout)
+    }
+}
+
+pub(crate) fn mod_bindings_from_layout(
+    layout: &mod_api::BindGroupLayout,
+) -> Vec<sunrise_mod_pipeline::ModBinding<'_>> {
+    layout
+        .entries
+        .iter()
+        .filter_map(|e| {
+            let kind = match e.kind {
+                mod_api::BindingKind::UniformBuffer { .. } => {
+                    sunrise_mod_pipeline::ModBindingKind::UniformBuffer
+                }
+                mod_api::BindingKind::CombinedImageSampler { .. } => {
+                    sunrise_mod_pipeline::ModBindingKind::CombinedImageSampler
+                }
+                mod_api::BindingKind::TexelBuffer { .. } => {
+                    sunrise_mod_pipeline::ModBindingKind::TexelBuffer
+                }
+                mod_api::BindingKind::StorageBuffer { read_only, .. } => {
+                    sunrise_mod_pipeline::ModBindingKind::StorageBuffer { read_only }
+                }
+                mod_api::BindingKind::StorageImage { access } => {
+                    sunrise_mod_pipeline::ModBindingKind::StorageImage {
+                        access: match access {
+                            mod_api::StorageImageAccess::WriteOnly => {
+                                sunrise_glsl::ImageAccess::WriteOnly
+                            }
+                            mod_api::StorageImageAccess::ReadOnly => {
+                                sunrise_glsl::ImageAccess::ReadOnly
+                            }
+                            mod_api::StorageImageAccess::ReadWrite => {
+                                sunrise_glsl::ImageAccess::ReadWrite
+                            }
+                            _ => return None,
+                        },
+                    }
+                }
+                _ => return None,
+            };
+            Some(sunrise_mod_pipeline::ModBinding {
+                name: e.name.as_str(),
+                kind,
+            })
+        })
+        .collect()
 }
 
 /// A textured pipeline's texture as a load found it ([`PipelineTexture`]).
@@ -416,6 +999,20 @@ pub struct Pipelines {
     /// The render assets' generation this set was loaded for; 0 for none.
     generation: u64,
     invalid: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    oit_ineligible_logged: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    /// The texture-taking built-in render types made so far, shared by clones of this set.
+    textured: std::sync::Arc<std::sync::Mutex<TexturedRenderTypes>>,
+    /// The registered compute pipelines of the same load (`mod_compute`).
+    compute: crate::mod_compute::ComputeSet,
+}
+
+/// The texture-taking built-in render types of one load (`RenderTypes.entitySolid(Identifier)`,
+/// `entityCutout`, `entityTranslucent`): one per built-in and texture, in the order they were
+/// first asked for, which is their slot after the built-in and custom ones.
+#[derive(Debug, Default)]
+struct TexturedRenderTypes {
+    by_texture: BTreeMap<(u32, Identifier), u32>,
+    made: Vec<(BuiltinRenderType, Identifier)>,
 }
 
 impl Pipelines {
@@ -426,13 +1023,18 @@ impl Pipelines {
         source: &crate::resource_source::ResourceSource,
         generation: u64,
     ) -> Result<Self, String> {
-        Self::build(registered(), generation, |file| {
-            match source.read_to_string(file) {
-                Ok(text) => Ok(Some(text)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e.to_string()),
-            }
-        })
+        let read = |file: &str| match source.read_to_string(file) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
+        };
+        let mut set = Self::build(registered(), generation, read)?;
+        set.compute = crate::mod_compute::ComputeSet::build(
+            crate::mod_compute::registered(),
+            generation,
+            read,
+        );
+        Ok(set)
     }
 
     /// Build every registered pipeline, reading `.vsh`, `.fsh`, and include files via `read`
@@ -476,8 +1078,29 @@ impl Pipelines {
                     })
                     .collect();
                 let define_refs: Vec<&str> = defines_owned.iter().map(String::as_str).collect();
+                let vertex_bindings = pipeline.effective_vertex_bindings();
+                let vertex_inputs_owned: Vec<(String, &'static str)> = vertex_bindings
+                    .iter()
+                    .flat_map(|(_, fmt)| {
+                        fmt.attributes
+                            .iter()
+                            .map(|a| (a.name.clone(), a.format.glsl_type()))
+                    })
+                    .collect();
+                let vertex_input_refs: Vec<(&str, &str)> = vertex_inputs_owned
+                    .iter()
+                    .map(|(name, ty)| (name.as_str(), *ty))
+                    .collect();
+                let mod_bindings = mod_bindings_from_layout(&pipeline.bind_group_layout);
                 let loaded = pipeline
                     .validate_defines()
+                    .and_then(|()| pipeline.validate_state())
+                    .and_then(|()| pipeline.validate_vertex_bindings())
+                    .and_then(|()| {
+                        pipeline
+                            .validate_bind_group_layout()
+                            .map_err(|e| e.to_string())
+                    })
                     .and_then(|()| {
                         let vertex = read_stage(&vertex_file)?;
                         let fragment = read_stage(&fragment_file)?;
@@ -492,11 +1115,14 @@ impl Pipelines {
                         let options = PipelineOptions {
                             textured: pipeline.texture.is_some(),
                             defines: &define_refs,
+                            vertex_inputs: &vertex_input_refs,
+                            mod_bindings: &mod_bindings,
+                            push_constant_size: pipeline.push_constant_size,
                             linear_light: false,
                             check_backends: false,
                             interface: sunrise_mod_pipeline::DEVICELESS_INTERFACE_LIMITS,
                         };
-                        crate::crash::contain(|| {
+                        let built_program = crate::crash::contain(|| {
                             sunrise_mod_pipeline::translate(&sources, &options, &include)
                         })
                         .map_err(|panic| format!("{fragment_file}: checking it panicked: {panic}"))?
@@ -506,29 +1132,60 @@ impl Pipelines {
                                 .map(ToString::to_string)
                                 .collect::<Vec<_>>()
                                 .join("; ")
-                        })
+                        })?;
+                        let oit = if pipeline.order_independent
+                            && pipeline.state.blend != PipelineBlend::Opaque
+                        {
+                            let additive = pipeline.state.blend == PipelineBlend::Additive;
+                            let variants = crate::crash::contain(|| {
+                                sunrise_mod_pipeline::translate_oit(
+                                    &sources, &options, additive, &include,
+                                )
+                            })
+                            .map_err(|panic| {
+                                format!("{fragment_file}: checking OIT variants panicked: {panic}")
+                            })?
+                            .map_err(|problems| {
+                                problems
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            })?;
+                            let [d, t, a] = variants;
+                            Some(Arc::new([d.translated, t.translated, a.translated]))
+                        } else {
+                            None
+                        };
+                        Ok((built_program, oit))
                     })
-                    .and_then(|built_program| {
+                    .and_then(|(built_program, oit)| {
                         let texture = match &pipeline.texture {
                             None => None,
                             Some(texture) => Some(load_texture(texture).map_err(|cause| {
                                 format!("its texture: {}", texture_refusal(cause))
                             })?),
                         };
-                        Ok((built_program, texture))
+                        Ok((built_program, oit, texture))
                     });
                 match loaded {
-                    Ok((built_program, texture)) => Some(Built {
+                    Ok((built_program, oit, texture)) => Some(Built {
                         owner: pipeline.owner().to_owned(),
                         id: pipeline.id.clone(),
                         program: Arc::new(built_program.translated),
                         vertex_expanded: Arc::from(built_program.vertex_expanded),
                         fragment_expanded: Arc::from(built_program.fragment_expanded),
                         defines: Arc::from(defines_owned),
-                        blend: pipeline.blend,
-                        depth: pipeline.depth,
+                        state: pipeline.state,
+                        color_targets: pipeline.effective_color_targets(),
+                        vertex_bindings,
+                        uses_default_vertex_format: pipeline.uses_default_vertex_format(),
+                        order_independent: pipeline.order_independent,
+                        oit,
                         optional: pipeline.optional,
                         texture,
+                        bind_group_layout: pipeline.bind_group_layout.clone(),
+                        push_constant_size: pipeline.push_constant_size,
                     }),
                     Err(reason) => {
                         let refusal = format!(
@@ -554,7 +1211,97 @@ impl Pipelines {
             built,
             generation,
             invalid: Default::default(),
+            oit_ineligible_logged: Default::default(),
+            textured: Default::default(),
+            compute: Default::default(),
         })
+    }
+
+    /// The compute pipelines of this load: what `RenderAssets::compute_pipeline` resolves in and
+    /// the renderer builds on its device.
+    pub fn compute(&self) -> &crate::mod_compute::ComputeSet {
+        &self.compute
+    }
+
+    /// The registered [`PrimitiveTopology`] of `slot`, or `None` if `slot` is out of range or
+    /// was not built.
+    pub fn topology(&self, slot: u32) -> Option<PrimitiveTopology> {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.state.topology)
+    }
+
+    /// The effective vertex buffer bindings of `slot`, or `None` if `slot` is out of range or
+    /// was not built.
+    pub fn vertex_bindings(&self, slot: u32) -> Option<&[(u8, mod_api::VertexFormat)]> {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.vertex_bindings.as_slice())
+    }
+
+    /// The mod-declared set-1 [`mod_api::BindGroupLayout`] and `push_constant_size` of `slot`,
+    /// or `None` if `slot` is out of range or was not built.
+    pub fn bind_group_layout(&self, slot: u32) -> Option<(&mod_api::BindGroupLayout, u32)> {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .map(|b| (&b.bind_group_layout, b.push_constant_size))
+    }
+
+    /// Whether `slot` writes depth (`depth_stencil.is_some_and(|d| d.write)`).
+    pub fn writes_depth(&self, slot: u32) -> bool {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .is_some_and(|b| b.state.depth_stencil.is_some_and(|d| d.write))
+    }
+
+    /// Whether `slot` uses the default vertex format (`VertexFormat::position_tex_color`), which
+    /// makes it eligible for `pipeline_quads`.
+    pub fn uses_default_vertex_format(&self, slot: u32) -> bool {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .is_some_and(|b| b.uses_default_vertex_format)
+    }
+
+    /// Whether `slot` may draw at `RenderLevelStage::OitTranslucent`: opted in via
+    /// `.order_independent()` with a non-`Opaque` blend mode and compiled OIT variants.
+    pub fn is_oit_eligible(&self, slot: u32) -> bool {
+        self.built
+            .get(slot as usize)
+            .and_then(|b| b.as_ref())
+            .is_some_and(|b| {
+                b.order_independent && b.state.blend != PipelineBlend::Opaque && b.oit.is_some()
+            })
+    }
+
+    /// Log once per `(mod, pipeline)` when an ineligible pipeline is submitted to
+    /// `RenderLevelStage::OitTranslucent`.
+    pub fn warn_oit_ineligible(&self, slot: u32) {
+        let slot = slot as usize;
+        let mut logged = self
+            .oit_ineligible_logged
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if logged.contains(&slot) {
+            return;
+        }
+        logged.push(slot);
+        if let Some(Some(built)) = self.built.get(slot) {
+            let reason = if built.state.blend == PipelineBlend::Opaque {
+                "Opaque pipelines cannot draw at OitTranslucent"
+            } else {
+                "pipeline was not registered with .order_independent()"
+            };
+            log::warn!(
+                "Sunrise: mod {} pipeline {} refused at OitTranslucent: {reason}",
+                built.owner,
+                built.id
+            );
+        }
     }
 
     /// Marks `slot` as one the GPU refused; false when it already was, so it is reported once.
@@ -627,6 +1374,178 @@ impl Pipelines {
             Some(None) => Err(RenderPipelineError::Invalid),
             None => Err(RenderPipelineError::Unknown),
         }
+    }
+
+    /// Resolve a built-in ([`BUILTIN_RENDER_TYPE_IDS`]) or registered custom [`RenderSetup`]
+    /// into a generational [`RenderTypeRef`] for this resource load.
+    pub fn resolve_render_type(&self, id: &Identifier) -> Result<RenderTypeRef, RenderTypeError> {
+        self.resolve_render_type_in(registered_render_types(), id)
+    }
+
+    pub(crate) fn resolve_render_type_in(
+        &self,
+        custom: &[RenderSetup],
+        id: &Identifier,
+    ) -> Result<RenderTypeRef, RenderTypeError> {
+        if self.generation == 0 {
+            return Err(RenderTypeError::Unknown);
+        }
+        if let Some(slot) = builtin_render_type_slot(id) {
+            return Ok(mod_api::__private::built::render_type_ref(
+                self.generation,
+                slot,
+            ));
+        }
+        let index = custom
+            .iter()
+            .position(|setup| &setup.id == id)
+            .ok_or(RenderTypeError::Unknown)?;
+        let setup = &custom[index];
+        // If backed by a registered mod pipeline, reflect its build validity in this load.
+        if let Some(pipeline_slot) = self.keys.iter().position(|k| k == &setup.pipeline)
+            && (self.built[pipeline_slot].is_none()
+                || self
+                    .invalid
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&pipeline_slot))
+        {
+            return Err(RenderTypeError::Invalid);
+        }
+        Ok(mod_api::__private::built::render_type_ref(
+            self.generation,
+            (BUILTIN_RENDER_TYPE_IDS.len() + index) as u32,
+        ))
+    }
+
+    /// The handle of the built-in entity render type `kind` (`EntitySolid`, `EntityCutout` or
+    /// `EntityTranslucent`; another built-in takes no texture and is
+    /// [`RenderTypeError::Invalid`]) drawing the dynamic texture `texture`, as vanilla's
+    /// `RenderTypes.entitySolid(Identifier)` and its siblings are memoized per texture
+    /// (`RenderTypes.java`): the same texture gives the same handle. It does not ask whether the
+    /// texture exists; a draw does.
+    pub fn textured_render_type(
+        &self,
+        kind: BuiltinRenderType,
+        texture: &Identifier,
+    ) -> Result<RenderTypeRef, RenderTypeError> {
+        self.textured_render_type_in(registered_render_types().len(), kind, texture)
+    }
+
+    pub(crate) fn textured_render_type_in(
+        &self,
+        custom: usize,
+        kind: BuiltinRenderType,
+        texture: &Identifier,
+    ) -> Result<RenderTypeRef, RenderTypeError> {
+        let key = match kind {
+            BuiltinRenderType::EntitySolid => 3,
+            BuiltinRenderType::EntityCutout => 4,
+            BuiltinRenderType::EntityTranslucent => 5,
+            _ => return Err(RenderTypeError::Invalid),
+        };
+        // An unpublished set has no generation to name a handle in.
+        if self.generation == 0 {
+            return Err(RenderTypeError::Unknown);
+        }
+        let mut table = self.textured.lock().unwrap_or_else(|e| e.into_inner());
+        let index = match table.by_texture.get(&(key, texture.clone())) {
+            Some(&index) => index,
+            None => {
+                let index =
+                    u32::try_from(table.made.len()).map_err(|_| RenderTypeError::Invalid)?;
+                table.made.push((kind, texture.clone()));
+                table.by_texture.insert((key, texture.clone()), index);
+                index
+            }
+        };
+        let slot = (BUILTIN_RENDER_TYPE_IDS.len() + custom)
+            .checked_add(index as usize)
+            .and_then(|slot| u32::try_from(slot).ok())
+            .ok_or(RenderTypeError::Invalid)?;
+        Ok(mod_api::__private::built::render_type_ref(
+            self.generation,
+            slot,
+        ))
+    }
+
+    /// The built-in entity render type and the dynamic texture a handle from
+    /// [`Self::textured_render_type`] names: `Unknown` for any other handle (a plain built-in or
+    /// a custom render type), `Stale` for one of an earlier load.
+    pub fn textured_render_type_of(
+        &self,
+        handle: RenderTypeRef,
+    ) -> Result<(BuiltinRenderType, Identifier), RenderTypeError> {
+        self.textured_render_type_of_in(registered_render_types().len(), handle)
+    }
+
+    pub(crate) fn textured_render_type_of_in(
+        &self,
+        custom: usize,
+        handle: RenderTypeRef,
+    ) -> Result<(BuiltinRenderType, Identifier), RenderTypeError> {
+        use mod_api::__private::game::Fields;
+        let fields = handle.fields();
+        if fields.generation != self.generation {
+            return Err(RenderTypeError::Stale);
+        }
+        let index = (fields.slot as usize)
+            .checked_sub(BUILTIN_RENDER_TYPE_IDS.len() + custom)
+            .ok_or(RenderTypeError::Unknown)?;
+        self.textured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .made
+            .get(index)
+            .cloned()
+            .ok_or(RenderTypeError::Unknown)
+    }
+
+    /// Validate a [`RenderTypeRef`] against this load and return its resolved descriptor.
+    pub fn render_type_slot(
+        &self,
+        handle: RenderTypeRef,
+    ) -> Result<ResolvedRenderType<'static>, RenderTypeError> {
+        self.render_type_slot_in(registered_render_types(), handle)
+    }
+
+    pub(crate) fn render_type_slot_in<'a>(
+        &self,
+        custom: &'a [RenderSetup],
+        handle: RenderTypeRef,
+    ) -> Result<ResolvedRenderType<'a>, RenderTypeError> {
+        use mod_api::__private::game::Fields;
+        let fields = handle.fields();
+        if fields.generation != self.generation {
+            return Err(RenderTypeError::Stale);
+        }
+        if let Some(builtin) = BuiltinRenderType::from_slot(fields.slot) {
+            return Ok(ResolvedRenderType::Builtin(builtin));
+        }
+        let Some(index) = (fields.slot as usize).checked_sub(BUILTIN_RENDER_TYPE_IDS.len()) else {
+            return Err(RenderTypeError::Unknown);
+        };
+        let setup = custom.get(index).ok_or(RenderTypeError::Unknown)?;
+        let mod_pipeline_slot =
+            if let Some(pipeline_slot) = self.keys.iter().position(|k| k == &setup.pipeline) {
+                if self.built[pipeline_slot].is_none()
+                    || self
+                        .invalid
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&pipeline_slot)
+                {
+                    return Err(RenderTypeError::Invalid);
+                }
+                Some(pipeline_slot as u32)
+            } else {
+                None
+            };
+        Ok(ResolvedRenderType::Custom {
+            slot: index as u32,
+            setup,
+            mod_pipeline_slot,
+        })
     }
 }
 
@@ -730,13 +1649,37 @@ fn shader_group_for_slot(slot: PackPassSlot) -> sunrise_shaders::Group {
     }
 }
 
-fn pack_blend_for(blend: PipelineBlend) -> Option<sunrise_shaders::Blend> {
+/// A shader-pack blend factor, or `None` for a `Constant*` factor, which registration refuses
+/// (`RenderPipeline::validate_state`, `PipelineModifier::validate`).
+fn pack_blend_factor(factor: BlendFactor) -> Option<sunrise_shaders::Factor> {
     use sunrise_shaders::Factor;
-    match blend {
-        PipelineBlend::Translucent => Some(sunrise_shaders::TRANSLUCENT_BLEND),
-        PipelineBlend::Additive => Some([Factor::SrcAlpha, Factor::One, Factor::Zero, Factor::One]),
-        _ => Some(sunrise_shaders::TRANSLUCENT_BLEND),
-    }
+    Some(match factor {
+        BlendFactor::Zero => Factor::Zero,
+        BlendFactor::One => Factor::One,
+        BlendFactor::SrcColor => Factor::SrcColor,
+        BlendFactor::OneMinusSrcColor => Factor::OneMinusSrcColor,
+        BlendFactor::DstColor => Factor::DstColor,
+        BlendFactor::OneMinusDstColor => Factor::OneMinusDstColor,
+        BlendFactor::SrcAlpha => Factor::SrcAlpha,
+        BlendFactor::OneMinusSrcAlpha => Factor::OneMinusSrcAlpha,
+        BlendFactor::DstAlpha => Factor::DstAlpha,
+        BlendFactor::OneMinusDstAlpha => Factor::OneMinusDstAlpha,
+        BlendFactor::SrcAlphaSaturate => Factor::SrcAlphaSaturate,
+        _ => return None,
+    })
+}
+
+/// The shader-pack blend of a registered pipeline's blend mode; `None` draws without blending.
+/// A custom blend whose factors the pack table cannot express has been refused at registration,
+/// so it never reaches here.
+fn pack_blend_for(blend: PipelineBlend) -> Option<sunrise_shaders::Blend> {
+    let function = blend.to_blend_function()?;
+    Some([
+        pack_blend_factor(function.color.src)?,
+        pack_blend_factor(function.color.dst)?,
+        pack_blend_factor(function.alpha.src)?,
+        pack_blend_factor(function.alpha.dst)?,
+    ])
 }
 
 fn glsl_input_expr(input: &PackGlslInput) -> String {
@@ -849,12 +1792,26 @@ pub(crate) fn pack_program_requests_of(
                 PackPassSlot::AfterOpaqueGbuffers | PackPassSlot::Shadow => None,
                 PackPassSlot::AfterSky
                 | PackPassSlot::AfterTranslucentGbuffers
-                | PackPassSlot::AfterWeather => pack_blend_for(pipeline.blend),
+                | PackPassSlot::AfterWeather => pack_blend_for(pipeline.state.blend),
                 _ => None,
             },
         });
     }
     out
+}
+
+pub(crate) fn wgpu_compare(compare: DepthCompare) -> wgpu::CompareFunction {
+    match compare {
+        DepthCompare::Always => wgpu::CompareFunction::Always,
+        DepthCompare::Less => wgpu::CompareFunction::Less,
+        DepthCompare::LessEqual => wgpu::CompareFunction::LessEqual,
+        DepthCompare::Equal => wgpu::CompareFunction::Equal,
+        DepthCompare::NotEqual => wgpu::CompareFunction::NotEqual,
+        DepthCompare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+        DepthCompare::Greater => wgpu::CompareFunction::Greater,
+        DepthCompare::Never => wgpu::CompareFunction::Never,
+        _ => wgpu::CompareFunction::GreaterEqual,
+    }
 }
 
 /// Owned runtime descriptors (`depth_targets`, `uniforms`, `pipelines`) for `PackPost`.
@@ -866,7 +1823,8 @@ pub(crate) fn pack_runtime_specs_of(
     pipelines: &[RenderPipeline],
 ) -> sunrise_render_shaderpack::pack_post::OwnedModPackRuntime {
     use sunrise_render_shaderpack::pack_post::{
-        ModDepthTargetDecl, ModPipelinePackSpec, ModUniformDecl, OwnedModPackRuntime,
+        ModDepthTargetDecl, ModPipelinePackSpec, ModProgramMode, ModUniformDecl,
+        OwnedModPackRuntime,
     };
     let mut depth_targets = Vec::new();
     let mut depth_target_ids: Vec<Identifier> = Vec::new();
@@ -896,23 +1854,43 @@ pub(crate) fn pack_runtime_specs_of(
             .pack_binding
             .as_ref()
             .and_then(|b| b.depth_target.as_ref())
-            .map(|target| {
-                if let Some(idx) = depth_target_ids.iter().position(|id| id == &target.id) {
-                    idx
-                } else {
-                    let idx = depth_targets.len();
-                    depth_target_ids.push(target.id.clone());
-                    depth_targets.push(ModDepthTargetDecl {
-                        label: target.id.to_string(),
-                        depth_samplers: target.depth_samplers.clone(),
-                        opaque_depth_samplers: target.opaque_depth_samplers.clone(),
-                    });
-                    idx
-                }
+            .and_then(|target| match target {
+                mod_api::PackDepthTarget::Aux {
+                    id,
+                    depth_samplers,
+                    opaque_depth_samplers,
+                    ..
+                } => Some(
+                    if let Some(idx) = depth_target_ids.iter().position(|seen| seen == id) {
+                        idx
+                    } else {
+                        let idx = depth_targets.len();
+                        depth_target_ids.push(id.clone());
+                        depth_targets.push(ModDepthTargetDecl {
+                            label: id.to_string(),
+                            depth_samplers: depth_samplers.clone(),
+                            opaque_depth_samplers: opaque_depth_samplers.clone(),
+                        });
+                        idx
+                    },
+                ),
+                // The pack's main depth: no auxiliary plane.
+                _ => None,
             });
-        let depth_test = !matches!(pipeline.depth, WorldDepth::ThroughWalls);
-        let depth_write = depth_test
+        let depth_state = pipeline.state.depth_stencil;
+        let depth_compare = depth_state.map_or(wgpu::CompareFunction::Always, |ds| {
+            wgpu_compare(ds.compare.flip_for_standard_z())
+        });
+        let names_main_depth = matches!(
+            pipeline
+                .pack_binding
+                .as_ref()
+                .and_then(|b| b.depth_target.as_ref()),
+            Some(mod_api::PackDepthTarget::Main)
+        );
+        let depth_write = depth_state.is_some_and(|ds| ds.write)
             && (depth_target.is_some()
+                || names_main_depth
                 || matches!(
                     pass_slot,
                     PackPassSlot::AfterOpaqueGbuffers | PackPassSlot::Shadow
@@ -921,8 +1899,15 @@ pub(crate) fn pack_runtime_specs_of(
             slot,
             pass_slot: mod_pass_slot(pass_slot),
             depth_target,
+            depth_compare,
             depth_write,
-            depth_test,
+            cull: pipeline.state.cull,
+            program_mode: pipeline
+                .pack_binding
+                .as_ref()
+                .map_or(ModProgramMode::default(), |b| {
+                    mod_program_mode(b.program_mode)
+                }),
         });
     }
 
@@ -930,6 +1915,16 @@ pub(crate) fn pack_runtime_specs_of(
         depth_targets,
         uniforms,
         pipelines: specs,
+    }
+}
+
+fn mod_program_mode(
+    mode: mod_api::PackProgramMode,
+) -> sunrise_render_shaderpack::pack_post::ModProgramMode {
+    use sunrise_render_shaderpack::pack_post::ModProgramMode as M;
+    match mode {
+        mod_api::PackProgramMode::ModVertexPackFragment => M::ModVertexPackFragment,
+        _ => M::PackVertexAndFragment,
     }
 }
 
@@ -970,6 +1965,8 @@ pub(crate) fn lookup_pack_uniform_type_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mod_api::__private::game::RegistrationContextNew;
+    use mod_api::WorldDepth;
 
     const VSH: &str = "\
 #version 330
@@ -1038,8 +2035,11 @@ void main() {
         assert_eq!(set.slot(glow), Ok(0));
         let built = set.built()[0].as_ref().unwrap();
         assert_eq!(
-            (built.blend, built.depth),
-            (PipelineBlend::Additive, WorldDepth::ThroughWalls)
+            (
+                built.state.blend,
+                built.state.depth_stencil.map(|ds| ds.compare)
+            ),
+            (PipelineBlend::Additive, Some(DepthCompare::Always))
         );
         assert_eq!(
             set.resolve(&id("example:broken")),
@@ -1108,6 +2108,44 @@ void main() {
         assert!(!error.contains("example:glow"), "{error}");
         assert!(!error.contains("example:extra"), "{error}");
         assert_eq!(before.slot(handle), Ok(1));
+    }
+
+    /// `RenderTypes.entitySolid(Identifier)` and its siblings are memoized per texture: one
+    /// texture gives one handle, another texture another, and the handle names its texture and
+    /// kind back. Only the three entity kinds take a texture.
+    #[test]
+    fn a_textured_render_type_is_one_handle_per_kind_and_texture() {
+        let set = Pipelines::build(&[], 7, |_| Ok(None)).unwrap();
+        let (a, b) = (id("example:dynamic/a"), id("example:dynamic/b"));
+        let solid =
+            |texture| set.textured_render_type_in(0, BuiltinRenderType::EntitySolid, texture);
+        assert_eq!(solid(&a), solid(&a));
+        assert_ne!(solid(&a), solid(&b));
+        let cutout = set.textured_render_type_in(0, BuiltinRenderType::EntityCutout, &a);
+        assert_ne!(cutout, solid(&a));
+        assert_eq!(
+            set.textured_render_type_of_in(0, cutout.unwrap()),
+            Ok((BuiltinRenderType::EntityCutout, a.clone()))
+        );
+        assert_eq!(
+            set.textured_render_type_of_in(0, solid(&b).unwrap()),
+            Ok((BuiltinRenderType::EntitySolid, b))
+        );
+        assert_eq!(
+            set.textured_render_type_in(0, BuiltinRenderType::Lightning, &a),
+            Err(RenderTypeError::Invalid)
+        );
+        // A plain built-in handle names no texture, and a handle of another load is stale.
+        let plain = mod_api::__private::built::render_type_ref(7, 0);
+        assert_eq!(
+            set.textured_render_type_of_in(0, plain),
+            Err(RenderTypeError::Unknown)
+        );
+        let earlier = mod_api::__private::built::render_type_ref(6, 40);
+        assert_eq!(
+            set.textured_render_type_of_in(0, earlier),
+            Err(RenderTypeError::Stale)
+        );
     }
 
     #[test]
@@ -1250,7 +2288,6 @@ void main() {
 
     #[test]
     fn register_validates_pack_bindings_collisions_reserved_names_and_ordering() {
-        use mod_api::__private::game::RegistrationContextNew;
         use mod_api::{
             Hooks, ModEntry, PackBinding, PackDepthTarget, PackPassSlot, PackUniformDecl,
             PackUniformType, PipelineGeometryClass, RegisterRenderPipelinesEvent,
@@ -1273,8 +2310,12 @@ void main() {
             let mut result = Err(String::new());
             mod_platform::testing::with_mods(mods.into(), || {
                 let mut staged = Vec::new();
+                let mut staged_render_types = Vec::new();
+                let mut staged_compute = Vec::new();
                 mod_api::dispatch_register_render_pipelines(
                     &RegistrationContext::new(),
+                    &mut staged_render_types,
+                    &mut staged_compute,
                     &mut staged,
                 );
                 result = validate_pack_bindings(&staged).map(|()| staged);
@@ -1616,6 +2657,7 @@ void main() {
             PipelineBlend::Translucent,
             WorldDepth::Tested,
         )
+        .depth_write(true)
         .geometry_class(PipelineGeometryClass::Terrain)
         .pack_binding(
             PackBinding::new()
@@ -1639,6 +2681,7 @@ void main() {
             PipelineBlend::Translucent,
             WorldDepth::Tested,
         )
+        .depth_write(true)
         .geometry_class(PipelineGeometryClass::Translucent)
         .pack_binding(
             PackBinding::new()
@@ -1713,5 +2756,369 @@ void main() {
             Some(PackUniformType::Float)
         );
         assert_eq!(lookup_pack_uniform_type_in(&list, "unknown"), None);
+    }
+
+    #[test]
+    fn an_explicit_main_depth_target_allows_requested_writes_and_cull_reaches_the_pack_spec() {
+        use mod_api::{PackBinding, PackDepthTarget, PackProgramMode, PipelineGeometryClass};
+        use sunrise_render_shaderpack::pack_post::ModProgramMode;
+        let translucent = |name: &str, binding: PackBinding, cull: bool| {
+            RenderPipeline::new(
+                id(name),
+                id(name),
+                PipelineBlend::Translucent,
+                WorldDepth::Tested,
+            )
+            .geometry_class(PipelineGeometryClass::Translucent)
+            .depth_write(true)
+            .cull(cull)
+            .pack_binding(binding)
+        };
+        let list = [
+            // A translucent slot without an explicit target cannot write depth.
+            translucent("example:plain", PackBinding::new(), false),
+            translucent(
+                "example:main",
+                PackBinding::new().depth_target(PackDepthTarget::Main),
+                true,
+            ),
+            translucent(
+                "example:own_vertex",
+                PackBinding::new().program_mode(PackProgramMode::ModVertexPackFragment),
+                true,
+            ),
+        ];
+        let runtime = pack_runtime_specs_of(&list);
+        let [plain, main, own_vertex] = &runtime.pipelines[..] else {
+            panic!("three pipelines expected");
+        };
+        assert!(!plain.depth_write && !plain.cull);
+        assert_eq!(plain.program_mode, ModProgramMode::PackVertexAndFragment);
+        assert!(main.depth_write);
+        assert_eq!(main.depth_target, None);
+        assert!(main.cull);
+        assert_eq!(main.program_mode, ModProgramMode::PackVertexAndFragment);
+        assert!(own_vertex.cull);
+        assert_eq!(
+            own_vertex.program_mode,
+            ModProgramMode::ModVertexPackFragment
+        );
+    }
+
+    #[test]
+    fn modifier_stacks_intern_and_apply_outermost_wins_with_neoforge_labels() {
+        use mod_api::__private::game::RegistrationContextNew;
+        use mod_api::{Hooks, ModEntry, RegisterPipelineModifiersEvent, RegistrationContext};
+
+        struct ModRegistrar(Box<dyn Fn(&mut RegisterPipelineModifiersEvent<'_>) + Send + Sync>);
+        #[mod_api::__subscriptions]
+        impl Hooks for ModRegistrar {
+            fn register_pipeline_modifiers(
+                &self,
+                _: &RegistrationContext,
+                event: &mut RegisterPipelineModifiersEvent<'_>,
+            ) {
+                (self.0)(event);
+            }
+        }
+
+        let collect = |mods: Vec<ModEntry>| -> Vec<PipelineModifier> {
+            let mut staged = Vec::new();
+            mod_platform::testing::with_mods(mods.into(), || {
+                mod_api::dispatch_register_pipeline_modifiers(
+                    &RegistrationContext::new(),
+                    &mut staged,
+                );
+            });
+            staged
+        };
+
+        let modifiers = collect(vec![
+            ModEntry::new(
+                "mod_a",
+                Box::new(ModRegistrar(Box::new(|ev| {
+                    ev.register(
+                        PipelineModifier::new(id("mod_a:outer"))
+                            .depth(WorldDepth::ThroughWalls)
+                            .cull(true),
+                    );
+                }))),
+            ),
+            ModEntry::new(
+                "mod_b",
+                Box::new(ModRegistrar(Box::new(|ev| {
+                    ev.register(
+                        PipelineModifier::new(id("mod_b:inner"))
+                            .depth(WorldDepth::Tested)
+                            .depth_write(true),
+                    );
+                }))),
+            ),
+        ]);
+        assert!(validate_modifiers(&modifiers).is_ok());
+
+        let mut stacks = ModifierStacks::new();
+        assert_eq!(stacks.intern(&[]), ModifierStacks::EMPTY);
+        let s1 = stacks.intern(&[0, 1]);
+        assert_eq!(stacks.intern(&[0, 1]), s1);
+        let base = PipelineState::new(PipelineBlend::Translucent, WorldDepth::Tested);
+        // Push order: [outer=0, inner=1]. Inner applies first (depth=Tested, depth_write=true),
+        // then outer applies (depth=ThroughWalls, cull=true) — outermost wins on `depth`.
+        let applied = stacks.apply(s1, base, &modifiers);
+        assert_eq!(
+            applied.depth_stencil.map(|ds| (ds.compare, ds.write)),
+            Some((DepthCompare::Always, true))
+        );
+        assert!(applied.cull);
+        assert_eq!(
+            stacks.label(s1, "example:glow", &modifiers),
+            "example:glow/transform/mod_b/inner/transform/mod_a/outer"
+        );
+
+        // Non-finite depth bias on a modifier fails validation.
+        let bad_bias = collect(vec![ModEntry::new(
+            "bad_mod",
+            Box::new(ModRegistrar(Box::new(|ev| {
+                ev.register(PipelineModifier::new(id("bad_mod:nan")).depth_bias(0, f32::NAN));
+            }))),
+        )]);
+        assert!(matches!(
+            validate_modifiers(&bad_bias),
+            Err(ModifierRegistrationError::InvalidState { .. })
+        ));
+
+        // Duplicate modifier ID fails validation naming both mods.
+        let dup = collect(vec![
+            ModEntry::new(
+                "first_mod",
+                Box::new(ModRegistrar(Box::new(|ev| {
+                    ev.register(PipelineModifier::new(id("shared:dup")));
+                }))),
+            ),
+            ModEntry::new(
+                "second_mod",
+                Box::new(ModRegistrar(Box::new(|ev| {
+                    ev.register(PipelineModifier::new(id("shared:dup")));
+                }))),
+            ),
+        ]);
+        let err = validate_modifiers(&dup).unwrap_err().to_string();
+        assert!(
+            err.contains("first_mod") && err.contains("second_mod"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn build_refuses_invalid_pipeline_state_and_exposes_registered_topology() {
+        let read = |file: &str| match file {
+            "assets/example/shaders/core/tri.vsh" => Ok(Some(VSH.to_owned())),
+            "assets/example/shaders/core/tri.fsh" => Ok(Some(GLOW_FSH.to_owned())),
+            other => Ok(stub_asset(other)),
+        };
+
+        let valid = [RenderPipeline::new(
+            id("example:tri"),
+            id("example:core/tri"),
+            PipelineBlend::Opaque,
+            WorldDepth::Tested,
+        )
+        .topology(PrimitiveTopology::TriangleFan)];
+        let set = Pipelines::build(&valid, 1, read).unwrap();
+        assert_eq!(set.topology(0), Some(PrimitiveTopology::TriangleFan));
+        assert_eq!(set.topology(1), None);
+
+        let bad_bias = [RenderPipeline::new(
+            id("example:nan_bias"),
+            id("example:core/tri"),
+            PipelineBlend::Opaque,
+            WorldDepth::Tested,
+        )
+        .depth_bias(0, f32::NAN)];
+        assert!(Pipelines::build(&bad_bias, 2, read).is_err());
+
+        let bad_target = [RenderPipeline::new(
+            id("example:bad_target"),
+            id("example:core/tri"),
+            PipelineBlend::Opaque,
+            WorldDepth::Tested,
+        )
+        .color_target(mod_api::MAX_COLOR_TARGETS, Some(ColorTargetState::DEFAULT))];
+        assert!(Pipelines::build(&bad_target, 3, read).is_err());
+
+        let mixed_mrt = [RenderPipeline::new(
+            id("example:mixed_mrt"),
+            id("example:core/tri"),
+            PipelineBlend::Translucent,
+            WorldDepth::Tested,
+        )
+        .color_target(
+            0,
+            Some(ColorTargetState::blended(PipelineBlend::Translucent)),
+        )
+        .color_target(1, Some(ColorTargetState::blended(PipelineBlend::Additive)))];
+        assert!(Pipelines::build(&mixed_mrt, 4, read).is_err());
+    }
+
+    #[test]
+    fn custom_render_types_validate_resolve_and_reject_stale_handles() {
+        let read = |file: &str| match file {
+            "assets/example/shaders/core/tri.vsh" => Ok(Some(VSH.to_owned())),
+            "assets/example/shaders/core/tri.fsh" => Ok(Some(GLOW_FSH.to_owned())),
+            other => Ok(stub_asset(other)),
+        };
+        let mod_pipe = RenderPipeline::new(
+            id("example:glow"),
+            id("example:core/tri"),
+            PipelineBlend::Translucent,
+            WorldDepth::Tested,
+        );
+        let vanilla = VanillaPipelines {
+            required: HashSet::from(["minecraft:pipeline/solid".to_owned()]),
+            optional: HashSet::new(),
+        };
+
+        let custom = vec![
+            RenderSetup::new(id("example:glow_rt"), id("example:glow"))
+                .use_lightmap(true)
+                .sort_on_upload(true)
+                .layering(LayeringTransform::ViewOffsetZ)
+                .texture_transform(TextureTransform::Offset([0.25, 0.5])),
+        ];
+        assert!(validate_render_types(&custom, std::slice::from_ref(&mod_pipe), &vanilla).is_ok());
+
+        // Builtin collision fails.
+        let builtin_clash = vec![RenderSetup::new(
+            id("minecraft:item_cutout"),
+            id("example:glow"),
+        )];
+        assert!(matches!(
+            validate_render_types(&builtin_clash, std::slice::from_ref(&mod_pipe), &vanilla),
+            Err(RegistrationError::BuiltinRenderTypeCollision { .. })
+        ));
+
+        // Unknown pipeline fails.
+        let unknown_pipe = vec![RenderSetup::new(
+            id("example:orphan"),
+            id("example:missing_pipeline"),
+        )];
+        assert!(matches!(
+            validate_render_types(&unknown_pipe, std::slice::from_ref(&mod_pipe), &vanilla),
+            Err(RegistrationError::UnknownRenderTypePipeline { .. })
+        ));
+
+        // Duplicate mod render type ID fails.
+        let dup = vec![
+            RenderSetup::new(id("example:dup"), id("example:glow")),
+            RenderSetup::new(id("example:dup"), id("minecraft:pipeline/solid")),
+        ];
+        assert!(matches!(
+            validate_render_types(&dup, std::slice::from_ref(&mod_pipe), &vanilla),
+            Err(RegistrationError::DuplicateRenderTypeId { .. })
+        ));
+
+        let gen1 = Pipelines::build(std::slice::from_ref(&mod_pipe), 1, read).unwrap();
+        let gen2 = Pipelines::build(&[mod_pipe], 2, read).unwrap();
+
+        // Built-in resolves and validates.
+        let item_cutout = gen1
+            .resolve_render_type_in(&custom, &id("minecraft:item_cutout"))
+            .unwrap();
+        assert!(matches!(
+            gen1.render_type_slot_in(&custom, item_cutout),
+            Ok(ResolvedRenderType::Builtin(BuiltinRenderType::ItemCutout))
+        ));
+
+        // Custom resolves in gen1 and is stale in gen2.
+        let glow_rt = gen1
+            .resolve_render_type_in(&custom, &id("example:glow_rt"))
+            .unwrap();
+        assert!(matches!(
+            gen1.render_type_slot_in(&custom, glow_rt),
+            Ok(ResolvedRenderType::Custom {
+                slot: 0,
+                mod_pipeline_slot: Some(0),
+                ..
+            })
+        ));
+        let resolved = gen1.render_type_slot_in(&custom, glow_rt).unwrap();
+        assert!(resolved.is_translucent());
+        assert_eq!(resolved.layering(), LayeringTransform::ViewOffsetZ);
+        assert_eq!(
+            resolved.texture_transform(),
+            TextureTransform::Offset([0.25, 0.5])
+        );
+        let cutout = gen1.render_type_slot_in(&custom, item_cutout).unwrap();
+        assert!(!cutout.is_translucent());
+        assert_eq!(cutout.layering(), LayeringTransform::None);
+        assert_eq!(
+            gen2.render_type_slot_in(&custom, glow_rt).unwrap_err(),
+            RenderTypeError::Stale
+        );
+        assert_eq!(
+            gen1.resolve_render_type_in(&custom, &id("example:nope")),
+            Err(RenderTypeError::Unknown)
+        );
+    }
+
+    #[test]
+    fn layering_and_texture_transform_matrices_match_vanilla_formulas() {
+        let id_mat = glam::Mat4::IDENTITY;
+        assert_eq!(
+            layering_transform_matrix(LayeringTransform::None, id_mat, false),
+            id_mat
+        );
+        // 1 - 1/4096 and 1 + 1/4096 are exact in f32.
+        let persp_z = layering_transform_matrix(LayeringTransform::ViewOffsetZ, id_mat, false);
+        assert_eq!(persp_z.x_axis.x, 0.999_755_86);
+        assert_eq!(persp_z.w_axis, glam::Vec4::new(0.0, 0.0, 0.0, 1.0));
+        let persp_fwd =
+            layering_transform_matrix(LayeringTransform::ViewOffsetZForward, id_mat, false);
+        assert_eq!(persp_fwd.z_axis.z, 1.000_244_1);
+        let ortho_z = layering_transform_matrix(LayeringTransform::ViewOffsetZ, id_mat, true);
+        assert_eq!(ortho_z.w_axis.z, 0.001_953_125);
+        let ortho_fwd =
+            layering_transform_matrix(LayeringTransform::ViewOffsetZForward, id_mat, true);
+        assert_eq!(ortho_fwd.w_axis.z, -0.001_953_125);
+
+        assert_eq!(
+            texture_transform_matrix(TextureTransform::Default, 1000, 0.5),
+            id_mat
+        );
+        let offset = texture_transform_matrix(TextureTransform::Offset([0.25, -0.5]), 0, 0.5);
+        assert_eq!(offset.w_axis.x, 0.25);
+        assert_eq!(offset.w_axis.y, -0.5);
+        // sin and cos of the f32 `PI / 18`, times each glint scale, rounded to f32.
+        let glint = texture_transform_matrix(TextureTransform::Glint, 0, 0.5);
+        assert_eq!(
+            glint.x_axis,
+            glam::Vec4::new(
+                f32::from_bits(0x40fc1c5c),
+                f32::from_bits(0x3fb1d0d4),
+                0.0,
+                0.0
+            )
+        );
+        assert_eq!(
+            glint.y_axis,
+            glam::Vec4::new(
+                -f32::from_bits(0x3fb1d0d4),
+                f32::from_bits(0x40fc1c5c),
+                0.0,
+                0.0
+            )
+        );
+        assert_eq!(glint.z_axis.z, 8.0);
+        let entity = texture_transform_matrix(TextureTransform::EntityGlint, 0, 0.5);
+        assert_eq!(entity.x_axis.x, f32::from_bits(0x3efc1c5c));
+        assert_eq!(entity.x_axis.y, f32::from_bits(0x3db1d0d4));
+        let armor = texture_transform_matrix(TextureTransform::ArmorEntityGlint, 0, 0.5);
+        assert_eq!(armor.x_axis.x, f32::from_bits(0x3e2159d4));
+        assert_eq!(armor.y_axis.x, -f32::from_bits(0x3ce39aa9));
+        // `ticks = millis * speed * 8`: 55000 ms at 1.0 is 440000 ticks, which wraps to
+        // 440000 % 110000 = 0 and 440000 % 30000 = 20000 → u = 0, v = 2/3.
+        let scrolled = texture_transform_matrix(TextureTransform::Glint, 55_000, 1.0);
+        assert_eq!(scrolled.w_axis.x, 0.0);
+        assert_eq!(scrolled.w_axis.y, f32::from_bits(0x3f2aaaab));
     }
 }

@@ -13,14 +13,11 @@ import json
 from pathlib import Path
 import subprocess
 
-try:
-    from . import lab, oracle_harness as harness, test_rust_parity as base
-    from . import test_model_baking_parity as baking
-except ImportError:
-    import lab
-    import oracle_harness as harness
-    import test_rust_parity as base
-    import test_model_baking_parity as baking
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, oracle_harness as harness, test_rust_parity as base, test_model_baking_parity as baking
 
 
 def main():
@@ -34,8 +31,8 @@ def main():
     report.unlink(missing_ok=True)
     (build / 'rust.json').unlink(missing_ok=True)
     sources = [lab.ROOT / path for path in (
-        'crates/sunrise-client/src/game/network/lan_actions/mod.rs',
-        'crates/sunrise-client/src/game/network/lan_actions/tests/crack_feedback_tests.rs',
+        'crates/sunrise-gameplay-common/src/game/network/lan_actions/mod.rs',
+        'crates/sunrise-client/src/cut_layout/game/network/lan_actions/tests/crack_feedback_tests.rs',
         'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCrackFeedbackOracle.java',
         'tools/test_crack_feedback_parity.py')]
     hashes = base.source_hashes(sources)

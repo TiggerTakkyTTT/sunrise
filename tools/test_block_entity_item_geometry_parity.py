@@ -4,7 +4,7 @@
 The Java oracle (VanillaBlockEntityItemOracle) runs the real CampfireRenderer,
 BrushableBlockRenderer, ShelfRenderer and VaultRenderer, with a real ItemModelResolver over
 the baked item models, under the pose LevelRenderer gives them. The game test
-`game::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases` runs the
+`game::server_side::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases` runs the
 same cases through `campfire_items`, `brushable_items`, `shelf_items` and `vault_items`, the
 items `campfire_geometry`, `brushable_geometry`, `shelf_geometry` and `vault_geometry` draw.
 Each item handed to the item renderer is compared in order, exactly: the stack, the display
@@ -28,13 +28,17 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_rust_parity as base, test_model_baking_parity as baking, test_item_model_parity as item_model
-except ImportError:
-    import lab, test_rust_parity as base, test_model_baking_parity as baking, test_item_model_parity as item_model
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import (
+    lab,
+    test_rust_parity as base,
+    test_model_baking_parity as baking,
+    test_item_model_parity as item_model,
+)
 
 PARITY = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity'
-TEST = 'game::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases'
+TEST = 'game::server_side::campfire::block_entity_items_tests::block_entity_items_match_the_vanilla_cases'
 FACINGS = ['north', 'south', 'west', 'east']
 # Near the origin, below zero, at the top of the world, near the world border.
 PLACES = [(3, 64, 5), (-7, -40, -13), (12, 319, -3), (29_999_983, 70, -29_999_985)]

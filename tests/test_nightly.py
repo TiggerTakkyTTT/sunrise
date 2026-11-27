@@ -8,14 +8,17 @@ import os
 import shutil
 import string
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
 
+from tests.git_fixture import git_in, isolated_git_env
 from tools.ci import nightly
 from tools.ci import nightly_set as ns
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 NOW = "2026-10-28T12:00:00+00:00"
 PATTERNS = ns.guarded_patterns((Path(__file__).resolve().parents[1] / ".github/CODEOWNERS").read_text())
@@ -51,7 +54,7 @@ def notes(chosen=None, picked=(), left_out=(), merged=(), issues=()):
 class NightlyTests(unittest.TestCase):
     def test_release_keys_and_publishers_stay_on_github_hosted_runners(self):
         import re
-        from tests.test_ci_concurrency import ROOT, yaml
+        from tests.test_ci_concurrency import ROOT
 
         workflows = ROOT / ".github/workflows"
         for path in sorted(workflows.iterdir()):
@@ -361,10 +364,8 @@ class SdkPairTests(unittest.TestCase):
                     self.assertEqual(output.call_args.kwargs["sdk"], str(ready).lower())
 
     def test_forced_rebuild_of_the_published_commit_lists_the_changes_since_the_nightly_before(self):
-        import io, os, subprocess, tempfile
         with tempfile.TemporaryDirectory() as repo:
-            def sh(*args):
-                return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            sh = git_in(repo)
             sh("init", "-q")
             commits = []
             for n in range(3):
@@ -630,14 +631,15 @@ class VerifySumsTests(unittest.TestCase):
 
     def test_the_keys_are_mains_never_the_checkouts(self):
         origin, clone = self.work / "origin", self.work / "clone"
-        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
-        subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True, capture_output=True)
+        env = isolated_git_env()
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], env=env, check=True)
+        subprocess.run(["git", "clone", "-q", str(origin), str(clone)], env=env, check=True, capture_output=True)
         keys = clone / nightly.KEYS_FILE
         keys.parent.mkdir(parents=True)
         keys.write_text(f"# main's\n{self.public}\n")
         for command in (["add", "-A"], ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-q", "-m",
                                         "keys"], ["push", "-q", "origin", "main"]):
-            subprocess.run(["git", *command], cwd=clone, check=True)
+            subprocess.run(["git", *command], cwd=clone, env=env, check=True)
         keys.write_text(f"{self.public}\n{self.other}\n")  # a candidate's own copy adds a key
         with mock.patch.object(nightly, "REPOSITORY", clone), \
                 mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise"}):
@@ -654,12 +656,12 @@ class VerifySumsTests(unittest.TestCase):
                            (f"\x1c{self.public}\n", None),
                            # A bare carriage return ends no line for the native reader: one line, and no key.
                            (f"{self.public}\r{self.public}\n", None)):
-            subprocess.run(["git", "checkout", "-q", "main"], cwd=clone, check=True)
+            subprocess.run(["git", "checkout", "-q", "main"], cwd=clone, env=env, check=True)
             keys_file = clone / nightly.KEYS_FILE
             keys_file.write_text(text)
             for command in (["add", "-A"], ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit",
                                             "-q", "--allow-empty", "-m", "keys"], ["push", "-q", "origin", "main"]):
-                subprocess.run(["git", *command], cwd=clone, check=True)
+                subprocess.run(["git", *command], cwd=clone, env=env, check=True)
             with self.subTest(text=text), mock.patch.object(nightly, "REPOSITORY", clone), \
                     mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "sunrise-org/sunrise"}):
                 if keys:
@@ -667,3 +669,49 @@ class VerifySumsTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(SystemExit, "is no Ed25519 public key"):
                         nightly.release_keys()
+
+
+class SdkBodyTests(unittest.TestCase):
+    def index(self, previous="p" * 40, changes=(), notes=(), source="breaking"):
+        surface = {"hash": "h"}
+        if previous:
+            surface.update(previous=previous, source=source, changes=list(changes), notes=list(notes))
+        return {"build": {"commit": "c" * 40}, "surface": surface}
+
+    def test_notes_naming_the_earliest_change_come_first(self):
+        notes = [{"ids": ["item:b"], "why": "WHY-LATE"},
+                 {"ids": ["item:z", "hook:a"], "why": "WHY-BREAKING", "migrate": "use the new hook"}]
+        body = nightly.sdk_body(self.index(changes=["hook:a", "item:b", "item:z"], notes=notes))
+        self.assertLess(body.index("WHY-BREAKING"), body.index("WHY-LATE"))
+        self.assertIn("Migrate: use the new hook", body)
+        self.assertIn("`hook:a`", body)
+        self.assertIn("Changes since sdk-" + "p" * 40, body)
+        self.assertIn("breaking", body)
+
+    def test_no_previous_says_there_is_no_comparison(self):
+        body = nightly.sdk_body(self.index(previous=None))
+        self.assertIn("c" * 40, body)
+        self.assertIn("no comparison", body)
+        self.assertNotIn("Changes since", body)
+
+    def test_the_body_stops_at_a_whole_note_under_the_cap(self):
+        notes = [{"ids": [f"item:{n}"], "why": f"NOTE-{n} " + "x" * 100} for n in range(10)]
+        changes = [f"item:{n}" for n in range(10)]
+        with mock.patch.object(nightly, "GITHUB_RELEASE_BODY_LIMIT", 800):
+            body = nightly.sdk_body(self.index(changes=changes, notes=notes))
+        self.assertLessEqual(len(body), 800)
+        self.assertIn("NOTE-0 ", body)
+        self.assertNotIn("NOTE-9 ", body)
+        shown = body.count("NOTE-")
+        self.assertIn(f"The remaining notes ({10 - shown}) are in sdk.json's `surface.notes`", body)
+        for n in range(shown):
+            self.assertIn("x" * 100, body.split(f"NOTE-{n} ")[1].split("\n")[0])
+
+    def test_changes_no_note_names_are_counted_not_listed(self):
+        changes = [f"item:{n}" for n in range(300)]
+        notes = [{"ids": ["item:0"], "why": "WHY"}]
+        body = nightly.sdk_body(self.index(changes=changes, notes=notes))
+        self.assertIn("299 changed records", body)
+        self.assertIn("cargo sunrise-mod sdk diff", body)
+        self.assertNotIn("item:1`", body)
+        self.assertNotIn("item:299", body)

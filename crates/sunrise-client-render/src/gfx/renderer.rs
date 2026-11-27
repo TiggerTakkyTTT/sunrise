@@ -137,12 +137,6 @@ pub struct Renderer {
     /// (`crosshair_globals`).
     pub(crate) crosshair_group: wgpu::BindGroup,
     pub(crate) crosshair_globals: wgpu::Buffer,
-    /// The water mirror: its solid terrain pipeline, its camera's globals and their group,
-    /// and its targets once drawn.
-    pub(crate) solid_mirror: wgpu::RenderPipeline,
-    pub(crate) mirror_globals: wgpu::Buffer,
-    pub(crate) mirror_group: wgpu::BindGroup,
-    pub(crate) mirror: Option<MirrorTarget>,
     /// Native mods' world views' targets and pipelines, and the largest side the device gives one.
     pub(crate) world_views: world_views::Kept,
     pub(crate) world_view_side: u32,
@@ -154,6 +148,7 @@ pub struct Renderer {
     pub(super) particle_pipelines: particle_draws::ParticlePipelines,
     pub(super) explicit_opaque_particles: particle_draws::ParticleDraws,
     pub(super) explicit_translucent_particles: particle_draws::ParticleDraws,
+    pub(super) explicit_additive_particles: particle_draws::ParticleDraws,
     pub(crate) static_entity_pipeline: wgpu::RenderPipeline,
     pub(crate) static_entity_group: wgpu::BindGroup,
     pub(crate) static_entity_transform: wgpu::Buffer,
@@ -187,6 +182,10 @@ pub struct Renderer {
     pub(crate) see_through_pipeline: wgpu::RenderPipeline,
     /// Native mods' world primitives (`Frame::world_primitives`), taken briefly during OIT pass.
     pub(crate) world_primitives: Option<world_primitives::WorldPrimitives>,
+    /// Device handles and the mod mesh, buffer and render target tables, shared with `Game`.
+    pub(crate) mod_gpu: mod_gpu::ModGpuResources,
+    /// Cross-frame pool of transient GPU render targets for `Hooks::frame_graph_setup`.
+    pub(crate) transient_targets: std::sync::Mutex<mod_frame_graph::TransientTargetPool>,
     pub(crate) text_polygon_offset_pipeline: wgpu::RenderPipeline,
     pub(crate) world_text_pipeline: wgpu::RenderPipeline,
     pub(crate) text_mark_pipelines: [wgpu::RenderPipeline; 2],
@@ -214,7 +213,7 @@ pub struct Renderer {
     pub(crate) screen_buffer: wgpu::Buffer,
     pub(crate) screen_capacity: u64,
     pub(crate) entity_group: wgpu::BindGroup,
-    /// The layout of `entity_group`, for the native shadow pass.
+    /// The layout of `entity_group`.
     pub(crate) entity_bindings: wgpu::BindGroupLayout,
     /// Generation-owned prepared model geometry. World block entities instance it
     /// when the draw is not kept, spinning, or claimed by a shader pack.
@@ -235,6 +234,8 @@ pub struct Renderer {
     pub(crate) static_entity_indices: wgpu::Buffer,
     pub(crate) static_entity_index_quads: u32,
     pub(crate) entity_batch: EntityBatch,
+    /// Quads of client mods' dynamic textures (`BlockEntityDrawContext::textured_quad`).
+    pub(super) dynamic_entity: dynamic_entity::DynamicEntity,
     pub(crate) entity_order: entity_skin::OrdinaryOrder,
     /// Ordinary entity models posed on the GPU; `None` without compute shaders.
     pub(crate) entity_skin: Option<entity_skin::EntitySkin>,
@@ -412,9 +413,6 @@ pub struct Renderer {
     pub(crate) newest_lod_fade: Option<std::time::Instant>,
     /// Changes whenever `block_entities` does (unique across renderers).
     pub(crate) block_entity_revision: u64,
-    /// The light sources of each section and their revision, for `block_light`.
-    pub(crate) light_blocks: super::census::SectionLists,
-    pub(crate) light_revision: u64,
     /// VisGraph face connectivity per meshed section (cave culling).
     pub(crate) occlusion: occlusion::Occlusion,
     /// The column `occlusion`, `sections` and `detail_columns` count in: the
@@ -443,9 +441,6 @@ pub struct Renderer {
     /// `LINEAR_FRAME` (`frame_format`). A 16-bit frame with HDR off since reaches the
     /// swapchain through `readback`.
     pub(crate) output: output::EffectiveOutput,
-    /// Whether a pack picked or dropped since the renderer was made has been told it runs on
-    /// the frame that exists (`set_native_shader_pack`).
-    pub(crate) frame_kept_logged: bool,
     /// The marker file of an HDR output that has not presented a frame yet
     /// (`graphics::HDR_MARKER`).
     pub(crate) hdr_marker: Option<std::path::PathBuf>,
@@ -457,8 +452,8 @@ pub struct Renderer {
     pub(crate) pack_post: Option<(i32, Option<pack_post::PackPost>)>,
     /// A `shaders/` pack whose pipelines build on a thread of their own (`load_shader_pack`).
     pub(crate) pack_loading: Option<PackLoading>,
-    /// The post passes of one of Sunrise's own shader packs; never beside `pack_post`'s.
-    pub(crate) native: Option<native_pack::NativePack>,
+    /// Counts shader packs loaded, switched or turned off (`ShaderPackState::generation`).
+    pub(crate) pack_generation: u32,
     /// Time the shader pack's passes on the GPU (F3, or a capture made with `--gpu`).
     pub(crate) pass_timing: bool,
     /// Times the parts of passes too (`set_pass_detail`).
@@ -565,6 +560,9 @@ pub struct Renderer {
     pub screenshot: Option<ScreenshotRequest>,
     /// Readback outcome: CPU pixels for the game to approve before writing, or an error.
     pub screenshot_result: Option<std::result::Result<PendingScreenshot, String>>,
+    /// The shader pack's `sunrise.hdr` request this renderer's frame was made for (the game's
+    /// pick, before any program was read): a later read of the pack is checked against it.
+    pub pack_hdr: Option<sunrise_shaders::Tonemap>,
     pub(crate) screenshot_readbacks: screenshot_readback::Readbacks,
     /// Screenshot Quality (Sunrise setting): a `scaled` screenshot's frame is this many
     /// times the game's resolution (1, 2, 4 or 8).

@@ -9,16 +9,13 @@ import subprocess
 import sys
 import tempfile
 
-try:
-    from . import lab, test_rust_parity as base
-    from .command_exec_corpus import cmd, setup
-except ImportError:
-    import lab
-    import test_rust_parity as base
-    from command_exec_corpus import cmd, setup
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
+from tools.command_exec_corpus import cmd, setup
 
 
-TEST = 'game::commands::data::fire_tests::fire_changes_on_eyes_fangs_spawners_clouds_and_bullets'
+TEST = 'game::server_side::commands::data::fire_tests::fire_changes_on_eyes_fangs_spawners_clouds_and_bullets'
 ORACLE = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaCommandExecOracle.java'
 
 # (entity_type, extra_nbt) for each of the five #2683 entity types.

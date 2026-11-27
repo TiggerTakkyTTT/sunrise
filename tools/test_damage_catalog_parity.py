@@ -10,7 +10,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import lab
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab
 
 
 def snapshot_tests(build):
@@ -84,10 +88,10 @@ def main():
                lab.ROOT / "crates/sunrise-world/examples/damage_catalog_probe.rs",
                lab.ROOT / "crates/sunrise-world/src/damage_source.rs",
                lab.ROOT / "crates/sunrise-world/src/damage_source/resources.rs",
-               lab.ROOT / "crates/sunrise-client/src/health/datapack_tests.rs",
-               lab.ROOT / "crates/sunrise-client/src/landing.rs",
-               lab.ROOT / "crates/sunrise-client/src/lan/data.rs",
-               lab.ROOT / "crates/sunrise-client/src/game/network/lan/mod.rs"]
+               lab.ROOT / "crates/sunrise-sim/src/health/datapack_tests.rs",
+               lab.ROOT / "crates/sunrise-sim/src/landing.rs",
+               lab.ROOT / "crates/sunrise-sim/src/lan/data.rs",
+               lab.ROOT / "crates/sunrise-gameplay/src/game/network/lan/mod.rs"]
     hashes = {str(p.relative_to(lab.ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     libraries = sorted((args.game_dir / "libraries/server").rglob("*.jar"))
     jar = args.game_dir / "jars/server-game.jar"

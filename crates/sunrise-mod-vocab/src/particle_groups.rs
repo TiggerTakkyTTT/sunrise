@@ -51,8 +51,11 @@ pub struct ParticleGroupRegistration {
 
 /// How a [`ParticleGroup`]'s particles blend: the layer they draw on, which decides their order
 /// against the translucent terrain (`SingleQuadParticle.Layer`).
+///
+/// Vanilla's `SingleQuadParticle.Layer` is a record that can carry any render pipeline; `Additive`
+/// is the one mod blend beyond vanilla's two quad layers so far.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// exhaustive: vanilla's two quad layers, matched without a wildcard
+#[non_exhaustive]
 #[derive(sunrise_mod_api_macros::Wire)]
 pub enum ParticleBlend {
     /// `SingleQuadParticle.Layer.OPAQUE`: drawn with the terrain, writing depth; the sprite's
@@ -61,4 +64,7 @@ pub enum ParticleBlend {
     /// `SingleQuadParticle.Layer.TRANSLUCENT`: drawn after the translucent terrain, blended by
     /// each particle's alpha.
     Translucent,
+    /// Drawn after the translucent particle layer, depth test on and depth write off, blended
+    /// additively (src alpha, one; matching `BlendFunction.LIGHTNING`).
+    Additive,
 }

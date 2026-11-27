@@ -8,8 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_ci_concurrency import ROOT, yaml
+from tests.test_ci_concurrency import ROOT
 from tools.ci import nightly
+from tools.ci import vendored_yaml
+
+yaml = vendored_yaml.load()
 
 WORKFLOWS = ROOT / ".github/workflows"
 
@@ -70,7 +73,21 @@ class NightlyBuildDevTests(unittest.TestCase):
         for never in ("rotate", "keep-source", "daily-green", "release create nightly", "prune --days", "release edit"):
             self.assertNotIn(never, run)
         self.assertIn('--title "Dev $DATE · $SHORT"', run)
-        self.assertLess(run.index("require-sdk"), run.index("gh release create"))
+        self.assertLess(run.index("require-sdk --draft"), run.index("gh release create"))
+
+    def test_a_dev_build_is_a_draft_until_promoted_sdk_first(self):
+        run = self.steps["Publish as the dev-<date>-<short> pre-release"]["run"]
+        self.assertIn('gh release create "$TAG" --draft', run)
+        self.assertNotIn("prune-dev", run)
+        promote = load("promote-dev.yml")
+        self.assertEqual(set(promote["on"]), {"workflow_dispatch"})
+        public = next(step for step in promote["jobs"]["promote"]["steps"] if step.get("id") == "public")["run"]
+        self.assertLess(public.index('gh release edit "sdk-$SHA" --draft=false'),
+                        public.index('gh release edit "$TAG" --draft=false'))
+        self.assertLess(public.index('gh release edit "$TAG" --draft=false'), public.index("prune-dev"))
+        check = next(step for step in promote["jobs"]["promote"]["steps"] if step.get("id") == "check")["run"]
+        self.assertIn('cmp "$game/sdk.json" "$sdk/sdk.json"', check)
+        self.assertLess(check.index("verify-sums"), check.index('echo "sha=$sha"'))
 
     def test_the_channel_signed_and_checked_is_the_kind(self):
         sign = self.workflow["jobs"]["sign"]["steps"][2]
@@ -135,7 +152,8 @@ class NightlyBuildDevTests(unittest.TestCase):
         self.assertEqual(jobs["sdk"]["with"]["commit"], "${{ needs.pick.outputs.sha }}")
         self.assertEqual(jobs["sdk-publish"]["needs"], ["pick", "sdk"])
         self.assertEqual(jobs["sdk-publish"]["with"], {"commit": "${{ needs.pick.outputs.sha }}",
-                                                       "publish": "${{ needs.pick.outputs.publish == 'true' }}"})
+                                                       "publish": "${{ needs.pick.outputs.publish == 'true' }}",
+                                                   "draft": "true"})
         self.assertEqual(jobs["sdk-index"]["needs"], ["pick", "sdk", "sdk-publish"])
         for name in ("sdk", "sdk-publish", "sdk-index"):
             self.assertIn("inputs.kind == 'dev'", jobs[name]["if"], name)
@@ -145,6 +163,9 @@ class NightlyBuildDevTests(unittest.TestCase):
         upload = jobs["sdk-index"]["steps"][-1]
         self.assertEqual(upload["with"]["name"], "sunrise-sdk-index")
         self.assertIn("nightly.py sdk-index", jobs["sdk-index"]["steps"][-2]["run"])
+        # The index of the release sdk-publish left, never a write token to read a draft.
+        self.assertNotIn("permissions", jobs["sdk-index"])
+        self.assertIn("sdk-released-index", jobs["sdk-index"]["steps"][1]["with"]["name"])
 
     def test_dev_builds_never_replace_a_waiting_nightly(self):
         group = self.workflow["concurrency"]["group"]
@@ -167,6 +188,10 @@ class DevToolsTests(unittest.TestCase):
                          ["dev-2026-11-01-aaaaaaa", "dev-2026-11-02-bbbbbbb"])
         # A long quiet spell: the newest stays however old.
         self.assertEqual(nightly.stale_dev_builds(tags[:2], dt.date(2027, 1, 1), 7), ["dev-2026-11-01-aaaaaaa"])
+        # Drafts are neither pruned nor the newest: the newest public build stays beside a newer pending draft.
+        drafts = [{"tagName": "dev-2026-10-01-fffffff", "isPrerelease": True, "isDraft": True},
+                  {"tagName": "dev-2027-01-01-0000000", "isPrerelease": True, "isDraft": True}]
+        self.assertEqual(nightly.stale_dev_builds(tags[:2] + drafts, dt.date(2027, 1, 2), 7), ["dev-2026-11-01-aaaaaaa"])
 
     def test_pick_checks_the_gate_and_names_the_dev_build(self):
         sha = "0c02067" + "a" * 33

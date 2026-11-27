@@ -167,6 +167,28 @@ fn a_game_releases_copy_names_its_build_before_the_build_is_known() {
 }
 
 #[test]
+fn a_refusal_names_the_side_that_is_older() {
+    let program = [
+        Refusal::Schema(u64::from(SCHEMA) + 1),
+        Refusal::PackageFormat(u64::from(PACKAGE_FORMAT) + 1),
+    ];
+    for refusal in program {
+        let text = refusal.to_string();
+        assert!(text.contains("program is older"), "{text}");
+        assert!(!text.contains("SDK is older"), "{text}");
+    }
+    let sdk = [
+        Refusal::Schema(u64::from(SCHEMA) - 1),
+        Refusal::PackageFormat(u64::from(PACKAGE_FORMAT) - 1),
+    ];
+    for refusal in sdk {
+        let text = refusal.to_string();
+        assert!(text.contains("SDK is older"), "{text}");
+        assert!(!text.contains("program is older"), "{text}");
+    }
+}
+
+#[test]
 fn each_bad_index_is_refused_by_name() {
     let good = json(&index(&[(ENGINE, b"engine")]));
     let cases: [(&str, fn(&mut serde_json::Value), Refusal); 7] = [

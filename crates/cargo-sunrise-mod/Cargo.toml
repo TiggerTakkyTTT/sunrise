@@ -20,7 +20,7 @@ sunrise-attestation = { path = "../sunrise-attestation" }
 sunrise-mod-source = { path = "../sunrise-mod-source" }
 # `canonicalize` that keeps plain Windows paths (no verbatim prefix), as `cargo metadata` prints them.
 dunce = "1.0.5"
-sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false, features = ["index", "prebuilt", "references"] }
+sunrise-mod-package = { path = "../sunrise-mod-package", default-features = false, features = ["index", "prebuilt", "references", "folder"] }
 # `native-build`: the launcher's native mod build, run from a JSON plan.
 sunrise-native-build = { path = "../sunrise-native-build" }
 # The uses scan, the fit test, the surface search and its diff, over the fetched SDK's `surface.json`.
@@ -30,7 +30,6 @@ sunrise-release-sign = { path = "../sunrise-release-sign" }
 sunrise-jar-fetch = { path = "../sunrise-jar-fetch" }
 sunrise-port-pack = { path = "../sunrise-port-pack" }
 sunrise-proxy = { path = "../sunrise-proxy" }
-rustc-demangle = "0.1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
@@ -55,6 +54,8 @@ libc = "0.2"
 sunrise-mod-api-gen = { path = "../sunrise-mod-api-gen" }
 base64 = "0.22"
 ring = "0.17"
+# The daily C-source test reads the symbols of the library the tool built.
+object = { version = "0.39", default-features = false, features = ["read", "std"] }
 png = "0.18"
 
 [lints]

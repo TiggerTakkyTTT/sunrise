@@ -38,11 +38,11 @@ from pathlib import Path
 import platform
 import random
 import subprocess
-try:
-    from . import lab, test_rust_parity as base
-except ImportError:
-    import lab
-    import test_rust_parity as base
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tools import lab, test_rust_parity as base
 
 GROUND = ['minecraft:grass_block', 'minecraft:dirt', 'minecraft:sand', 'minecraft:stone', 'minecraft:snow_block',
           'minecraft:podzol', 'minecraft:mycelium', 'minecraft:gravel', 'minecraft:red_sand', 'minecraft:moss_block']
@@ -317,7 +317,7 @@ def main():
     resources = lab.RESOURCES
     oracle = lab.ROOT / 'mods/sunrise/src/test/java/dev/sunriselab/parity/VanillaRaidOracle.java'
     sources = [oracle, Path(__file__), lab.ROOT / 'crates/sunrise-client/examples/probe/raid_fixture.rs',
-               lab.ROOT / 'crates/sunrise-client/src/raid.rs', lab.ROOT / 'crates/sunrise-client/src/patrol.rs']
+               lab.ROOT / 'crates/sunrise-sim/src/raid.rs', lab.ROOT / 'crates/sunrise-sim/src/patrol.rs']
     tested = base.source_hashes(sources)
     inputs = build / 'inputs.txt'
     cases = corpus()

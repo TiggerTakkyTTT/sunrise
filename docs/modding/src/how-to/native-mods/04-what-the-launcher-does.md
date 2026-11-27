@@ -29,12 +29,13 @@ that commit's SDK.
    used again on later builds after a quick check of its file names and sizes. Install the
    launcher's pinned Rust toolchain and required linker tools if needed; the player's Rust is not used.
 5. Compile the mods against the SDK's game libraries. Registry dependencies use the mod's supplied
-   lockfile and the same immutable SDK. The launcher asks for permission before executing dependency
+   lockfile and the same immutable SDK. The launcher asks for permission before executing the mods' own and dependency
    build scripts or procedural macros.
 6. For `[[native.mixin]]` rows, download the pinned game source, copy the targeted functions into one patch
    library, apply the rows with horizon-mixins, and compile that library against the SDK. The game
    crates are not compiled. Each checked replacement is installed through its typed installer.
-7. Link the native executable, install it as `native-<commit>-<key>`, and select it for the instance.
+7. Install the SDK's unchanged game executable and its companion libraries (including the compiled
+   mod libraries) as `native-<commit>-<key>`, and select that build for the instance.
    `native-mods.json` records the base, pins, mods and build tools. Client builds share their base's
    prepared resources; server exports include their resources.
    On Windows x64 the launcher also places the two GNU runtime libraries of its managed toolchain
@@ -49,7 +50,6 @@ and lets you cancel it.
 
 | Error | What to do |
 |---|---|
-| `E_NATIVE_BUILD_SCRIPT` | Remove the mod's build script and ship its generated Rust source. `build = false` disables an incidental `build.rs`. Registry dependency build scripts are handled by the separate dependency permission prompt. |
 | `E_NATIVE_FEATURES` | Use the pinned SDK's feature set; remove mod feature declarations and custom SDK feature requests. |
 | `E_NATIVE_HOST` | Build on a host supported by the prebuilt SDK. |
 | `E_MIXIN_STATE_LAYOUT` | Store per-object mod data in attachments instead of declaring `[[native.state]]`. |
