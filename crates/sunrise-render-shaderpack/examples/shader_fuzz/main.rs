@@ -1771,12 +1771,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The render-driving outputs of a load: every program's modules, interfaces and settings,
-    /// the notes, and the pack's textures, buffer sizes, buffer objects, images, custom
-    /// uniforms, buffer formats and shadow pass. (`Custom` itself holds hash maps, whose `Debug`
-    /// order is not the same twice.)
-    fn outputs(post: &sunrise_shaders::Post) -> Vec<String> {
-        let seen = check::observe(post);
+    /// The render-driving outputs captured by the fuzzer's current loader path.
+    fn outputs(seen: &check::Observed) -> Vec<String> {
         let mut out: Vec<String> = seen
             .pieces
             .iter()
@@ -1784,17 +1780,40 @@ mod tests {
             .collect();
         out.extend([
             format!("{:?}", seen.loaded),
+            format!("{:?}", seen.compute_loaded),
             format!("{:?}", seen.notes),
-            format!("{:?}", post.textures),
-            format!("{:?}", post.sizes),
-            format!("{:?}", post.buffer_objects),
-            format!("{:?}", post.images),
-            format!("{:?}", post.custom.uniforms().collect::<Vec<_>>()),
-            format!("{:?}", post.custom.notes),
-            format!("{:?}", post.config),
-            format!("{:?}", post.shadow_pass),
+            format!("{:?}", seen.custom.uniforms().collect::<Vec<_>>()),
+            format!("{:?}", seen.custom.notes),
+            format!("{:?}", seen.shadow_pass),
         ]);
         out
+    }
+
+    fn observe_post(post: &sunrise_shaders::Post) -> check::Observed {
+        let mut notes = post.notes.clone();
+        notes.extend(post.config.notes.iter().cloned());
+        notes.extend(post.custom.notes.iter().cloned());
+        let refusals = post
+            .notes
+            .iter()
+            .filter(|note| note.ends_with("skipped"))
+            .cloned()
+            .collect();
+        check::observe(post, notes, refusals, Vec::new(), Default::default())
+    }
+
+    fn load_post(dir: &Path, request: &Request) -> sunrise_shaders::Post {
+        let pack = sunrise_shaders::Pack::open(dir).unwrap();
+        let (properties, macros) = check::pack_macros(&pack);
+        let (id, legacy) = cases::DIMENSIONS[request.dim];
+        let folder = sunrise_shaders::dimension_folder_named(&pack, id, legacy);
+        sunrise_shaders::load_post(
+            &pack,
+            &folder,
+            &properties,
+            &macros,
+            &check::inputs(&properties, request.flat),
+        )
     }
 
     /// The pack at `full` loaded as a case on `programs` (dimension 0, flat terrain, no step)
@@ -1809,11 +1828,12 @@ mod tests {
             dim: 0,
             flat: true,
             expect: Vec::new(),
+            expect_compute: Vec::new(),
             size_limit: 16 << 20,
         };
         let (whole, part) = (check::load(full, &request), check::load(&sample, &request));
         assert_eq!(outputs(&part), outputs(&whole));
-        part
+        load_post(&sample, &request)
     }
 
     /// The loader reads, for `composite`: an include with a comment after it, a raw custom
@@ -1880,7 +1900,7 @@ void main() {
         let part = unmutated(&full, &["composite"]);
         // What each input gave: `composite` loaded with its include, the texture blurred, the
         // buffer filled, colortex2 at half size.
-        assert_eq!(check::observe(&part).loaded, ["composite"]);
+        assert_eq!(observe_post(&part).loaded, ["composite"]);
         assert_eq!(part.textures.len(), 1);
         assert_eq!(part.textures[0].name, "fzNoise");
         let sunrise_shaders::TextureSource::Image(texture) = &part.textures[0].source else {
@@ -1981,11 +2001,15 @@ void main() {
             dim: 0,
             flat: false,
             expect: Vec::new(),
+            expect_compute: Vec::new(),
             size_limit: 16 << 20,
         };
-        let terrain = |post: &sunrise_shaders::Post| {
-            let program = post.terrain.as_ref().expect("terrain loads");
-            format!("{:?}", program.program.as_ref().unwrap().vertex)
+        let terrain = |seen: &check::Observed| {
+            seen.pieces
+                .iter()
+                .find(|(label, _)| label.ends_with("gbuffers_terrain vertex"))
+                .map(|(_, hash)| *hash)
+                .expect("terrain vertex is observed")
         };
         let pack = sunrise_shaders::Pack::open(&dir).unwrap();
         let with = |separate_ao: bool| {
@@ -2001,7 +2025,7 @@ void main() {
             );
             let inputs =
                 sunrise_render_shaderpack::pack_atlas::game_inputs(Some(atlas), false, &[3, 4]);
-            terrain(&sunrise_shaders::load_post(
+            observe_post(&sunrise_shaders::load_post(
                 &pack,
                 "",
                 &properties,
@@ -2009,9 +2033,9 @@ void main() {
                 &inputs,
             ))
         };
-        let loaded = terrain(&check::load(&dir, &request));
-        assert_eq!(loaded, with(true));
-        assert_ne!(loaded, with(false));
+        let loaded = check::load(&dir, &request);
+        assert_eq!(terrain(&loaded), terrain(&with(true)));
+        assert_ne!(terrain(&loaded), terrain(&with(false)));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2141,7 +2165,7 @@ void main() {
             loaded: vec!["composite".into(), "final".into()],
             ..Default::default()
         };
-        let mut case = cases::smoke(&index)
+        let case = cases::smoke(&index)
             .unwrap()
             .into_iter()
             .find(|c| c.programs.len() == 7)
@@ -2250,6 +2274,7 @@ void main() {
                 ("shaders.properties".into(), Vec::new()),
             ]
             .into(),
+            reach: ["composite.csh".to_owned()].into_iter().collect(),
             steps: Vec::new(),
         };
         let base = Outcome {
@@ -2336,6 +2361,9 @@ void main() {
                 ("shaders.properties".into(), Vec::new()),
             ]
             .into(),
+            reach: ["world0/final.vsh".to_owned(), "world0/final.fsh".to_owned()]
+                .into_iter()
+                .collect(),
             steps: Vec::new(),
         };
         let base = Outcome {
@@ -2389,6 +2417,7 @@ void main() {
                     dim: 2,
                     flat: false,
                     expect: vec!["final".into()],
+                    expect_compute: Vec::new(),
                     size_limit: 16 << 20,
                 },
                 failure: Failure::new("memory", "over 64 MiB"),

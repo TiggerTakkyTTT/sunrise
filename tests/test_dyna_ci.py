@@ -445,7 +445,7 @@ class DynaRoutingTests(unittest.TestCase):
                                         capture_output=True, text=True)
                 if case in ("absent", "correct-link"):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(target.resolve(), persistent)
+                    self.assertEqual(target.resolve(), persistent.resolve())
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     after = target.lstat()
@@ -705,6 +705,26 @@ class DynaRoutingTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertEqual(failed.stdout, "::error::Could not read the game-probe plan for this parity share.\n")
             self.assertFalse(calls.exists())
+
+
+class BookQuickstartWorkflowTests(unittest.TestCase):
+    PREPARE = "Prepare dedicated server resources for the own-sdk tests"
+    SERVER_TESTS = ("m2m_mod_events", "convention_tags", "m2m_load_conditions")
+
+    def test_the_server_is_prepared_once_with_java_25_before_every_test_that_starts_one(self):
+        steps = workflow("book-quickstart.yml")["jobs"]["quickstart"]["steps"]
+        names = [step["name"] for step in steps if "name" in step]
+        self.assertEqual(len(names), len(set(names)))
+        prepare = steps.index(step_named({"steps": steps}, self.PREPARE))
+        for test in self.SERVER_TESTS:
+            first = next(index for index, step in enumerate(steps) if f"--test {test} " in step.get("run", ""))
+            self.assertLess(prepare, first, test)
+        java = [index for index, step in enumerate(steps) if step.get("uses") == "actions/setup-java@v4"]
+        self.assertEqual(len(java), 1)
+        self.assertLess(java[0], prepare)
+        self.assertEqual(steps[java[0]]["if"], "inputs.own_sdk")
+        self.assertEqual(steps[java[0]]["with"], {"distribution": "temurin", "java-version": "25"})
+
 
 class PersistentTargetTests(unittest.TestCase):
     def test_every_job_that_can_build_on_a_self_hosted_runner_keeps_the_source_snapshot_first(self):

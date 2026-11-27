@@ -619,13 +619,27 @@ class JudgeBuildTests(unittest.TestCase):
             repo = work / "repo"
             repo.mkdir()
             git = git_in(repo)
-            git("init", "-q")
-            (repo / "a.txt").write_text("a\n")
-            git("add", "a.txt")
-            git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a")
-            with mock.patch.object(nightly, "REPOSITORY", repo):
-                nightly.unpack("HEAD", work / "tree")
-            self.assertEqual((work / "tree" / "a.txt").read_text(), "a\n")
+            tree = work / "tree"
+            with mock.patch.dict(nightly.os.environ, isolated_git_env(), clear=True), \
+                    mock.patch.object(nightly, "REPOSITORY", repo):
+                git("init", "-q")
+                git("config", "user.name", "Release Test")
+                git("config", "user.email", "release-test@example.invalid")
+                (repo / "a.txt").write_text("parent\n")
+                git("add", "a.txt")
+                git("commit", "-qm", "parent")
+                parent = git("rev-parse", "HEAD")
+
+                (repo / "a.txt").write_text("candidate\n")
+                (repo / "candidate-only.txt").write_text("tracked in candidate\n")
+                git("add", "a.txt", "candidate-only.txt")
+                git("commit", "-qm", "candidate")
+                (repo / "a.txt").write_text("dirty\n")
+                (repo / "worktree-only.txt").write_text("untracked\n")
+
+                nightly.unpack(parent, tree)
+            self.assertEqual({path.name for path in tree.iterdir()}, {"a.txt"})
+            self.assertEqual((tree / "a.txt").read_text(), "parent\n")
             self.assertEqual(len(git("worktree", "list").splitlines()), 1)
 
     def test_download_only_returns_assets_verified_under_their_tag(self):

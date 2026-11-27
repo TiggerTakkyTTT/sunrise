@@ -849,6 +849,10 @@ pub(in crate::game) mod world_rest;
 #[path = "world/world_session.rs"]
 pub(in crate::game) mod world_session;
 #[cfg(feature = "client")]
+#[cfg(test)]
+#[path = "modding/world_text_tests.rs"]
+mod world_text_tests;
+#[cfg(feature = "client")]
 #[path = "world/world_update.rs"]
 pub(in crate::game) mod world_update;
 #[cfg(feature = "client")]

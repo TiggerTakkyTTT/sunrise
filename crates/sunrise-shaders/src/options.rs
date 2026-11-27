@@ -146,7 +146,8 @@ pub(crate) fn properties_with_macros(
 
 /// A pack's `shaders.properties` as the game reads it before the programs: parsed with
 /// `properties_macros` over `macros` (the standard set and the renderer's). Returns the
-/// properties and a note for each required feature Sunrise lacks (`Macros::feature_notes`).
+/// properties and a note for each required feature Sunrise lacks with `macros`' device
+/// (`Macros::feature_notes`).
 /// Whatever reads a pack's programs (the game, the `real_packs` test) reads them with `macros`.
 pub fn read_properties(
     pack: &Pack,
@@ -154,7 +155,7 @@ pub fn read_properties(
 ) -> (crate::Properties, Vec<String>) {
     let text = pack.read_text("shaders.properties").unwrap_or_default();
     let properties = crate::Properties::parse(&text, &properties_macros(pack, macros));
-    let notes = crate::Macros::feature_notes(&properties);
+    let notes = macros.feature_notes(&properties);
     (properties, notes)
 }
 

@@ -53,7 +53,7 @@ pub use options::{
 pub use pack::{Pack, PackError};
 pub use post::{
     Blend, BufferObject, BufferSize, CELESTIAL_BLEND, CustomImage, DEVICELESS_INTERFACE_LIMITS,
-    Factor, GameInputs, Group, ImageSize, ModPackProgram, ModPackProgramRequest,
+    Factor, GameInputs, Group, ImageSize, Indirect, ModPackProgram, ModPackProgramRequest,
 };
 pub use post::{
     ComputeStageAttempt, LoaderRefusal, Post, PostProgram, STARS_BLEND, ShadowCulling, SkySwitches,
