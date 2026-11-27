@@ -2342,7 +2342,7 @@ mod tests {
         .unwrap();
         let path = "composite99.csh";
         let limit = crate::preprocess::preprocess(&pack, path, &Macros::standard())
-            .code
+            .code()
             .len();
         let properties = Properties::parse(
             "image.voxels = none RED_INTEGER R32UI UNSIGNED_INT false false 4 4 4\n\
