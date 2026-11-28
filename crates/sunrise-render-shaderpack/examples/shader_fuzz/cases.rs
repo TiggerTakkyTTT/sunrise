@@ -370,8 +370,8 @@ pub fn compute_stages_in_sources(
                 && !blocked_pair
                 && sunrise_shaders::post_program_supported(owner)
                 && (!is_shadowcomp_program(owner) || shadow_pass)
-                && program_enabled(owner, folder, properties_text, &sources)
-                && program_enabled(stage, folder, properties_text, &sources)
+                && program_enabled(owner, folder, properties_text, sources)
+                && program_enabled(stage, folder, properties_text, sources)
         })
         .map(str::to_owned)
         .collect()

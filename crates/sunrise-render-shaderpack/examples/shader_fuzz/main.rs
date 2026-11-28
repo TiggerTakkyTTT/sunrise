@@ -859,8 +859,8 @@ fn expectations_with_previous(
 ) -> (Vec<String>, Vec<String>) {
     let candidate = CandidateInputs::for_candidate(case.dim, files, &case.files, previous);
     (
-        expect_with_inputs(case, base, files, &previous, &candidate),
-        expect_compute_with_inputs(case, base, files, &previous, &candidate),
+        expect_with_inputs(case, base, files, previous, &candidate),
+        expect_compute_with_inputs(case, base, files, previous, &candidate),
     )
 }
 
