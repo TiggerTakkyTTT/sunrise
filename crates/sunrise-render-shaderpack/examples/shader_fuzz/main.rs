@@ -27,7 +27,8 @@ mod process;
 mod shrink;
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -629,12 +630,36 @@ struct CandidateInputs {
     properties: sunrise_shaders::Properties,
     option_macros: Macros,
     shadow_pass: bool,
+    programs: Vec<String>,
+    compute_stages: Vec<String>,
+    enabled: RefCell<HashMap<String, bool>>,
 }
 
 impl CandidateInputs {
     fn new(dim: usize, files: &Files) -> Self {
-        let folder = cases::active_folder(dim, files);
+        Self::build(dim, files, source_texts(files))
+    }
+
+    fn for_candidate(dim: usize, files: &Files, previous_files: &Files, previous: &Self) -> Self {
         let sources = source_texts(files);
+        if previous.eligibility_unchanged(dim, files, previous_files, &sources) {
+            let properties = effective_properties_from_sources(&sources);
+            return Self {
+                folder: previous.folder.clone(),
+                sources,
+                properties,
+                option_macros: previous.option_macros.clone(),
+                shadow_pass: previous.shadow_pass,
+                programs: previous.programs.clone(),
+                compute_stages: previous.compute_stages.clone(),
+                enabled: RefCell::new(previous.enabled.borrow().clone()),
+            };
+        }
+        Self::build(dim, files, sources)
+    }
+
+    fn build(dim: usize, files: &Files, sources: BTreeMap<String, String>) -> Self {
+        let folder = cases::active_folder(dim, files);
         let properties = effective_properties_from_sources(&sources);
         let option_macros = effective_option_macros_from_sources(&sources);
         let mut inputs = Self {
@@ -643,13 +668,66 @@ impl CandidateInputs {
             properties,
             option_macros,
             shadow_pass: false,
+            programs: Vec::new(),
+            compute_stages: Vec::new(),
+            enabled: RefCell::new(HashMap::new()),
         };
         inputs.shadow_pass = inputs.shadow_pass_from(files);
+        inputs.programs =
+            cases::programs_in_sources(&inputs.folder, files, &inputs.sources, inputs.shadow_pass);
+        inputs.compute_stages = cases::compute_stages_in_sources(
+            &inputs.folder,
+            files,
+            &inputs.sources,
+            inputs.shadow_pass,
+        );
         inputs
     }
 
+    fn eligibility_unchanged(
+        &self,
+        dim: usize,
+        files: &Files,
+        previous_files: &Files,
+        sources: &BTreeMap<String, String>,
+    ) -> bool {
+        if cases::active_folder(dim, files) != self.folder
+            || files.keys().ne(previous_files.keys())
+            || files.get("shaders.properties") != previous_files.get("shaders.properties")
+            || self.sources.keys().ne(sources.keys())
+        {
+            return false;
+        }
+
+        let shadow_override = matches!(
+            self.properties.get("shadow.enabled").map(str::trim),
+            Some("true" | "false")
+        );
+        for (path, source) in sources {
+            let Some(previous) = self.sources.get(path) else {
+                return false;
+            };
+            if previous == source {
+                continue;
+            }
+            if option_directive_lines(previous) != option_directive_lines(source)
+                || cases::includes(path, previous) != cases::includes(path, source)
+                || (!shadow_override
+                    && (may_read_shadow_sampler(previous) || may_read_shadow_sampler(source)))
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     fn program_enabled(&self, name: &str) -> bool {
-        program_enabled(&self.sources, &self.folder, name)
+        if let Some(enabled) = self.enabled.borrow().get(name) {
+            return *enabled;
+        }
+        let enabled = program_enabled(&self.sources, &self.folder, name);
+        self.enabled.borrow_mut().insert(name.to_owned(), enabled);
+        enabled
     }
 
     /// The loader decides this from compiled sampler interfaces. Predict it from reachable
@@ -697,6 +775,23 @@ impl CandidateInputs {
             false
         })
     }
+}
+
+fn option_directive_lines(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("//").map_or(line, str::trim_start);
+            line.starts_with("#define") || line.starts_with("#ifdef") || line.starts_with("#ifndef")
+        })
+        .collect()
+}
+
+fn may_read_shadow_sampler(source: &str) -> bool {
+    ["shadow", "watershadow", "shadowtex", "shadowcolor"]
+        .iter()
+        .any(|name| source.contains(name))
 }
 
 fn source_reads_shadow_sampler<'a>(source: &str, features: impl Iterator<Item = &'a str>) -> bool {
@@ -753,7 +848,16 @@ fn source_reads_shadow_sampler<'a>(source: &str, features: impl Iterator<Item = 
 
 fn expectations(case: &Case, base: &Outcome, files: &Files) -> (Vec<String>, Vec<String>) {
     let previous = CandidateInputs::new(case.dim, &case.files);
-    let candidate = CandidateInputs::new(case.dim, files);
+    expectations_with_previous(case, base, files, &previous)
+}
+
+fn expectations_with_previous(
+    case: &Case,
+    base: &Outcome,
+    files: &Files,
+    previous: &CandidateInputs,
+) -> (Vec<String>, Vec<String>) {
+    let candidate = CandidateInputs::for_candidate(case.dim, files, &case.files, previous);
     (
         expect_with_inputs(case, base, files, &previous, &candidate),
         expect_compute_with_inputs(case, base, files, &previous, &candidate),
@@ -772,25 +876,15 @@ fn expect_with_inputs(
     previous: &CandidateInputs,
     candidate: &CandidateInputs,
 ) -> Vec<String> {
-    let previous_dispatch = cases::programs_in_sources(
-        &previous.folder,
-        &case.files,
-        &previous.sources,
-        previous.shadow_pass,
-    );
-    let active = cases::programs_in_sources(
-        &candidate.folder,
-        files,
-        &candidate.sources,
-        candidate.shadow_pass,
-    );
+    let previous_dispatch = &previous.programs;
+    let active = &candidate.programs;
     let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
     paths.retain(|path| case.files.get(path) != files.get(path));
     let options_changed = previous.option_macros != candidate.option_macros;
     let image_settings_changed =
         image_settings(&previous.properties) != image_settings(&candidate.properties);
     active
-        .into_iter()
+        .iter()
         .filter(|name| {
             !cases::setup_program(name)
                 && files.contains_key(&cases::in_folder(&candidate.folder, &format!("{name}.vsh")))
@@ -824,6 +918,7 @@ fn expect_with_inputs(
                     )
                 })
         })
+        .cloned()
         .collect()
 }
 
@@ -841,25 +936,15 @@ fn expect_compute_with_inputs(
     previous: &CandidateInputs,
     candidate: &CandidateInputs,
 ) -> Vec<String> {
-    let previous_stages = cases::compute_stages_in_sources(
-        &previous.folder,
-        &case.files,
-        &previous.sources,
-        previous.shadow_pass,
-    );
-    let active = cases::compute_stages_in_sources(
-        &candidate.folder,
-        files,
-        &candidate.sources,
-        candidate.shadow_pass,
-    );
+    let previous_stages = &previous.compute_stages;
+    let active = &candidate.compute_stages;
     let mut paths: BTreeSet<String> = case.files.keys().chain(files.keys()).cloned().collect();
     paths.retain(|path| case.files.get(path) != files.get(path));
     let options_changed = previous.option_macros != candidate.option_macros;
     let image_settings_changed =
         image_settings(&previous.properties) != image_settings(&candidate.properties);
     active
-        .into_iter()
+        .iter()
         .filter(|stage| {
             let owner = cases::compute_stage_owner(stage);
             let enabled_before = previous.program_enabled(stage);
@@ -888,17 +973,22 @@ fn expect_compute_with_inputs(
                     )
                 })
         })
+        .cloned()
         .collect()
 }
 
 /// A case's pack, dimension and terrain: its unmutated load (the pack is whole whatever programs
 /// the steps edit).
 type BaseKey = (String, usize, bool);
+type BaseInputKey = (String, usize);
+const BASE_INPUT_CACHE_LIMIT: usize = 8;
 
 /// Runs made cases through `ev`, keeping each unmutated case's outcome.
 struct Runner<E> {
     ev: E,
     bases: HashMap<BaseKey, Outcome>,
+    base_inputs: HashMap<BaseInputKey, CandidateInputs>,
+    base_input_order: VecDeque<BaseInputKey>,
     size_limit: usize,
 }
 
@@ -907,6 +997,8 @@ impl<E: Evaluate> Runner<E> {
         Self {
             ev,
             bases: HashMap::new(),
+            base_inputs: HashMap::new(),
+            base_input_order: VecDeque::new(),
             size_limit,
         }
     }
@@ -933,8 +1025,27 @@ impl<E: Evaluate> Runner<E> {
                 base
             }
         };
+        let input_key = (case.pack.clone(), case.dim);
+        if !self.base_inputs.contains_key(&input_key) {
+            if self.base_inputs.len() == BASE_INPUT_CACHE_LIMIT
+                && let Some(evicted) = self.base_input_order.pop_front()
+            {
+                self.base_inputs.remove(&evicted);
+            }
+            self.base_inputs.insert(
+                input_key.clone(),
+                CandidateInputs::new(case.dim, &case.files),
+            );
+        }
+        self.base_input_order.retain(|key| key != &input_key);
+        self.base_input_order.push_back(input_key.clone());
+        let previous_inputs = self
+            .base_inputs
+            .get(&input_key)
+            .expect("base candidate inputs are cached");
         let files = case.materialize();
-        let (expected_programs, expected_compute) = expectations(case, &base, &files);
+        let (expected_programs, expected_compute) =
+            expectations_with_previous(case, &base, &files, previous_inputs);
         let request = self.request(case, expected_programs, expected_compute);
         let outcome = self.ev.eval(&files, &request);
         let info = Info::of(case, &files);
@@ -949,8 +1060,12 @@ impl<E: Evaluate> Runner<E> {
                     case,
                     &signature,
                     |candidate, candidate_files| {
-                        let (expect, expect_compute) =
-                            expectations(candidate, &base, candidate_files);
+                        let (expect, expect_compute) = expectations_with_previous(
+                            candidate,
+                            &base,
+                            candidate_files,
+                            previous_inputs,
+                        );
                         Request {
                             dim: candidate.dim,
                             flat: candidate.flat,
