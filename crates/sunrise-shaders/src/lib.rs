@@ -58,7 +58,7 @@ pub use post::{
 pub use post::{
     ComputeStageAttempt, LoaderRefusal, Post, PostProgram, STARS_BLEND, ShadowCulling, SkySwitches,
     TRANSLUCENT_BLEND, dimension_folder, dimension_folder_named, load_post, load_post_with_sizes,
-    post_program_supported, program_enabled_from_sources,
+    post_program_fallback_chains, post_program_supported, program_enabled_from_sources,
 };
 pub use preprocess::{Diagnostic, Origin, Preprocessed, include_targets, preprocess};
 pub use properties::{Entry, Note, Properties, Tonemap};

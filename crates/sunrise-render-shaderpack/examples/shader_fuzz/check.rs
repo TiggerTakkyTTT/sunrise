@@ -42,6 +42,13 @@ impl Failure {
     }
 
     pub fn signature(&self) -> String {
+        // Keep the measured size in `detail` for reports, but shrinking the same oversized
+        // stage must preserve its failure even as its byte count changes.
+        if self.invariant == "size"
+            && let Some((stage, _)) = self.detail.split_once(": ")
+        {
+            return format!("{}|{stage}", self.invariant);
+        }
         format!("{}|{}", self.invariant, self.detail)
     }
 }
@@ -85,6 +92,12 @@ pub struct Observed {
 /// standard macros and the renderer's at Mipmap Levels 4, `shaders.properties` with the
 /// features it turns on, the dimension's folder, and the game's own inputs.
 pub fn load(dir: &Path, request: &Request) -> Observed {
+    load_with_post(dir, request).0
+}
+
+/// Load a pack once and return both the checker observation and the `Post` from that same load.
+/// Fixtures that audit resources can assert against the exact sample represented by `Observed`.
+pub fn load_with_post(dir: &Path, request: &Request) -> (Observed, Post) {
     let pack = Pack::open(dir).expect("the case folder is a pack");
     let mut macros = Macros::standard();
     macros.define_renderer(4);
@@ -189,19 +202,27 @@ pub fn load(dir: &Path, request: &Request) -> Observed {
     observed.loader_refusals = post.loader_refusals.clone();
     observed.compute_stage_attempts = post.compute_stage_attempts.clone();
     observed.ungrounded_diagnostics = ungrounded_diagnostics;
-    observed
+    (observed, post)
 }
 
 fn shader_text_source(path: &str) -> bool {
     [
-        ".vsh", ".fsh", ".gsh", ".csh", ".tcs", ".tes", ".glsl", ".inc",
+        ".vsh",
+        ".fsh",
+        ".gsh",
+        ".csh",
+        ".tcs",
+        ".tes",
+        ".glsl",
+        ".inc",
+        ".settings",
     ]
     .iter()
     .any(|extension| path.ends_with(extension))
 }
 
 fn source_location_has_subject(line: u32, text: &str) -> bool {
-    line > 0 && line as usize <= text.lines().count().max(1)
+    line == 0 || line as usize <= text.lines().count().max(1)
 }
 
 fn located_note_has_subject(note: &str, source_texts: &BTreeMap<String, String>) -> bool {
@@ -209,12 +230,27 @@ fn located_note_has_subject(note: &str, source_texts: &BTreeMap<String, String>)
         let Some(rest) = note.strip_prefix(&format!("{path}:")) else {
             return false;
         };
-        let Some((line, suffix)) = rest.split_once(": ") else {
+        let rest = rest.trim_start();
+        if rest.is_empty() {
             return false;
+        }
+        let Some((line, suffix)) = rest.split_once(':') else {
+            // Some preprocessor and file-level diagnostics identify only their source file.
+            return true;
         };
-        line.parse::<u32>()
-            .ok()
-            .is_some_and(|line| !suffix.is_empty() && source_location_has_subject(line, text))
+        let Ok(line) = line.trim().parse::<u32>() else {
+            // `file:message` has a source subject even though it has no line location.
+            return true;
+        };
+
+        let suffix = suffix.trim_start();
+        let message = match suffix.split_once(':') {
+            // Naga-style diagnostics may report `file:line:column: message`.
+            Some((column, message)) if column.trim().parse::<u32>().is_ok() => message.trim_start(),
+            // The existing preprocessor form is `file:line: message`.
+            _ => suffix,
+        };
+        !message.trim().is_empty() && source_location_has_subject(line, text)
     })
 }
 
@@ -388,6 +424,16 @@ fn hash(value: &dyn std::fmt::Debug) -> u64 {
     w.0.finish()
 }
 
+/// The compute interface and dispatch settings that determine an observed compute program.
+fn compute_observation(c: &sunrise_shaders::ComputeProgram) -> impl std::fmt::Debug + '_ {
+    (
+        &c.interface,
+        c.work_groups,
+        c.work_groups_render,
+        c.indirect,
+    )
+}
+
 pub fn observe(
     post: &Post,
     notes: Vec<String>,
@@ -467,9 +513,10 @@ pub fn observe(
                 seen.compute_loaded.push(name.clone());
             }
             modules.push((format!("{label} compute {name}"), &c.module));
-            let groups = (&c.interface, c.work_groups, c.work_groups_render);
-            seen.pieces
-                .push((format!("{label} compute {name} interface"), hash(&groups)));
+            seen.pieces.push((
+                format!("{label} compute {name} interface"),
+                hash(&compute_observation(c)),
+            ));
             seen.pieces
                 .push((format!("{label} compute {name} notes"), hash(&c.notes)));
         }
@@ -605,10 +652,13 @@ pub fn judge(
                     }
                 }
                 for stage in &request.expect_compute {
+                    let owner = crate::cases::compute_stage_owner(stage);
+                    if crate::cases::is_shadowcomp_program(owner) && !observed.shadow_pass {
+                        continue;
+                    }
                     if observed.compute_loaded.contains(stage) {
                         continue;
                     }
-                    let owner = crate::cases::compute_stage_owner(stage);
                     let stage_path = if observed.folder.is_empty() {
                         format!("{stage}.csh")
                     } else {
@@ -900,15 +950,31 @@ mod tests {
             .iter()
             .map(|entry| (entry.key.as_str(), entry.value.as_str()))
             .collect();
-        let sources = BTreeMap::from([("composite.fsh".to_owned(), "void main() {}\n".to_owned())]);
+        let sources = BTreeMap::from([
+            ("composite.fsh".to_owned(), "void main() {}\n".to_owned()),
+            ("shaders.settings".to_owned(), "#define FOO\n".to_owned()),
+        ]);
         assert!(feature_note_has_subject(
             "the pack requires `MISSING_FEATURE`, which is not supported yet",
             &properties
         ));
-        assert!(located_note_has_subject(
+        for note in [
             "composite.fsh:1: bad token",
+            "composite.fsh:1:3: bad token",
+            "composite.fsh: bad token",
+            "composite.fsh:bad token",
+            "composite.fsh:0: bad token",
+            "composite.fsh:0:3: bad token",
+            "shaders.settings:1: bad setting",
+        ] {
+            assert!(located_note_has_subject(note, &sources), "{note}");
+        }
+        assert!(shader_text_source("shaders.settings"));
+        assert!(!located_note_has_subject(
+            "composite.fsh:2: bad token",
             &sources
         ));
+        assert!(!located_note_has_subject("composite.fsh:1:", &sources));
         assert!(post_note_has_subject(
             "`image.bad`: not an image",
             &property_keys,
@@ -985,6 +1051,34 @@ mod tests {
                 "composite.fsh: 17 bytes after preprocessing exceeds 16 bytes"
             )]
         );
+
+        let smaller = oversized(&[("composite.fsh".to_owned(), 17)].into(), 16).remove(0);
+        let larger = oversized(&[("composite.fsh".to_owned(), 23)].into(), 16).remove(0);
+        assert_ne!(smaller.detail, larger.detail);
+        assert_eq!(smaller.signature(), larger.signature());
+        let another_stage = oversized(&[("final.fsh".to_owned(), 17)].into(), 16).remove(0);
+        assert_ne!(smaller.signature(), another_stage.signature());
+    }
+
+    #[test]
+    fn indirect_compute_dispatch_is_part_of_observed_output() {
+        let compute = |indirect| sunrise_shaders::ComputeProgram {
+            module: naga::Module::default(),
+            interface: Default::default(),
+            notes: Vec::new(),
+            work_groups: None,
+            work_groups_render: [1.0, 1.0],
+            indirect,
+        };
+        let direct = compute(None);
+        let indirect = compute(Some(sunrise_shaders::Indirect {
+            buffer: 2,
+            offset: 16,
+        }));
+        assert_ne!(
+            hash(&compute_observation(&direct)),
+            hash(&compute_observation(&indirect))
+        );
     }
 
     #[test]
@@ -1055,6 +1149,116 @@ mod tests {
                 "{property}"
             );
         }
+    }
+
+    #[test]
+    fn an_authored_shader_diagnostic_is_grounded_by_its_file_and_line() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "sunrise-shader-fuzz-diagnostic-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = BTreeMap::from([
+            (
+                "composite.vsh".to_owned(),
+                b"#version 120\nvoid main() { gl_Position = gl_Vertex; }".to_vec(),
+            ),
+            (
+                "composite.fsh".to_owned(),
+                b"#version 120\n#include \"lib/format.settings\"\nvoid main() { gl_FragColor = vec4(1.0); }".to_vec(),
+            ),
+            (
+                "lib/format.settings".to_owned(),
+                b"const int colortex0Format = XYZ;\n".to_vec(),
+            ),
+        ]);
+        crate::write_pack(&dir, &files).unwrap();
+
+        let observed = load(&dir, &request(&[]));
+        assert!(
+            observed
+                .notes
+                .iter()
+                .any(|note| note.starts_with("lib/format.settings:1:")),
+            "expected the loader's authored format diagnostic, got {:?}",
+            observed.notes
+        );
+        assert!(
+            observed.ungrounded_diagnostics.is_empty(),
+            "authored diagnostic was misclassified: {:?}",
+            observed.ungrounded_diagnostics
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn authored_refusals_and_file_level_warnings_pass_attribution() {
+        let load_fragment = |fragment: &[u8]| {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "sunrise-shader-fuzz-authored-note-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let files = BTreeMap::from([
+                (
+                    "composite.vsh".to_owned(),
+                    b"#version 120\nvoid main() { gl_Position = gl_Vertex; }".to_vec(),
+                ),
+                ("composite.fsh".to_owned(), fragment.to_vec()),
+            ]);
+            crate::write_pack(&dir, &files).unwrap();
+            let observed = load(&dir, &request(&[]));
+            std::fs::remove_dir_all(dir).unwrap();
+            observed
+        };
+
+        let refused = load_fragment(b"#version 120\nvoid main() { gl_FragColor = vec4(1.0) }\n");
+        assert!(
+            refused
+                .notes
+                .iter()
+                .any(|note| note.starts_with("composite.fsh:2:")),
+            "expected a source-located compiler diagnostic, got {:?}",
+            refused.notes
+        );
+        assert!(
+            refused
+                .refusals
+                .iter()
+                .any(|note| note == "composite: skipped"),
+            "expected the invalid program to be refused, got {:?}",
+            refused.notes
+        );
+        assert!(
+            refused.ungrounded_diagnostics.is_empty(),
+            "compiler refusal was misclassified: {:?}",
+            refused.ungrounded_diagnostics
+        );
+
+        let warned =
+            load_fragment(b"#version 120\nvoid main() { gl_FragColor = vec4(1.0); }\n#if 1\n");
+        assert!(
+            warned
+                .notes
+                .iter()
+                .any(|note| note.starts_with("composite.fsh:0:")),
+            "expected the authored file-level warning, got {:?}",
+            warned.notes
+        );
+        assert!(
+            warned.ungrounded_diagnostics.is_empty(),
+            "file-level warning was misclassified: {:?}",
+            warned.ungrounded_diagnostics
+        );
     }
 
     #[test]

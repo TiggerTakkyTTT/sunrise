@@ -239,6 +239,38 @@ const GROUPS: [(Group, &str); 6] = [
     (Group::Final, "final"),
 ];
 
+/// The loader's ordered `gbuffers` fallback chains, including the optional one-program slots.
+/// Tools that predict which pack program the loader will try use this list instead of rebuilding
+/// the chains from filenames. Shadow chains are included; callers gate them on the shadow pass.
+pub fn post_program_fallback_chains() -> &'static [&'static [&'static str]] {
+    static CHAINS: &[&[&str]] = &[
+        &WATER,
+        &TERRAIN,
+        &TERRAIN_SOLID,
+        &TERRAIN_CUTOUT,
+        &LINES,
+        &SKY,
+        &SKY_TEXTURED,
+        &ENTITIES,
+        &BLOCK,
+        &CLOUDS,
+        &HAND,
+        &HAND_WATER,
+        &WEATHER,
+        &ENTITIES_TRANSLUCENT,
+        &BEACON_BEAM,
+        &PARTICLES,
+        &["gbuffers_damagedblock"],
+        &["gbuffers_block_translucent"],
+        &["gbuffers_particles_translucent"],
+        &["shadow"],
+        &["shadow_water", "shadow"],
+        &["shadow_entities", "shadow"],
+        &["shadow_block", "shadow"],
+    ];
+    CHAINS
+}
+
 /// Whether the post and gbuffers loader has a path that can consider `name`.
 ///
 /// Shader fuzzing uses this to avoid treating arbitrary stage pairs as programs Sunrise should
@@ -259,30 +291,9 @@ pub fn post_program_supported(name: &str) -> bool {
         }
     }) || name == "shadowcomp"
         || numbered("shadowcomp")
-        || [
-            WATER.as_slice(),
-            TERRAIN.as_slice(),
-            TERRAIN_SOLID.as_slice(),
-            TERRAIN_CUTOUT.as_slice(),
-            LINES.as_slice(),
-            SKY.as_slice(),
-            SKY_TEXTURED.as_slice(),
-            ENTITIES.as_slice(),
-            BLOCK.as_slice(),
-            CLOUDS.as_slice(),
-            HAND.as_slice(),
-            HAND_WATER.as_slice(),
-            WEATHER.as_slice(),
-            ENTITIES_TRANSLUCENT.as_slice(),
-            BEACON_BEAM.as_slice(),
-            PARTICLES.as_slice(),
-            &["gbuffers_damagedblock"],
-            &["gbuffers_block_translucent"],
-            &["gbuffers_particles_translucent"],
-            &["shadow", "shadow_water", "shadow_entities", "shadow_block"],
-        ]
-        .iter()
-        .any(|chain| chain.contains(&name))
+        || post_program_fallback_chains()
+            .iter()
+            .any(|chain| chain.contains(&name))
 }
 
 /// The stars' blend: added to the sky, their own alpha replacing the buffer's, as vanilla draws
@@ -2408,6 +2419,16 @@ mod tests {
 
     #[test]
     fn size_audit_counts_image_qualifiers_added_at_the_limit() {
+        // The preprocessed fixture and its expected image-qualified form are independent
+        // translated inputs: the limit and audited byte count must not come from preprocess().
+        const BEFORE_IMAGE_QUALIFIER: &str =
+            "\nlayout(local_size_x = 1) in;\nwriteonly uniform uimage3D voxels;\nvoid main() {}\n";
+        const AFTER_IMAGE_QUALIFIER: &str = "\nlayout(local_size_x = 1) in;\nlayout(r32ui) writeonly uniform uimage3D voxels;\nvoid main() {}\n";
+        const LIMIT: usize = 80;
+        const EXPECTED_BYTES: usize = 94;
+        assert_eq!(BEFORE_IMAGE_QUALIFIER.len(), LIMIT);
+        assert_eq!(AFTER_IMAGE_QUALIFIER.len(), EXPECTED_BYTES);
+
         let source = "#version 430\nlayout(local_size_x = 1) in;\n\
                       writeonly uniform uimage3D voxels;\nvoid main() {}\n";
         let pack = Pack::from_zip_bytes(
@@ -2416,9 +2437,6 @@ mod tests {
         )
         .unwrap();
         let path = "composite99.csh";
-        let limit = crate::preprocess::preprocess(&pack, path, &Macros::standard())
-            .code()
-            .len();
         let properties = Properties::parse(
             "image.voxels = none RED_INTEGER R32UI UNSIGNED_INT false false 4 4 4\n\
              program.composite99.enabled = false\n",
@@ -2433,11 +2451,10 @@ mod tests {
         );
 
         assert_eq!(
-            sizes[path],
-            limit + "layout(r32ui) ".len(),
+            sizes[path], EXPECTED_BYTES,
             "the added qualifier pushes the stage across its pre-rewrite size limit"
         );
-        assert!(sizes[path] > limit, "{sizes:?}");
+        assert!(sizes[path] > LIMIT, "{sizes:?}");
     }
 
     #[test]
